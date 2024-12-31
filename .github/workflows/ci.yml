@@ -60,10 +60,6 @@ jobs:
             target: ocaml.5.2
             ocaml-compiler: 5.2.x
             build: opam exec -- dune build
-          - os: ubuntu-latest
-            target: ocaml.5.3
-            ocaml-compiler: 5.3.0~rc1
-            build: opam exec -- dune build
 
     runs-on: ${{matrix.os}}
 
