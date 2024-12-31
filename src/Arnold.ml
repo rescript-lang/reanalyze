@@ -906,7 +906,8 @@ module Compile = struct
     | Texp_tuple expressions | Texp_array expressions ->
       expressions |> List.map (expression ~ctx) |> Command.unorderedSequence
     | Texp_assert _ -> Command.nothing
-    | Texp_try (e, cases) ->
+    | Texp_try _ ->
+      let e, cases = expr.exp_desc |> Compat.getTexpTry in
       let cE = e |> expression ~ctx in
       let cCases = cases |> List.map (case ~ctx) |> Command.nondet in
       let open Command in

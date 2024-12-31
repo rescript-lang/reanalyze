@@ -20,10 +20,13 @@ let tagIsOneOfTheGenTypeAnnotations s =
 let rec getAttributePayload checkText (attributes : CL.Typedtree.attributes) =
   let rec fromExpr (expr : CL.Parsetree.expression) =
     match expr with
-    | {pexp_desc = Pexp_constant (Pconst_string _ as cs)} ->
-      Some (StringPayload (cs |> Compat.getStringValue))
-    | {pexp_desc = Pexp_constant (Pconst_integer (n, _))} -> Some (IntPayload n)
-    | {pexp_desc = Pexp_constant (Pconst_float (s, _))} -> Some (FloatPayload s)
+    | { pexp_desc = Pexp_constant c} ->
+      let desc = Compat.constant_desc c in
+      (match desc with
+      | Pconst_string _ -> Some (StringPayload (desc |> Compat.getStringValue))
+      | Pconst_integer (n, _) -> Some (IntPayload n)
+      | Pconst_float (s, _) -> Some (FloatPayload s)
+      | _ -> None)
     | {
      pexp_desc = Pexp_construct ({txt = Lident (("true" | "false") as s)}, _);
      _;
