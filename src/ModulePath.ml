@@ -2,9 +2,9 @@ open Common
 module NameMap = Map.Make (Name)
 
 (* Keep track of the module path while traversing with Tast_mapper *)
-type t = {aliases : Path.t NameMap.t; loc : CL.Location.t; path : Path.t}
+type t = {aliases : Path.t NameMap.t; loc : Location.t; path : Path.t}
 
-let initial = ({aliases = NameMap.empty; loc = CL.Location.none; path = []} : t)
+let initial = ({aliases = NameMap.empty; loc = Location.none; path = []} : t)
 let current = (ref initial : t ref)
 let init () = current := initial
 

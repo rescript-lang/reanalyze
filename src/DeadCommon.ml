@@ -26,7 +26,7 @@ end
 module Current = struct
   let bindings = ref PosSet.empty
 
-  let lastBinding = ref CL.Location.none
+  let lastBinding = ref Location.none
 
   (** max end position of a value reported dead *)
   let maxValuePosEnd = ref Lexing.dummy_pos
@@ -133,7 +133,7 @@ type posAdjustment = FirstVariant | OtherVariant | Nothing
 
 type decl = {
   declKind : DeclKind.t;
-  moduleLoc : CL.Location.t;
+  moduleLoc : Location.t;
   posAdjustment : posAdjustment;
   path : Path.t;
   pos : Lexing.position;
@@ -178,13 +178,13 @@ let declGetLoc decl =
       {decl.posStart with pos_cnum = cnumWithOffset}
     else decl.posStart
   in
-  {CL.Location.loc_start; loc_end = decl.posEnd; loc_ghost = false}
+  {Location.loc_start; loc_end = decl.posEnd; loc_ghost = false}
 
-let addValueReference ~addFileReference ~(locFrom : CL.Location.t)
-    ~(locTo : CL.Location.t) =
+let addValueReference ~addFileReference ~(locFrom : Location.t)
+    ~(locTo : Location.t) =
   let lastBinding = !Current.lastBinding in
   let locFrom =
-    match lastBinding = CL.Location.none with
+    match lastBinding = Location.none with
     | true -> locFrom
     | false -> lastBinding
   in
@@ -260,7 +260,7 @@ let iterFilesFromRootsToLeaves iterFun =
            |> FileSet.iter (fun fileName ->
                   let pos = {Lexing.dummy_pos with pos_fname = fileName} in
                   let loc =
-                    {CL.Location.none with loc_start = pos; loc_end = pos}
+                    {Location.none with loc_start = pos; loc_end = pos}
                   in
                   if Config.warnOnCircularDependencies then
                     Log_.warning ~loc ~name:"Warning Dead Analysis Cycle"
@@ -330,10 +330,10 @@ module ProcessDeadAnnotations = struct
       pos |> annotateLive
 
   let collectExportLocations ~doGenType =
-    let super = CL.Tast_mapper.default in
+    let super = Tast_mapper.default in
     let currentlyDisableWarnings = ref false in
     let value_binding self
-        ({vb_attributes; vb_pat} as value_binding : CL.Typedtree.value_binding)
+        ({vb_attributes; vb_pat} as value_binding : Typedtree.value_binding)
         =
       (match vb_pat.pat_desc with
       #if OCAML_VERSION < (5, 2, 0)
@@ -345,16 +345,16 @@ module ProcessDeadAnnotations = struct
       #endif
         if !currentlyDisableWarnings then pos |> annotateLive;
         vb_attributes
-        |> processAttributes ~doGenType ~name:(id |> CL.Ident.name) ~pos
+        |> processAttributes ~doGenType ~name:(id |> Ident.name) ~pos
       | _ -> ());
       super.value_binding self value_binding
     in
-    let type_kind toplevelAttrs self (typeKind : CL.Typedtree.type_kind) =
+    let type_kind toplevelAttrs self (typeKind : Typedtree.type_kind) =
       (match typeKind with
       | Ttype_record labelDeclarations ->
         labelDeclarations
         |> List.iter
-             (fun ({ld_attributes; ld_loc} : CL.Typedtree.label_declaration) ->
+             (fun ({ld_attributes; ld_loc} : Typedtree.label_declaration) ->
                toplevelAttrs @ ld_attributes
                |> processAttributes ~doGenType:false ~name:""
                     ~pos:ld_loc.loc_start)
@@ -362,7 +362,7 @@ module ProcessDeadAnnotations = struct
         constructorDeclarations
         |> List.iter
              (fun
-               ({cd_attributes; cd_loc} : CL.Typedtree.constructor_declaration)
+               ({cd_attributes; cd_loc} : Typedtree.constructor_declaration)
              ->
                toplevelAttrs @ cd_attributes
                |> processAttributes ~doGenType:false ~name:""
@@ -370,7 +370,7 @@ module ProcessDeadAnnotations = struct
       | _ -> ());
       super.type_kind self typeKind
     in
-    let type_declaration self (typeDeclaration : CL.Typedtree.type_declaration)
+    let type_declaration self (typeDeclaration : Typedtree.type_declaration)
         =
       let attributes = typeDeclaration.typ_attributes in
       let _ = type_kind attributes self typeDeclaration.typ_kind in
@@ -379,13 +379,13 @@ module ProcessDeadAnnotations = struct
     let value_description self
         ({val_attributes; val_id; val_val = {val_loc = {loc_start = pos}}} as
          value_description :
-          CL.Typedtree.value_description) =
+          Typedtree.value_description) =
       if !currentlyDisableWarnings then pos |> annotateLive;
       val_attributes
-      |> processAttributes ~doGenType ~name:(val_id |> CL.Ident.name) ~pos;
+      |> processAttributes ~doGenType ~name:(val_id |> Ident.name) ~pos;
       super.value_description self value_description
     in
-    let structure_item self (item : CL.Typedtree.structure_item) =
+    let structure_item self (item : Typedtree.structure_item) =
       (match item.str_desc with
       | Tstr_attribute attribute
         when [attribute] |> Annotation.isOcamlSuppressDeadWarning ->
@@ -393,13 +393,13 @@ module ProcessDeadAnnotations = struct
       | _ -> ());
       super.structure_item self item
     in
-    let structure self (structure : CL.Typedtree.structure) =
+    let structure self (structure : Typedtree.structure) =
       let oldDisableWarnings = !currentlyDisableWarnings in
       super.structure self structure |> ignore;
       currentlyDisableWarnings := oldDisableWarnings;
       structure
     in
-    let signature_item self (item : CL.Typedtree.signature_item) =
+    let signature_item self (item : Typedtree.signature_item) =
       (match item.sig_desc with
       | Tsig_attribute attribute
         when [attribute] |> Annotation.isOcamlSuppressDeadWarning ->
@@ -407,7 +407,7 @@ module ProcessDeadAnnotations = struct
       | _ -> ());
       super.signature_item self item
     in
-    let signature self (signature : CL.Typedtree.signature) =
+    let signature self (signature : Typedtree.signature) =
       let oldDisableWarnings = !currentlyDisableWarnings in
       super.signature self signature |> ignore;
       currentlyDisableWarnings := oldDisableWarnings;
@@ -445,7 +445,7 @@ let getPosAnnotation decl =
   | true -> decl.posEnd
   | false -> decl.posStart
 
-let addDeclaration_ ?posEnd ?posStart ~declKind ~path ~(loc : CL.Location.t)
+let addDeclaration_ ?posEnd ?posStart ~declKind ~path ~(loc : Location.t)
     ?(posAdjustment = Nothing) ~moduleLoc (name : Name.t) =
   let pos = loc.loc_start in
   let posStart =
@@ -482,7 +482,7 @@ let addDeclaration_ ?posEnd ?posStart ~declKind ~path ~(loc : CL.Location.t)
     in
     PosHash.replace decls pos decl)
 
-let addValueDeclaration ?(isToplevel = true) ~(loc : CL.Location.t) ~moduleLoc
+let addValueDeclaration ?(isToplevel = true) ~(loc : Location.t) ~moduleLoc
     ?(optionalArgs = OptionalArgs.empty) ~path ~sideEffects name =
   name
   |> addDeclaration_

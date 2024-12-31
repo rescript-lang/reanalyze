@@ -10,23 +10,6 @@ npm install
 npm run build
 ```
 
-To build targeting 4.06 compiler libs (needed for ReScript projects) whatever the compiler version used:
-
-```
-npm run build406
-```
-
-
-## Test reanalyze
-
-Make sure to always run the tests before submitting any changes (CI usually takes
-longer to give you feedback).
-
-```
-npm run build406
-npm test
-```
-
 ## Releases (for Maintainers)
 
 The project is compatible with the [`npm

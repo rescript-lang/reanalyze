@@ -9,7 +9,7 @@ let markDead ~isType ~loc path =
     | Some _ -> ()
     | _ -> Hashtbl.replace table moduleName (false, loc)
 
-let markLive ~isType ~(loc : CL.Location.t) path =
+let markLive ~isType ~(loc : Location.t) path =
   if active () then
     let moduleName = path |> Common.Path.toModuleName ~isType in
     match Hashtbl.find_opt table moduleName with
@@ -28,7 +28,7 @@ let checkModuleDead ~fileName:pos_fname moduleName =
           let pos =
             {Lexing.pos_fname; pos_lnum = 0; pos_bol = 0; pos_cnum = 0}
           in
-          {CL.Location.loc_start = pos; loc_end = pos; loc_ghost = false}
+          {Location.loc_start = pos; loc_end = pos; loc_ghost = false}
         else loc
       in
       Log_.warning ~loc ~name:"Warning Dead Module" (fun ppf () ->

@@ -69,7 +69,7 @@ module Event = struct
     | DoesNotRaise of t list (* DoesNotRaise(events) where events come from an expression *)
     | Raises  (** raise E *)
 
-  and t = {exceptions : Exceptions.t; kind : kind; loc : CL.Location.t}
+  and t = {exceptions : Exceptions.t; kind : kind; loc : Location.t}
 
   let rec print ppf event =
     match event with
@@ -168,8 +168,8 @@ end
 module Checks = struct
   type check = {
     events : Event.t list;
-    loc : CL.Location.t;
-    locFull : CL.Location.t;
+    loc : Location.t;
+    locFull : Location.t;
     moduleName : string;
     name : string;
     exceptions : Exceptions.t;
@@ -224,7 +224,7 @@ end
 
 let traverseAst () =
   ModulePath.init ();
-  let super = CL.Tast_mapper.default in
+  let super = Tast_mapper.default in
   let currentId = ref "" in
   let currentEvents = ref [] in
   let exceptionsOfPatterns patterns =
@@ -232,24 +232,24 @@ let traverseAst () =
     |> List.fold_left
          (fun acc desc ->
            match desc with
-           | CL.Typedtree.Tpat_construct _ ->
+           | Typedtree.Tpat_construct _ ->
              Exceptions.add (Exn.fromLid (Compat.unboxPatCstrTxt desc)) acc
            | _ -> acc)
          Exceptions.empty
   in
-  let iterExpr self e = self.CL.Tast_mapper.expr self e |> ignore in
+  let iterExpr self e = self.Tast_mapper.expr self e |> ignore in
   let iterExprOpt self eo =
     match eo with None -> () | Some e -> e |> iterExpr self
   in
-  let iterPat self p = self.CL.Tast_mapper.pat self p |> ignore in
+  let iterPat self p = self.Tast_mapper.pat self p |> ignore in
   let iterCases self cases =
     cases
     |> List.iter (fun case ->
-           case.CL.Typedtree.c_lhs |> iterPat self;
+           case.Typedtree.c_lhs |> iterPat self;
            case.c_guard |> iterExprOpt self;
            case.c_rhs |> iterExpr self)
   in
-  let isRaise : CL.Types.value_description -> bool = function
+  let isRaise : Types.value_description -> bool = function
     | {
         val_kind =
           Val_prim
@@ -262,19 +262,19 @@ let traverseAst () =
       true
     | _ -> false
   in
-  let isApply : CL.Types.value_description -> bool = function
+  let isApply : Types.value_description -> bool = function
     | {val_kind = Val_prim {prim_name = "%apply"}} -> true
     | _ -> false
   in
-  let isRevapply : CL.Types.value_description -> bool = function
+  let isRevapply : Types.value_description -> bool = function
     | {val_kind = Val_prim {prim_name = "%revapply"}} -> true
     | _ -> false
   in
   let raiseArgs args =
     match args with
-    | [(_, Some {CL.Typedtree.exp_desc = Texp_construct ({txt}, _, _)})] ->
+    | [(_, Some {Typedtree.exp_desc = Texp_construct ({txt}, _, _)})] ->
       [Exn.fromLid txt] |> Exceptions.fromList
-    | [(_, Some {CL.Typedtree.exp_desc = Texp_ident _})] ->
+    | [(_, Some {Typedtree.exp_desc = Texp_ident _})] ->
       [Exn.fromString "genericException"] |> Exceptions.fromList
     | _ -> [Exn.fromString "TODO_from_raise1"] |> Exceptions.fromList
   in
@@ -286,7 +286,7 @@ let traverseAst () =
            || s = "DoNoRaise" || s = "doNotraise")
     <> None
   in
-  let expr (self : CL.Tast_mapper.mapper) (expr : CL.Typedtree.expression) =
+  let expr (self : Tast_mapper.mapper) (expr : Typedtree.expression) =
     let loc = expr.exp_loc in
     let isDoesNoRaise = expr.exp_attributes |> doesNotRaise in
     let oldEvents = !currentEvents in
@@ -355,7 +355,7 @@ let traverseAst () =
       let e, cases = expr.exp_desc |> Compat.getTexpTry in
       let exceptions =
         cases
-        |> List.map (fun case -> case.CL.Typedtree.c_lhs.pat_desc)
+        |> List.map (fun case -> case.Typedtree.c_lhs.pat_desc)
         |> exceptionsOfPatterns
       in
       let oldEvents = !currentEvents in
@@ -387,7 +387,7 @@ let traverseAst () =
       | Annotation.ConstructPayload s when s <> "::" ->
         [Exn.fromString s] |> Exceptions.fromList
       | Annotation.IdentPayload s ->
-        [Exn.fromString (s |> CL.Longident.flatten |> String.concat ".")]
+        [Exn.fromString (s |> Longident.flatten |> String.concat ".")]
         |> Exceptions.fromList
       | Annotation.TuplePayload tuple ->
         tuple
@@ -400,8 +400,8 @@ let traverseAst () =
     | None -> Exceptions.empty
     | Some payload -> payload |> getExceptions
   in
-  let toplevelEval (self : CL.Tast_mapper.mapper)
-      (expr : CL.Typedtree.expression) attributes =
+  let toplevelEval (self : Tast_mapper.mapper)
+      (expr : Typedtree.expression) attributes =
     let oldId = !currentId in
     let oldEvents = !currentEvents in
     let name = "Toplevel expression" in
@@ -415,8 +415,8 @@ let traverseAst () =
     currentId := oldId;
     currentEvents := oldEvents
   in
-  let structure_item (self : CL.Tast_mapper.mapper)
-      (structureItem : CL.Typedtree.structure_item) =
+  let structure_item (self : Tast_mapper.mapper)
+      (structureItem : Typedtree.structure_item) =
     let oldModulePath = ModulePath.getCurrent () in
     (match structureItem.str_desc with
     | Tstr_eval (expr, attributes) -> toplevelEval self expr attributes
@@ -439,8 +439,8 @@ let traverseAst () =
     | _ -> ());
     result
   in
-  let value_binding (self : CL.Tast_mapper.mapper)
-      (vb : CL.Typedtree.value_binding) =
+  let value_binding (self : Tast_mapper.mapper)
+      (vb : Typedtree.value_binding) =
     let oldId = !currentId in
     let oldEvents = !currentEvents in
     let isFunction =
@@ -477,7 +477,7 @@ let traverseAst () =
     | Tpat_construct _
       when isToplevel && (not vb.vb_loc.loc_ghost)
            && Compat.unboxPatCstrTxt vb.vb_pat.pat_desc
-              = CL.Longident.Lident "()" ->
+              = Longident.Lident "()" ->
       processBinding "()"
     #if OCAML_VERSION < (5, 2, 0)
     | Tpat_var (id, {loc = {loc_ghost}})
@@ -486,17 +486,17 @@ let traverseAst () =
     #endif
       when (isFunction || isToplevel) && (not loc_ghost)
            && not vb.vb_loc.loc_ghost ->
-      processBinding (id |> CL.Ident.name)
+      processBinding (id |> Ident.name)
     | _ -> super.value_binding self vb
   in
-  let open CL.Tast_mapper in
+  let open Tast_mapper in
   {super with expr; value_binding; structure_item}
 
-let processStructure (structure : CL.Typedtree.structure) =
+let processStructure (structure : Typedtree.structure) =
   let traverseAst = traverseAst () in
   structure |> traverseAst.structure traverseAst |> ignore
 
-let processCmt (cmt_infos : CL.Cmt_format.cmt_infos) =
+let processCmt (cmt_infos : Cmt_format.cmt_infos) =
   match cmt_infos.cmt_annots with
   | Interface _ -> ()
   | Implementation structure ->

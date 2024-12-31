@@ -6,7 +6,7 @@ let nativeFilePath fname =
 
 let rec interface items =
   match items with
-  | {CL.Typedtree.sig_loc} :: rest -> (
+  | {Typedtree.sig_loc} :: rest -> (
     match
       not (Sys.file_exists (nativeFilePath sig_loc.loc_start.pos_fname))
     with
@@ -16,7 +16,7 @@ let rec interface items =
 
 let rec implementation items =
   match items with
-  | {CL.Typedtree.str_loc} :: rest -> (
+  | {Typedtree.str_loc} :: rest -> (
     match
       not (Sys.file_exists (nativeFilePath str_loc.loc_start.pos_fname))
     with
@@ -26,7 +26,7 @@ let rec implementation items =
 
 let cmt cmt_annots =
   match cmt_annots with
-  | CL.Cmt_format.Interface signature ->
+  | Cmt_format.Interface signature ->
     if !Common.Cli.debug && signature.sig_items = [] then
       Log_.item "Interface %d@." (signature.sig_items |> List.length);
     interface signature.sig_items

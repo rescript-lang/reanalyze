@@ -31,7 +31,7 @@ let pp ~exnTable ppf exceptions =
       | Some locSet ->
         let positions =
           locSet |> Common.LocSet.elements
-          |> List.map (fun loc -> loc.CL.Location.loc_start)
+          |> List.map (fun loc -> loc.Location.loc_start)
         in
         Format.fprintf ppf "%s@{<info>%s@} (@{<filename>%s@})" separator name
           (positions |> List.map posToString |> String.concat " ")

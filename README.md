@@ -176,15 +176,6 @@ npm add --save-dev reanalyze
 
 ## Build From Sources
 
-
-### Build for ReScript
-
-```sh
-opam install dune
-npm run build406
-# _build/default/src/Reanalyze.exe
-```
-
 ### Build for OCaml native projects using dune
 
 ```sh
@@ -210,5 +201,5 @@ Make sure that `dune` builds both `.cmt` and `.cmti` files by enabling bytecode 
 This project is itself written in OCaml and can be analyzed as follows.
 ```sh
 dune build
-./_build/default/src/Reanalyze.exe -suppress src/compiler-libs-406 -dce-cmt _build
+./_build/default/src/Reanalyze.exe -dce-cmt _build
 ```

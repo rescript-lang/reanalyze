@@ -11,7 +11,7 @@ module Kind = struct
       (Tuple (arr |> Array.to_list) |> toString) ^ " => " ^ (t |> toString)
 
   let extractDeclTypes typ =
-    let rec extract acc (typ : CL.Types.type_expr) =
+    let rec extract acc (typ : Types.type_expr) =
       match Compat.get_desc typ with
       | Tlink t -> t |> extract acc
       | Tsubst _ -> Compat.get_desc typ |> Compat.getTSubst |> extract acc
@@ -20,7 +20,7 @@ module Kind = struct
     in
     typ |> extract []
 
-  let rec fromType (typ : CL.Types.type_expr) =
+  let rec fromType (typ : Types.type_expr) =
     match Compat.get_desc typ with
     | Tlink t -> t |> fromType
     | Tsubst _ -> Compat.get_desc typ |> Compat.getTSubst |> fromType
