@@ -136,7 +136,7 @@ module Stats = struct
         Format.fprintf ppf
           "@{<error>%s@} can only be called directly, or passed as labeled \
            argument"
-          (CL.Path.name path))
+          (Path.name path))
 
   let logHygieneMustHaveNamedArgument ~label ~loc =
     incr nHygieneErrors;
@@ -164,7 +164,7 @@ module Progress = struct
 end
 
 module Call = struct
-  type progressFunction = CL.Path.t
+  type progressFunction = Path.t
 
   type t =
     | FunctionCall of FunctionCall.t
@@ -172,7 +172,7 @@ module Call = struct
 
   let toString call =
     match call with
-    | ProgressFunction progressFunction -> "+" ^ CL.Path.name progressFunction
+    | ProgressFunction progressFunction -> "+" ^ Path.name progressFunction
     | FunctionCall functionCall -> FunctionCall.toString functionCall
 end
 
@@ -210,7 +210,7 @@ module Trace = struct
   let rec toString trace =
     match trace with
     | Tcall (ProgressFunction progressFunction, progress) ->
-      CL.Path.name progressFunction ^ ":" ^ Progress.toString progress
+      Path.name progressFunction ^ ":" ^ Progress.toString progress
     | Tcall (FunctionCall functionCall, progress) ->
       FunctionCall.toString functionCall ^ ":" ^ Progress.toString progress
     | Tnondet traces ->
@@ -335,14 +335,14 @@ module Command = struct
   type retOption = Trace.retOption
 
   type t =
-    | Call of Call.t * CL.Location.t
+    | Call of Call.t * Location.t
     | ConstrOption of retOption
     | Nondet of t list
     | Nothing
     | Sequence of t list
     | SwitchOption of {
         functionCall : FunctionCall.t;
-        loc : CL.Location.t;
+        loc : Location.t;
         some : t;
         none : t;
       }
@@ -454,7 +454,7 @@ module FunctionTable = struct
     try Hashtbl.find tbl functionName with Not_found -> assert false
 
   let isInFunctionInTable ~functionTable path =
-    Hashtbl.mem functionTable (CL.Path.name path)
+    Hashtbl.mem functionTable (Path.name path)
 
   let addFunction ~functionName (tbl : t) =
     if Hashtbl.mem tbl functionName then assert false;
@@ -480,18 +480,18 @@ end
 
 module FindFunctionsCalled = struct
   let traverseExpr ~callees =
-    let super = CL.Tast_mapper.default in
-    let expr (self : CL.Tast_mapper.mapper) (e : CL.Typedtree.expression) =
+    let super = Tast_mapper.default in
+    let expr (self : Tast_mapper.mapper) (e : Typedtree.expression) =
       (match e.exp_desc with
       | Texp_apply ({exp_desc = Texp_ident (callee, _, _)}, _args) ->
-        let functionName = CL.Path.name callee in
+        let functionName = Path.name callee in
         callees := !callees |> StringSet.add functionName
       | _ -> ());
       super.expr self e
     in
-    {super with CL.Tast_mapper.expr}
+    {super with Tast_mapper.expr}
 
-  let findCallees (expression : CL.Typedtree.expression) =
+  let findCallees (expression : Typedtree.expression) =
     let isFunction =
       match expression.exp_desc with Texp_function _ -> true | _ -> false
     in
@@ -505,7 +505,7 @@ module ExtendFunctionTable = struct
   (* Add functions passed a recursive function via a labeled argument,
      and functions calling progress functions, to the function table. *)
   let extractLabelledArgument ?(kindOpt = None)
-      (argOpt : CL.Typedtree.expression option) =
+      (argOpt : Typedtree.expression option) =
     match argOpt with
     | Some {exp_desc = Texp_ident (path, {loc}, _)} -> Some (path, loc)
     | Some
@@ -526,7 +526,7 @@ module ExtendFunctionTable = struct
     | Some
         {exp_desc = Texp_apply ({exp_desc = Texp_ident (path, {loc}, _)}, args)}
       when kindOpt <> None ->
-      let checkArg ((argLabel : CL.Asttypes.arg_label), _argOpt) =
+      let checkArg ((argLabel : Asttypes.arg_label), _argOpt) =
         match (argLabel, kindOpt) with
         | (Labelled l | Optional l), Some kind ->
           kind |> List.for_all (fun {Kind.label} -> label <> l)
@@ -536,12 +536,12 @@ module ExtendFunctionTable = struct
     | _ -> None
 
   let traverseExpr ~functionTable ~progressFunctions ~valueBindingsTable =
-    let super = CL.Tast_mapper.default in
-    let expr (self : CL.Tast_mapper.mapper) (e : CL.Typedtree.expression) =
+    let super = Tast_mapper.default in
+    let expr (self : Tast_mapper.mapper) (e : Typedtree.expression) =
       (match e.exp_desc with
       | Texp_ident (callee, _, _) -> (
         let loc = e.exp_loc in
-        match Hashtbl.find_opt valueBindingsTable (CL.Path.name callee) with
+        match Hashtbl.find_opt valueBindingsTable (Path.name callee) with
         | None -> ()
         | Some (id_pos, _, callees) ->
           if
@@ -549,7 +549,7 @@ module ExtendFunctionTable = struct
               (StringSet.is_empty
                  (StringSet.inter (Lazy.force callees) progressFunctions))
           then
-            let functionName = CL.Path.name callee in
+            let functionName = Path.name callee in
             if not (callee |> FunctionTable.isInFunctionInTable ~functionTable)
             then (
               functionTable |> FunctionTable.addFunction ~functionName;
@@ -562,9 +562,9 @@ module ExtendFunctionTable = struct
                       functionName printPos id_pos)))
       | Texp_apply ({exp_desc = Texp_ident (callee, _, _)}, args)
         when callee |> FunctionTable.isInFunctionInTable ~functionTable ->
-        let functionName = CL.Path.name callee in
+        let functionName = Path.name callee in
         args
-        |> List.iter (fun ((argLabel : CL.Asttypes.arg_label), argOpt) ->
+        |> List.iter (fun ((argLabel : Asttypes.arg_label), argOpt) ->
                match (argLabel, argOpt |> extractLabelledArgument) with
                | Labelled label, Some (path, loc)
                  when path |> FunctionTable.isInFunctionInTable ~functionTable
@@ -576,15 +576,15 @@ module ExtendFunctionTable = struct
                      (fun ppf () ->
                        Format.fprintf ppf
                          "@{<info>%s@} is parametric ~@{<info>%s@}=@{<info>%s@}"
-                         functionName label (CL.Path.name path))
+                         functionName label (Path.name path))
                | _ -> ())
       | _ -> ());
       super.expr self e
     in
-    {super with CL.Tast_mapper.expr}
+    {super with Tast_mapper.expr}
 
   let run ~functionTable ~progressFunctions ~valueBindingsTable
-      (expression : CL.Typedtree.expression) =
+      (expression : Typedtree.expression) =
     let traverseExpr =
       traverseExpr ~functionTable ~progressFunctions ~valueBindingsTable
     in
@@ -593,20 +593,20 @@ end
 
 module CheckExpressionWellFormed = struct
   let traverseExpr ~functionTable ~valueBindingsTable =
-    let super = CL.Tast_mapper.default in
+    let super = Tast_mapper.default in
     let checkIdent ~path ~loc =
       if path |> FunctionTable.isInFunctionInTable ~functionTable then
         Stats.logHygieneOnlyCallDirectly ~path ~loc
     in
-    let expr (self : CL.Tast_mapper.mapper) (e : CL.Typedtree.expression) =
+    let expr (self : Tast_mapper.mapper) (e : Typedtree.expression) =
       match e.exp_desc with
       | Texp_ident (path, {loc}, _) ->
         checkIdent ~path ~loc;
         e
       | Texp_apply ({exp_desc = Texp_ident (functionPath, _, _)}, args) ->
-        let functionName = CL.Path.name functionPath in
+        let functionName = Path.name functionPath in
         args
-        |> List.iter (fun ((argLabel : CL.Asttypes.arg_label), argOpt) ->
+        |> List.iter (fun ((argLabel : Asttypes.arg_label), argOpt) ->
                match argOpt |> ExtendFunctionTable.extractLabelledArgument with
                | Some (path, loc) -> (
                  match argLabel with
@@ -619,7 +619,7 @@ module CheckExpressionWellFormed = struct
                    then ()
                    else
                      match Hashtbl.find_opt valueBindingsTable functionName with
-                     | Some (_pos, (body : CL.Typedtree.expression), _)
+                     | Some (_pos, (body : Typedtree.expression), _)
                        when path
                             |> FunctionTable.isInFunctionInTable ~functionTable
                        ->
@@ -638,17 +638,17 @@ module CheckExpressionWellFormed = struct
                              Format.fprintf ppf
                                "Extend Function Table with @{<info>%s@} as \
                                 parametric ~@{<info>%s@}=@{<info>%s@}"
-                               functionName label (CL.Path.name path))
+                               functionName label (Path.name path))
                      | _ -> checkIdent ~path ~loc)
                  | Optional _ | Nolabel -> checkIdent ~path ~loc)
                | _ -> ());
         e
       | _ -> super.expr self e
     in
-    {super with CL.Tast_mapper.expr}
+    {super with Tast_mapper.expr}
 
   let run ~functionTable ~valueBindingsTable
-      (expression : CL.Typedtree.expression) =
+      (expression : Typedtree.expression) =
     let traverseExpr = traverseExpr ~functionTable ~valueBindingsTable in
     expression |> traverseExpr.expr traverseExpr |> ignore
 end
@@ -658,12 +658,12 @@ module Compile = struct
     currentFunctionName : FunctionName.t;
     functionTable : FunctionTable.t;
     innerRecursiveFunctions : (FunctionName.t, FunctionName.t) Hashtbl.t;
-    isProgressFunction : CL.Path.t -> bool;
+    isProgressFunction : Path.t -> bool;
   }
 
   module Ident = Compat.Ident
 
-  let rec expression ~ctx (expr : CL.Typedtree.expression) =
+  let rec expression ~ctx (expr : Typedtree.expression) =
     let {currentFunctionName; functionTable; isProgressFunction} = ctx in
     let loc = expr.exp_loc in
     let notImplemented case =
@@ -678,7 +678,7 @@ module Compile = struct
       let callee, args =
         match
           Hashtbl.find_opt ctx.innerRecursiveFunctions
-            (CL.Path.name calleeToRename)
+            (Path.name calleeToRename)
         with
         | Some innerFunctionName ->
           let innerFunctionDefinition =
@@ -689,21 +689,21 @@ module Compile = struct
           let argsFromKind =
             innerFunctionDefinition.kind
             |> List.map (fun (entry : Kind.entry) ->
-                   ( CL.Asttypes.Labelled entry.label,
+                   ( Asttypes.Labelled entry.label,
                      Some
                        {
                          expr with
                          exp_desc =
                            Texp_ident
-                             (CL.Path.Pident (Ident.create entry.label), l, vd);
+                             (Path.Pident (Ident.create entry.label), l, vd);
                        } ))
           in
-          ( CL.Path.Pident (Ident.create innerFunctionName),
+          ( Path.Pident (Ident.create innerFunctionName),
             argsFromKind @ argsToExtend )
         | None -> (calleeToRename, argsToExtend)
       in
       if callee |> FunctionTable.isInFunctionInTable ~functionTable then
-        let functionName = CL.Path.name callee in
+        let functionName = Path.name callee in
         let functionDefinition =
           functionTable |> FunctionTable.getFunctionDefinition ~functionName
         in
@@ -713,7 +713,7 @@ module Compile = struct
             args
             |> List.find_opt (fun arg ->
                    match arg with
-                   | CL.Asttypes.Labelled s, Some _ -> s = label
+                   | Asttypes.Labelled s, Some _ -> s = label
                    | _ -> false)
           in
           let argOpt =
@@ -730,17 +730,17 @@ module Compile = struct
               raise ArgError
             | Some (path, _pos)
               when path |> FunctionTable.isInFunctionInTable ~functionTable ->
-              let functionName = CL.Path.name path in
+              let functionName = Path.name path in
               {FunctionArgs.label; functionName}
             | Some (path, _pos)
               when functionTable
                    |> FunctionTable.functionGetKindOfLabel
                         ~functionName:currentFunctionName
-                        ~label:(CL.Path.name path)
+                        ~label:(Path.name path)
                    = Some []
                    (* TODO: when kinds are inferred, support and check non-empty kinds *)
               ->
-              let functionName = CL.Path.name path in
+              let functionName = Path.name path in
               {FunctionArgs.label; functionName}
             | _ ->
               Stats.logHygieneNamedArgValue ~label ~loc;
@@ -765,11 +765,11 @@ module Compile = struct
         match
           functionTable
           |> FunctionTable.functionGetKindOfLabel
-               ~functionName:currentFunctionName ~label:(CL.Path.name callee)
+               ~functionName:currentFunctionName ~label:(Path.name callee)
         with
         | Some kind when kind = Kind.empty ->
           Command.Call
-            (FunctionCall (CL.Path.name callee |> FunctionCall.noArgs), loc)
+            (FunctionCall (Path.name callee |> FunctionCall.noArgs), loc)
           |> evalArgs ~args ~ctx
         | Some _kind ->
           (* TODO when kinds are extended in future: check that args matches with kind
@@ -813,7 +813,7 @@ module Compile = struct
       if recFlag = Recursive then Stats.logHygieneNoNestedLetRec ~loc;
       let commands =
         (valueBindings
-        |> List.map (fun (vb : CL.Typedtree.value_binding) ->
+        |> List.map (fun (vb : Typedtree.value_binding) ->
                vb.vb_expr |> expression ~ctx))
         @ [inExpr |> expression ~ctx]
       in
@@ -889,7 +889,7 @@ module Compile = struct
          |> List.map
               (fun
                 ( _desc,
-                  (recordLabelDefinition : CL.Typedtree.record_label_definition)
+                  (recordLabelDefinition : Typedtree.record_label_definition)
                 )
               ->
                 match recordLabelDefinition with
@@ -1053,7 +1053,7 @@ module Eval = struct
 
   let rec runFunctionCall ~cache ~callStack ~functionArgs ~functionTable
       ~madeProgressOn ~loc ~state functionCallToInstantiate : State.t =
-    let pos = loc.CL.Location.loc_start in
+    let pos = loc.Location.loc_start in
     let functionCall =
       functionCallToInstantiate
       |> FunctionCall.applySubstitution ~sub:functionArgs
@@ -1195,7 +1195,7 @@ module Eval = struct
     if !Common.Cli.debug then
       Log_.log "@[<v 2>@,@{<warning>Termination Analysis@} for @{<info>%s@}@]@."
         functionName;
-    let pos = loc.CL.Location.loc_start in
+    let pos = loc.Location.loc_start in
     let callStack = CallStack.create () in
     let functionArgs = FunctionArgs.empty in
     let functionCall = FunctionCall.noArgs functionName in
@@ -1220,7 +1220,7 @@ module Eval = struct
 end
 
 let progressFunctionsFromAttributes attributes =
-  let lidToString lid = lid |> CL.Longident.flatten |> String.concat "." in
+  let lidToString lid = lid |> Longident.flatten |> String.concat "." in
   let isProgress = ( = ) "progress" in
   if attributes |> Annotation.hasAttribute isProgress then
     Some
@@ -1236,11 +1236,11 @@ let progressFunctionsFromAttributes attributes =
   else None
 
 let traverseAst ~valueBindingsTable =
-  let super = CL.Tast_mapper.default in
-  let value_bindings (self : CL.Tast_mapper.mapper) (recFlag, valueBindings) =
+  let super = Tast_mapper.default in
+  let value_bindings (self : Tast_mapper.mapper) (recFlag, valueBindings) =
     (* Update the table of value bindings for variables *)
     valueBindings
-    |> List.iter (fun (vb : CL.Typedtree.value_binding) ->
+    |> List.iter (fun (vb : Typedtree.value_binding) ->
            match vb.vb_pat.pat_desc with
            #if OCAML_VERSION < (5, 2, 0)
            | Tpat_var (id, {loc = {loc_start = pos}}) ->
@@ -1248,17 +1248,17 @@ let traverseAst ~valueBindingsTable =
            | Tpat_var (id, {loc = {loc_start = pos}}, _) ->
            #endif
              let callees = lazy (FindFunctionsCalled.findCallees vb.vb_expr) in
-             Hashtbl.replace valueBindingsTable (CL.Ident.name id)
+             Hashtbl.replace valueBindingsTable (Ident.name id)
                (pos, vb.vb_expr, callees)
            | _ -> ());
     let progressFunctions, functionsToAnalyze =
-      if recFlag = CL.Asttypes.Nonrecursive then (StringSet.empty, [])
+      if recFlag = Asttypes.Nonrecursive then (StringSet.empty, [])
       else
         let progressFunctions0, functionsToAnalyze0 =
           valueBindings
           |> List.fold_left
                (fun (progressFunctions, functionsToAnalyze)
-                    (valueBinding : CL.Typedtree.value_binding) ->
+                    (valueBinding : Typedtree.value_binding) ->
                  match
                    progressFunctionsFromAttributes valueBinding.vb_attributes
                  with
@@ -1273,7 +1273,7 @@ let traverseAst ~valueBindingsTable =
                      #else
                      | Tpat_var (id, _, _) ->
                      #endif
-                       (CL.Ident.name id, valueBinding.vb_expr.exp_loc)
+                       (Ident.name id, valueBinding.vb_expr.exp_loc)
                        :: functionsToAnalyze
                      | _ -> functionsToAnalyze )))
                (StringSet.empty, [])
@@ -1283,18 +1283,18 @@ let traverseAst ~valueBindingsTable =
     if functionsToAnalyze <> [] then (
       let functionTable = FunctionTable.create () in
       let isProgressFunction path =
-        StringSet.mem (CL.Path.name path) progressFunctions
+        StringSet.mem (Path.name path) progressFunctions
       in
       let recursiveFunctions =
         List.fold_left
-          (fun defs (valueBinding : CL.Typedtree.value_binding) ->
+          (fun defs (valueBinding : Typedtree.value_binding) ->
             match valueBinding.vb_pat.pat_desc with
             #if OCAML_VERSION < (5, 2, 0)
             | Tpat_var (id, _) ->
             #else
             | Tpat_var (id, _, _) ->
             #endif
-               CL.Ident.name id :: defs
+               Ident.name id :: defs
             | _ -> defs)
           [] valueBindings
         |> List.rev
@@ -1356,15 +1356,15 @@ let traverseAst ~valueBindingsTable =
            super.value_binding self valueBinding |> ignore);
     (recFlag, valueBindings)
   in
-  {super with CL.Tast_mapper.value_bindings}
+  {super with Tast_mapper.value_bindings}
 
-let processStructure (structure : CL.Typedtree.structure) =
+let processStructure (structure : Typedtree.structure) =
   Stats.newFile ();
   let valueBindingsTable = Hashtbl.create 1 in
   let traverseAst = traverseAst ~valueBindingsTable in
   structure |> traverseAst.structure traverseAst |> ignore
 
-let processCmt (cmt_infos : CL.Cmt_format.cmt_infos) =
+let processCmt (cmt_infos : Cmt_format.cmt_infos) =
   match cmt_infos.cmt_annots with
   | Interface _ -> ()
   | Implementation structure -> processStructure structure

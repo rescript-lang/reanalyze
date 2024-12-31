@@ -1,7 +1,7 @@
 open Common
 
 let loadCmtFile cmtFilePath =
-  let cmt_infos = CL.Cmt_format.read_cmt cmtFilePath in
+  let cmt_infos = Cmt_format.read_cmt cmtFilePath in
   let excludePath sourceFile =
     !Cli.excludePaths
     |> List.exists (fun prefix_ ->

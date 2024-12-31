@@ -2,7 +2,7 @@ type attributePayload =
   | BoolPayload of bool
   | ConstructPayload of string
   | FloatPayload of string
-  | IdentPayload of CL.Longident.t
+  | IdentPayload of Longident.t
   | IntPayload of string
   | StringPayload of string
   | TuplePayload of attributePayload list
@@ -17,8 +17,8 @@ let tagIsGenTypeOpaque s = s = "genType.opaque" || s = "gentype.opaque"
 let tagIsOneOfTheGenTypeAnnotations s =
   tagIsGenType s || tagIsGenTypeImport s || tagIsGenTypeOpaque s
 
-let rec getAttributePayload checkText (attributes : CL.Typedtree.attributes) =
-  let rec fromExpr (expr : CL.Parsetree.expression) =
+let rec getAttributePayload checkText (attributes : Typedtree.attributes) =
+  let rec fromExpr (expr : Parsetree.expression) =
     match expr with
     | { pexp_desc = Pexp_constant c} ->
       let desc = Compat.constant_desc c in
@@ -32,12 +32,12 @@ let rec getAttributePayload checkText (attributes : CL.Typedtree.attributes) =
      _;
     } ->
       Some (BoolPayload (s = "true"))
-    | {pexp_desc = Pexp_construct ({txt = CL.Longident.Lident "[]"}, None)} ->
+    | {pexp_desc = Pexp_construct ({txt = Longident.Lident "[]"}, None)} ->
       None
-    | {pexp_desc = Pexp_construct ({txt = CL.Longident.Lident "::"}, Some e)} ->
+    | {pexp_desc = Pexp_construct ({txt = Longident.Lident "::"}, Some e)} ->
       fromExpr e
     | {pexp_desc = Pexp_construct ({txt}, _); _} ->
-      Some (ConstructPayload (txt |> CL.Longident.flatten |> String.concat "."))
+      Some (ConstructPayload (txt |> Longident.flatten |> String.concat "."))
     | {pexp_desc = Pexp_tuple exprs | Pexp_array exprs} ->
       let payloads =
         exprs |> List.rev
@@ -79,7 +79,7 @@ let rec getAttributePayload checkText (attributes : CL.Typedtree.attributes) =
       | PTyp _ -> Some UnrecognizedPayload
     else getAttributePayload checkText tl
 
-let hasAttribute checkText (attributes : CL.Typedtree.attributes) =
+let hasAttribute checkText (attributes : Typedtree.attributes) =
   getAttributePayload checkText attributes <> None
 
 let isOcamlSuppressDeadWarning attributes =

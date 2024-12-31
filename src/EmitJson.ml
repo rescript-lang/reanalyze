@@ -19,7 +19,7 @@ let emitItem ~name ~kind ~file ~range ~message =
     endCharacter;
   fprintf ppf "  \"message\": \"%s\"" message
 
-let locToPos (loc : CL.Location.t) =
+let locToPos (loc : Location.t) =
   (loc.loc_start.pos_lnum - 1, loc.loc_start.pos_cnum - loc.loc_start.pos_bol)
 
 let emitAnnotate ~pos ~text ~action =

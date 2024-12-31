@@ -6,7 +6,7 @@ open DeadCommon
 module TypeLabels = struct
   (* map from type path (for record/variant label) to its location *)
 
-  let table = (Hashtbl.create 256 : (Path.t, CL.Location.t) Hashtbl.t)
+  let table = (Hashtbl.create 256 : (Path.t, Location.t) Hashtbl.t)
 
   let add path loc = Hashtbl.replace table path loc
 
@@ -27,15 +27,15 @@ module TypeDependencies = struct
   let clear () = delayedItems := []
 
   let processTypeDependency
-      ( ({loc_start = posTo; loc_ghost = ghost1} : CL.Location.t),
-        ({loc_start = posFrom; loc_ghost = ghost2} : CL.Location.t) ) =
+      ( ({loc_start = posTo; loc_ghost = ghost1} : Location.t),
+        ({loc_start = posFrom; loc_ghost = ghost2} : Location.t) ) =
     if (not ghost1) && (not ghost2) && posTo <> posFrom then
       addTypeReference ~posTo ~posFrom
 
   let forceDelayedItems () = List.iter processTypeDependency !delayedItems
 end
 
-let extendTypeDependencies (loc1 : CL.Location.t) (loc2 : CL.Location.t) =
+let extendTypeDependencies (loc1 : Location.t) (loc2 : Location.t) =
   if loc1.loc_start <> loc2.loc_start then (
     if !Common.Cli.debug then
       Log_.item "extendTypeDependencies %s --> %s@."
@@ -83,15 +83,15 @@ let addTypeDependenciesInnerModule ~pathToType ~loc ~typeLabelName =
       extendTypeDependencies loc2 loc
   | None -> TypeLabels.add path loc
 
-let addDeclaration ~(typeId : CL.Ident.t)
+let addDeclaration ~(typeId : Ident.t)
     ~(typeKind : ('a, 'b) Compat.type_kind) =
   let currentModulePath = ModulePath.getCurrent () in
   let pathToType =
-    (typeId |> CL.Ident.name |> Name.create)
+    (typeId |> Ident.name |> Name.create)
     :: (currentModulePath.path @ [!Common.currentModuleName])
   in
   let processTypeLabel ?(posAdjustment = Nothing) typeLabelName ~declKind
-      ~(loc : CL.Location.t) =
+      ~(loc : Location.t) =
     addDeclaration_ ~declKind ~path:pathToType ~loc
       ~moduleLoc:currentModulePath.loc ~posAdjustment typeLabelName;
     addTypeDependenciesAcrossFiles ~pathToType ~loc ~typeLabelName;
@@ -101,20 +101,20 @@ let addDeclaration ~(typeId : CL.Ident.t)
   match typeKind with
   | Type_record (l, _) ->
     List.iter
-      (fun {CL.Types.ld_id; ld_loc} ->
-        CL.Ident.name ld_id |> Name.create
+      (fun {Types.ld_id; ld_loc} ->
+        Ident.name ld_id |> Name.create
         |> processTypeLabel ~declKind:RecordLabel ~loc:ld_loc)
       l
   | Type_variant _ ->
     List.iteri
-      (fun i {CL.Types.cd_id; cd_loc} ->
+      (fun i {Types.cd_id; cd_loc} ->
         let posAdjustment =
           (* In Res the variant loc can include the | and spaces after it *)
           if Log_.posLanguage cd_loc.loc_start = Res then
             if i = 0 then FirstVariant else OtherVariant
           else Nothing
         in
-        CL.Ident.name cd_id |> Name.create
+        Ident.name cd_id |> Name.create
         |> processTypeLabel ~declKind:VariantCase ~loc:cd_loc ~posAdjustment)
       (Compat.getTypeVariant typeKind)
   | _ -> ()

@@ -7,7 +7,7 @@ val divisionByZero : t
 val endOfFile : t
 val exit : t
 val failure : t
-val fromLid : CL.Longident.t -> t
+val fromLid : Longident.t -> t
 val fromString : string -> t
 val invalidArgument : t
 val jsExnError : t

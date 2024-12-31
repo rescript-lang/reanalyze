@@ -56,12 +56,12 @@ module Color = struct
     Compat.pp_set_formatter_tag_functions Format.std_formatter color_functions;
     if not (get_color_enabled ()) then
     #if OCAML_VERSION < (5, 2, 0)
-      CL.Misc.Color.setup (Some Never);
+      Misc.Color.setup (Some Never);
     #else
       Misc.Style.setup (Some Never);
     #endif
     (* Print a dummy thing once in the beginning, as otherwise flushing does not work. *)
-    CL.Location.print_loc Format.str_formatter CL.Location.none
+    Location.print_loc Format.str_formatter Location.none
 
   let error ppf s = Format.fprintf ppf "@{<error>%s@}" s
 
@@ -69,7 +69,7 @@ module Color = struct
 end
 
 module Loc = struct
-  let print_loc ppf (loc : CL.Location.t) =
+  let print_loc ppf (loc : Location.t) =
     (* Change the range so it's on a single line.
        In this way, the line number is clickable in vscode. *)
     let startChar = loc.loc_start.pos_cnum - loc.loc_start.pos_bol in
@@ -88,14 +88,14 @@ module Loc = struct
           | false -> pos.pos_fname);
       }
     in
-    CL.Location.print_loc ppf
+    Location.print_loc ppf
       {
         loc with
         loc_start = loc.loc_start |> processPos startChar;
         loc_end = loc.loc_end |> processPos endChar;
       }
 
-  let print ppf (loc : CL.Location.t) =
+  let print ppf (loc : Location.t) =
     Format.fprintf ppf "@[%a@]" print_loc loc
 end
 
@@ -151,7 +151,7 @@ type kind = Warning | Error
 
 let first = ref true
 
-let logKind ~count ~kind ~(loc : CL.Location.t) ~name ~notClosed body =
+let logKind ~count ~kind ~(loc : Location.t) ~name ~notClosed body =
   if Suppress.filter loc.loc_start then (
     let open Format in
     first := false;

@@ -12,7 +12,7 @@ type item = {
 let delayedItems = (ref [] : item list ref)
 let functionReferences = (ref [] : (Lexing.position * Lexing.position) list ref)
 
-let addFunctionReference ~(locFrom : CL.Location.t) ~(locTo : CL.Location.t) =
+let addFunctionReference ~(locFrom : Location.t) ~(locTo : Location.t) =
   if active () then
     let posTo = locTo.loc_start in
     let posFrom = locFrom.loc_start in
@@ -28,7 +28,7 @@ let addFunctionReference ~(locFrom : CL.Location.t) ~(locTo : CL.Location.t) =
           (posFrom |> posToString) (posTo |> posToString);
       functionReferences := (posFrom, posTo) :: !functionReferences)
 
-let rec hasOptionalArgs (texpr : CL.Types.type_expr) =
+let rec hasOptionalArgs (texpr : Types.type_expr) =
   match Compat.get_desc texpr with
   | _ when not (active ()) -> false
   | Tarrow (Optional _, _tFrom, _tTo, _) -> true
@@ -37,7 +37,7 @@ let rec hasOptionalArgs (texpr : CL.Types.type_expr) =
   | Tsubst _ -> hasOptionalArgs (Compat.getTSubst (Compat.get_desc texpr))
   | _ -> false
 
-let rec fromTypeExpr (texpr : CL.Types.type_expr) =
+let rec fromTypeExpr (texpr : Types.type_expr) =
   match Compat.get_desc texpr with
   | _ when not (active ()) -> []
   | Tarrow (Optional s, _tFrom, tTo, _) -> s :: fromTypeExpr tTo
@@ -46,7 +46,7 @@ let rec fromTypeExpr (texpr : CL.Types.type_expr) =
   | Tsubst _ -> fromTypeExpr (Compat.getTSubst (Compat.get_desc texpr))
   | _ -> []
 
-let addReferences ~(locFrom : CL.Location.t) ~(locTo : CL.Location.t) ~path
+let addReferences ~(locFrom : Location.t) ~(locTo : Location.t) ~path
     (argNames, argNamesMaybe) =
   if active () then (
     let posTo = locTo.loc_start in

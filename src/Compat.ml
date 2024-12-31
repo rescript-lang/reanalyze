@@ -1,5 +1,3 @@
-open CL
-
 #if OCAML_VERSION >= (4, 08, 0)
 let getStringTag s = match s with
   | Format.String_tag(s) -> s
@@ -270,7 +268,7 @@ let constant_desc d =
   d
 #endif
 
-let extractValueDependencies (cmt_infos : CL.Cmt_format.cmt_infos) =
+let extractValueDependencies (cmt_infos : Cmt_format.cmt_infos) =
 #if OCAML_VERSION >= (5, 3, 0)
   let deps = ref [] in
   let process_dependency (_, uid1, uid2) =

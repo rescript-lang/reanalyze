@@ -40,7 +40,7 @@ end
 module StringSet = Set.Make (String)
 
 module LocSet = Set.Make (struct
-  include CL.Location
+  include Location
 
   let compare = compare
 end)
@@ -63,7 +63,7 @@ module FileReferences = struct
   let findSet table key =
     try FileHash.find table key with Not_found -> FileSet.empty
 
-  let add (locFrom : CL.Location.t) (locTo : CL.Location.t) =
+  let add (locFrom : Location.t) (locTo : Location.t) =
     let key = locFrom.loc_start.pos_fname in
     let set = findSet table key in
     FileHash.replace table key (FileSet.add locTo.loc_start.pos_fname set)
@@ -94,13 +94,13 @@ module Path = struct
     | [] -> ""
 
   let onOkPath ~whenContainsApply ~f path =
-    match path |> CL.Path.flatten with
-    | `Ok (id, mods) -> f (CL.Ident.name id :: mods |> String.concat ".")
+    match path |> Path.flatten with
+    | `Ok (id, mods) -> f (Ident.name id :: mods |> String.concat ".")
     | `Contains_apply -> whenContainsApply
 
   let fromPathT path =
-    match path |> CL.Path.flatten with
-    | `Ok (id, mods) -> CL.Ident.name id :: mods |> List.rev_map Name.create
+    match path |> Path.flatten with
+    | `Ok (id, mods) -> Ident.name id :: mods |> List.rev_map Name.create
     | `Contains_apply -> []
 
   let moduleToImplementation path =
