@@ -25,8 +25,9 @@ let processCmt ~cmtFilePath (cmt_infos : CL.Cmt_format.cmt_infos) =
          Ideally, the handling should be less location-based, just like other language aspects. *)
       false
     in
+    let cmt_value_dependencies = Compat.extractValueDependencies cmt_infos in
     DeadValue.processStructure ~doTypes:true ~doExternals
-      ~cmt_value_dependencies:cmt_infos.cmt_value_dependencies structure
+      ~cmt_value_dependencies structure
   | _ -> ());
   DeadType.TypeDependencies.forceDelayedItems ();
   DeadType.TypeDependencies.clear ()

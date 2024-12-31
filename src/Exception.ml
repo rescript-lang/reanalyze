@@ -351,7 +351,8 @@ let traverseAst () =
             kind = Raises;
           }
           :: !currentEvents
-    | Texp_try (e, cases) ->
+    | Texp_try _ ->
+      let e, cases = expr.exp_desc |> Compat.getTexpTry in
       let exceptions =
         cases
         |> List.map (fun case -> case.CL.Typedtree.c_lhs.pat_desc)

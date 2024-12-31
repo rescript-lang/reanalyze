@@ -174,7 +174,10 @@ let getMtyFunctorModuleType  (moduleType: Types.module_type) = match moduleType 
   | _ -> None
 
 let getTexpMatch desc = match desc with
-#if OCAML_VERSION >= (4, 08, 0)
+#if OCAML_VERSION >= (5, 3, 0)
+  | Typedtree.Texp_match(e, cases, _values, partial) ->
+    (e, cases, partial)
+#elif OCAML_VERSION >= (4, 08, 0)
   | Typedtree.Texp_match(e, cases, partial) ->
     (e, cases, partial)
 #else
@@ -183,8 +186,26 @@ let getTexpMatch desc = match desc with
 #endif
   | _ -> assert false
 
+let getTexpTry desc = match desc with
+#if OCAML_VERSION >= (5, 3, 0)
+  | Typedtree.Texp_try(e, cases, _values) ->
+    (e, cases)
+#else
+  | Typedtree.Texp_try(e, cases) ->
+    (e, cases)
+#endif
+  | _ -> assert false
+
 let texpMatchGetExceptions desc = match desc with
-#if OCAML_VERSION >= (4, 08, 0)
+#if OCAML_VERSION >= (5, 3, 0)
+  | Typedtree.Texp_match(_, cases, _, _) ->
+    cases
+    |> List.filter_map(fun ({Typedtree.c_lhs= pat}) ->
+          match pat.pat_desc with
+          | Tpat_exception({pat_desc}) -> Some(pat_desc)
+          | _ -> None
+          )
+#elif OCAML_VERSION >= (4, 08, 0)
   | Typedtree.Texp_match(_, cases, _) ->
     cases
     |> List.filter_map(fun ({Typedtree.c_lhs= pat}) ->
@@ -240,4 +261,30 @@ let moduleIdName name = name |> Ident.name
 let get_desc = Types.get_desc
 #else
 let get_desc x = x.Types.desc
+#endif
+
+let constant_desc d =
+#if OCAML_VERSION >= (5, 3, 0)
+  d.Parsetree.pconst_desc
+#else
+  d
+#endif
+
+let extractValueDependencies (cmt_infos : CL.Cmt_format.cmt_infos) =
+#if OCAML_VERSION >= (5, 3, 0)
+  let deps = ref [] in
+  let process_dependency (_, uid1, uid2) =
+    match
+      ( Types.Uid.Tbl.find_opt cmt_infos.cmt_uid_to_decl uid1,
+        Types.Uid.Tbl.find_opt cmt_infos.cmt_uid_to_decl uid2 )
+    with
+    | Some (Value v1), Some (Value v2) ->
+      deps := (v1.val_val, v2.val_val) :: !deps
+    | _ -> ()
+  in
+  let items = cmt_infos.cmt_declaration_dependencies in
+  List.iter process_dependency items;
+  List.rev !deps
+#else
+  cmt_infos.cmt_value_dependencies
 #endif

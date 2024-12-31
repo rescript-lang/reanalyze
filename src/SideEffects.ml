@@ -46,7 +46,8 @@ let rec exprNoSideEffects (expr : CL.Typedtree.expression) =
     && cases |> List.for_all caseNoSideEffects
   | Texp_letmodule _ -> false
   | Texp_lazy e -> e |> exprNoSideEffects
-  | Texp_try (e, cases) ->
+  | Texp_try _ ->
+    let e, cases = expr.exp_desc |> Compat.getTexpTry in
     e |> exprNoSideEffects && cases |> List.for_all caseNoSideEffects
   | Texp_tuple el -> el |> List.for_all exprNoSideEffects
   | Texp_variant (_lbl, eo) -> eo |> exprOptNoSideEffects
