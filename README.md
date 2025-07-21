@@ -1,9 +1,9 @@
 > [!WARNING]
-> This repository is only for keeping OCaml compatibility with an old version of reanalyze. It is further developed in the [rescript-vscode](https://github.com/rescript-lang/rescript-vscode/tree/master/analysis/reanalyze) repository.
+> This repository is only for keeping OCaml compatibility with an old version of reanalyze. It is further developed in the [rescript monorepo](https://github.com/rescript-lang/rescript/tree/master/analysis/reanalyze) repository.
 
 # reanalyze
 
-Program analysis for ReScript and OCaml projects targeting JS (ReScript) as well as native code (dune):
+Program analysis for ReScript projects:
 
 - Globally dead values, redundant optional arguments, dead modules, dead types (records and variants).
 - Exception analysis.
