@@ -3,7 +3,7 @@
 
 # reanalyze
 
-Program analysis for ReScript and OCaml projects targeting JS (ReScript) as well as native code (dune):
+Program analysis for ReScript projects:
 
 - Globally dead values, redundant optional arguments, dead modules, dead types (records and variants).
 - Exception analysis.
