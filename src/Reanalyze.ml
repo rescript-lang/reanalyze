@@ -39,6 +39,17 @@ let loadCmtFile cmtFilePath =
 
 let processCmtFiles ~cmtRoot =
   let ( +++ ) = Filename.concat in
+  let isCmtFile path =
+    Filename.check_suffix path ".cmt" || Filename.check_suffix path ".cmti"
+  in
+  let processCmtFilePaths cmtFilePaths =
+#if OCAML_VERSION >= (5, 3, 0)
+    cmtFilePaths |> List.sort String.compare |> List.iter Compat.rememberCmtFile;
+#else
+    let _ = cmtFilePaths in
+#endif
+    cmtFilePaths |> List.iter loadCmtFile
+  in
   match cmtRoot with
   | Some root ->
     Cli.cmtCommand := true;
@@ -48,15 +59,15 @@ let processCmtFiles ~cmtRoot =
         let base = Filename.basename dir in
         base = "node_modules" || base = "_esy"
       in
-      if (not skipDir) && Sys.file_exists absDir then
-        if Sys.is_directory absDir then
-          absDir |> Sys.readdir |> Array.iter (fun d -> walkSubDirs (dir +++ d))
-        else if
-          Filename.check_suffix absDir ".cmt"
-          || Filename.check_suffix absDir ".cmti"
-        then absDir |> loadCmtFile
+      if skipDir || not (Sys.file_exists absDir) then []
+      else if Sys.is_directory absDir then
+        absDir |> Sys.readdir |> Array.fold_left
+          (fun acc d -> acc @ walkSubDirs (dir +++ d))
+          []
+      else if isCmtFile absDir then [absDir]
+      else []
     in
-    walkSubDirs ""
+    walkSubDirs "" |> processCmtFilePaths
   | None ->
     Lazy.force Paths.setReScriptProjectRoot;
     let lib_bs = runConfig.projectRoot +++ ("lib" +++ "bs") in
@@ -71,16 +82,10 @@ let processCmtFiles ~cmtRoot =
              | files -> files
              | exception Sys_error _ -> []
            in
-           let cmtFiles =
-             files
-             |> List.filter (fun x ->
-                    Filename.check_suffix x ".cmt"
-                    || Filename.check_suffix x ".cmti")
-           in
+           let cmtFiles = files |> List.filter isCmtFile in
            cmtFiles |> List.sort String.compare
-           |> List.iter (fun cmtFile ->
-                  let cmtFilePath = Filename.concat libBsSourceDir cmtFile in
-                  cmtFilePath |> loadCmtFile))
+           |> List.map (Filename.concat libBsSourceDir)
+           |> processCmtFilePaths)
 
 let runAnalysis ~cmtRoot ~ppf =
   Log_.Color.setup ();

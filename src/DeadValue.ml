@@ -390,18 +390,12 @@ let traverseStructure ~doTypes ~doExternals =
 
 (* Merge a location's references to another one's *)
 let processValueDependency
-    ( ({
-         val_loc =
-           {loc_start = {pos_fname = fnTo} as posTo; loc_ghost = ghost1} as
-           locTo;
-       } :
-        Types.value_description),
-      ({
-         val_loc =
-           {loc_start = {pos_fname = fnFrom} as posFrom; loc_ghost = ghost2} as
-           locFrom;
-       } :
-        Types.value_description) ) =
+  ( ({loc_start = {pos_fname = fnTo} as posTo; loc_ghost = ghost1} as
+          locTo :
+      Location.t),
+    ({loc_start = {pos_fname = fnFrom} as posFrom; loc_ghost = ghost2} as
+          locFrom :
+      Location.t) ) =
   if (not ghost1) && (not ghost2) && posTo <> posFrom then (
     let addFileReference = fileIsImplementationOf fnTo fnFrom in
     addValueReference ~addFileReference ~locFrom ~locTo;

@@ -25,7 +25,9 @@ let processCmt ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
          Ideally, the handling should be less location-based, just like other language aspects. *)
       false
     in
-    let cmt_value_dependencies = Compat.extractValueDependencies cmt_infos in
+    let cmt_value_dependencies =
+      Compat.extractValueDependencies ~cmtFilePath cmt_infos
+    in
     DeadValue.processStructure ~doTypes:true ~doExternals
       ~cmt_value_dependencies structure
   | _ -> ());

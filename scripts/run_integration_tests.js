@@ -1,4 +1,3 @@
-const fs = require("fs");
 const child_process = require("child_process");
 const path = require("path");
 const pjson = require("../package.json");
@@ -9,58 +8,12 @@ const exampleDirPaths = exampleDirNames.map((exampleName) =>
 );
 
 const isWindows = /^win/i.test(process.platform);
-
 const reanalyzeFile = path.join(__dirname, "../_build/default/src/Reanalyze.exe");
-
-/*
-Needed for wrapping the stdout pipe with a promise
-*/
-function wrappedSpawn(command, args, options) {
-  return new Promise((resolve, reject) => {
-    const child = child_process.spawn(command, args, {
-      env: process.env,
-      ...options,
-    });
-
-    child.stdout.pipe(process.stdout);
-    child.stderr.pipe(process.stderr);
-
-    child.on("exit", (code) => {
-      if (code == 0) {
-        resolve(code);
-      } else {
-        reject(code);
-      }
-    });
-
-    child.on("error", (err) => {
-      console.error(`${command} ${args.join(" ")} exited with ${err.code}`);
-      return reject(err.code);
-    });
-  });
-}
-
-async function installExamples() {
-  const tasks = exampleDirPaths.map((cwd) => {
-    console.log(`${cwd}: npm install --no-save (takes a while)`);
-
-    // The npm command is not an executable, but a cmd script on Windows
-    // Without the shell = true, Windows will not find the program and fail
-    // with ENOENT
-    const shell = isWindows ? true : false;
-    return wrappedSpawn("npm", ["install", "--no-save"], {
-      cwd,
-      shell,
-    });
-  });
-
-  return Promise.all(tasks);
-}
 
 function cleanBuildExamples() {
   for (let i = 0; i < exampleDirPaths.length; i++) {
     const cwd = exampleDirPaths[i];
-    console.log(`${cwd}: npm run clean && npm run build (takes a while)`);
+    console.log(`${cwd}: npm run clean && npm run build`);
 
     const shell = isWindows ? true : false;
     child_process.execFileSync("npm", ["run", "clean"], {
@@ -109,7 +62,6 @@ function checkSetup() {
   console.log("Checking if --version outputs the right version");
   let output;
 
-  /* Compare the --version output with the package.json version number (should match) */
   try {
     output = child_process.execSync(`${reanalyzeFile} --version`, {
       shell: isWindows,
@@ -121,7 +73,6 @@ function checkSetup() {
     );
   }
 
-  // For Unix / Windows
   const stripNewlines = (str = "") => str.replace(/[\n\r]+/g, "");
 
   if (output.indexOf(pjson.version) === -1) {
@@ -134,18 +85,15 @@ function checkSetup() {
   }
 }
 
-async function main() {
+function main() {
   try {
     checkSetup();
-    await installExamples();
     cleanBuildExamples();
-
-    /* Git diffing is broken... we need a better way to test regressions */
     checkDiff();
 
     console.log("Test successful!");
   } catch (e) {
-    console.error(`Test failed unexpectly: ${e.message}`);
+    console.error(`Test failed unexpectedly: ${e.message}`);
     console.error(e);
     process.exit(1);
   }

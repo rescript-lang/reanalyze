@@ -1,0 +1,16 @@
+(library
+ (name deadcode_fixture)
+ (modules
+  Annotations
+  Deadcode
+  Exceptions
+  Externals
+  FirstClassModules
+  Includes
+  Main
+  ModuleAliases
+  Modules
+  OptionalArgs
+  TransitiveTypes
+  Types)
+ (flags :standard -w -27-32-34-37-39 -bin-annot))
