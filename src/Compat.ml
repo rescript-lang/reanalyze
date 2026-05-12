@@ -268,21 +268,55 @@ let constant_desc d =
   d
 #endif
 
-let extractValueDependencies (cmt_infos : Cmt_format.cmt_infos) =
 #if OCAML_VERSION >= (5, 3, 0)
-  let deps = ref [] in
-  let process_dependency (_, uid1, uid2) =
-    match
-      ( Types.Uid.Tbl.find_opt cmt_infos.cmt_uid_to_decl uid1,
-        Types.Uid.Tbl.find_opt cmt_infos.cmt_uid_to_decl uid2 )
-    with
-    | Some (Value v1), Some (Value v2) ->
-      deps := (v1.val_val, v2.val_val) :: !deps
-    | _ -> ()
-  in
-  let items = cmt_infos.cmt_declaration_dependencies in
-  List.iter process_dependency items;
-  List.rev !deps
+let cmtUidToDecl = Shape.Uid.Tbl.create 1024
+
+let rememberCmtInfos (cmt_infos : Cmt_format.cmt_infos) =
+  Shape.Uid.Tbl.iter
+    (Shape.Uid.Tbl.replace cmtUidToDecl)
+    cmt_infos.cmt_uid_to_decl
+
+let rememberCmtFile path =
+  if Sys.file_exists path then
+    try path |> Cmt_format.read_cmt |> rememberCmtInfos with _ -> ()
 #else
+let rememberCmtInfos (_ : Cmt_format.cmt_infos) = ()
+
+let rememberCmtFile _ = ()
+#endif
+
+let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
+#if OCAML_VERSION >= (5, 3, 0)
+  let module UidTbl = Shape.Uid.Tbl in
+  let uid_to_decl = UidTbl.copy cmtUidToDecl in
+  UidTbl.iter (UidTbl.replace uid_to_decl) cmt_infos.cmt_uid_to_decl;
+  let add_uid_to_decl_from_cmt path =
+    if Sys.file_exists path then
+      try
+        let cmt_infos = Cmt_format.read_cmt path in
+        UidTbl.iter (UidTbl.replace uid_to_decl) cmt_infos.cmt_uid_to_decl
+      with _ -> ()
+  in
+  add_uid_to_decl_from_cmt
+    ((cmtFilePath |> Filename.remove_extension) ^ ".cmti");
+  let loc_of_value_decl = function
+    | Typedtree.Value {val_loc; _} -> Some val_loc
+    | Typedtree.Value_binding {vb_pat = {pat_loc; _}; _} -> Some pat_loc
+    | _ -> None
+  in
+  let loc_of_uid uid =
+    match UidTbl.find_opt uid_to_decl uid with
+    | Some item_decl -> loc_of_value_decl item_decl
+    | None -> None
+  in
+  cmt_infos.cmt_declaration_dependencies
+  |> filter_map (fun (_, uid_def, uid_decl) ->
+         match (loc_of_uid uid_def, loc_of_uid uid_decl) with
+         | Some def_loc, Some decl_loc -> Some (def_loc, decl_loc)
+         | _ -> None)
+#else
+  let _ = cmtFilePath in
   cmt_infos.cmt_value_dependencies
+  |> List.map (fun (valueTo, valueFrom) ->
+         (valueTo.Types.val_loc, valueFrom.Types.val_loc))
 #endif

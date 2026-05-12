@@ -1,0 +1,4 @@
+(library
+ (name termination_fixture)
+ (modules Termination)
+ (flags :standard -w -32-39 -bin-annot))
