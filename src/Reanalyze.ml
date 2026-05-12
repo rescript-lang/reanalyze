@@ -43,11 +43,6 @@ let processCmtFiles ~cmtRoot =
     Filename.check_suffix path ".cmt" || Filename.check_suffix path ".cmti"
   in
   let processCmtFilePaths cmtFilePaths =
-#if OCAML_VERSION >= (5, 3, 0)
-    cmtFilePaths |> List.sort String.compare |> List.iter Compat.rememberCmtFile;
-#else
-    let _ = cmtFilePaths in
-#endif
     cmtFilePaths |> List.iter loadCmtFile
   in
   match cmtRoot with

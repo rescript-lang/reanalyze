@@ -268,27 +268,10 @@ let constant_desc d =
   d
 #endif
 
-#if OCAML_VERSION >= (5, 3, 0)
-let cmtUidToDecl = Shape.Uid.Tbl.create 1024
-
-let rememberCmtInfos (cmt_infos : Cmt_format.cmt_infos) =
-  Shape.Uid.Tbl.iter
-    (Shape.Uid.Tbl.replace cmtUidToDecl)
-    cmt_infos.cmt_uid_to_decl
-
-let rememberCmtFile path =
-  if Sys.file_exists path then
-    try path |> Cmt_format.read_cmt |> rememberCmtInfos with _ -> ()
-#else
-let rememberCmtInfos (_ : Cmt_format.cmt_infos) = ()
-
-let rememberCmtFile _ = ()
-#endif
-
 let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
 #if OCAML_VERSION >= (5, 3, 0)
   let module UidTbl = Shape.Uid.Tbl in
-  let uid_to_decl = UidTbl.copy cmtUidToDecl in
+  let uid_to_decl = UidTbl.create 1024 in
   UidTbl.iter (UidTbl.replace uid_to_decl) cmt_infos.cmt_uid_to_decl;
   let add_uid_to_decl_from_cmt path =
     if Sys.file_exists path then
