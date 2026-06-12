@@ -275,24 +275,90 @@ let rec getSignature (moduleType : Types.module_type) =
     | _ -> [])
   | _ -> []
 
-let rec addModuleValueReferences ~locFrom (moduleType : Types.module_type) =
+let nth_opt items index =
+  if index < 0 then None else try Some (List.nth items index) with _ -> None
+
+let signatureItemName (signatureItem : Types.signature_item) =
+  match signatureItem with
+  | Types.Sig_value _ ->
+    let id, _loc, _kind, _valType = signatureItem |> Compat.getSigValue in
+    Some (Ident.name id)
+  | Types.Sig_module _ | Types.Sig_modtype _ -> (
+    match signatureItem |> Compat.getSigModuleModtype with
+    | Some (id, _moduleType, _moduleLoc) -> Some (Ident.name id)
+    | None -> None)
+  | _ -> None
+
+let findSignatureItem name signature =
+  signature
+  |> List.find_opt (fun signatureItem ->
+         match signatureItemName signatureItem with
+         | Some itemName -> itemName = name
+         | None -> false)
+
+let addValueReferenceFromSignatureItem ~locFrom signatureItem =
+  let _id, locTo, _kind, _valType = signatureItem |> Compat.getSigValue in
+  if not locTo.loc_ghost then
+    addValueReference ~addFileReference:true ~locFrom ~locTo
+
+let rec addAllModuleValueReferences ~locFrom (moduleType : Types.module_type) =
   moduleType |> getSignature
   |> List.iter (fun (signatureItem : Types.signature_item) ->
          match signatureItem with
          | Types.Sig_value _ ->
-           let _id, locTo, _kind, _valType =
-             signatureItem |> Compat.getSigValue
-           in
-           if not locTo.loc_ghost then
-             addValueReference ~addFileReference:true ~locFrom ~locTo
+           addValueReferenceFromSignatureItem ~locFrom signatureItem
          | Types.Sig_module _ | Types.Sig_modtype _ -> (
-           (* Functor arguments are used through their module signatures, so
-              mark nested signature values such as Set.OrderedType.compare. *)
            match signatureItem |> Compat.getSigModuleModtype with
            | Some (_id, moduleType, _moduleLoc) ->
-             addModuleValueReferences ~locFrom moduleType
+             addAllModuleValueReferences ~locFrom moduleType
            | None -> ())
          | _ -> ())
+
+let rec addCoercedModuleValueReferences ~locFrom ~coercion ~actualType =
+  let actualSignature = actualType |> getSignature in
+  match coercion with
+  | Typedtree.Tcoerce_none -> addAllModuleValueReferences ~locFrom actualType
+  | Typedtree.Tcoerce_structure (values, modules) ->
+    let actualFields =
+      actualSignature
+      |> List.filter (function
+           | Types.Sig_type _ | Types.Sig_module _ | Types.Sig_modtype _ ->
+             false
+           | _ -> true)
+    in
+    values
+    |> List.iter (fun (index, _coercion) ->
+           match nth_opt actualFields index with
+           | Some (Types.Sig_value _ as actualItem) ->
+             addValueReferenceFromSignatureItem ~locFrom actualItem
+           | Some _ -> ()
+           | None -> ());
+    let actualModules =
+      actualSignature
+      |> List.filter (function
+           | Types.Sig_module _ | Types.Sig_modtype _ -> true
+           | _ -> false)
+    in
+    modules
+    |> List.iter (fun (id, index, coercion) ->
+           let actualItem =
+             match actualSignature |> findSignatureItem (Ident.name id) with
+             | Some item -> Some item
+             | None -> nth_opt actualModules index
+           in
+           match actualItem with
+           | Some actualItem -> (
+             match actualItem |> Compat.getSigModuleModtype with
+             | Some (_actualId, actualType, _moduleLoc) ->
+               addCoercedModuleValueReferences ~locFrom ~coercion ~actualType
+             | None -> ())
+           | None -> ())
+  | Typedtree.Tcoerce_alias (_env, _path, coercion) ->
+    addCoercedModuleValueReferences ~locFrom ~coercion ~actualType
+  | Typedtree.Tcoerce_functor (_argCoercion, resultCoercion) ->
+    addCoercedModuleValueReferences ~locFrom ~coercion:resultCoercion
+      ~actualType
+  | Typedtree.Tcoerce_primitive _ -> ()
 
 let rec processSignatureItem ~doTypes ~doValues ~moduleLoc ~path
     (si : Types.signature_item) =
@@ -335,9 +401,11 @@ let traverseStructure ~doTypes ~doExternals =
   let pat self p = p |> collectPattern super self in
   let module_expr self (moduleExpr : Typedtree.module_expr) =
     (match moduleExpr.mod_desc with
-    | Tmod_apply (_functorExpr, argumentExpr, _coercion) ->
-      addModuleValueReferences ~locFrom:argumentExpr.mod_loc
-        argumentExpr.mod_type
+    | Tmod_apply (_functorExpr, argumentExpr, coercion) ->
+      (* Functor arguments are used through the parameter coercion, not every
+         value exposed by the actual argument module. *)
+      addCoercedModuleValueReferences ~locFrom:argumentExpr.mod_loc ~coercion
+        ~actualType:argumentExpr.mod_type
     | _ -> ());
     super.Tast_mapper.module_expr self moduleExpr
   in
