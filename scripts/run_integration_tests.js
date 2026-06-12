@@ -58,6 +58,46 @@ function checkDiff() {
   });
 }
 
+function assertIncludes(output, expected) {
+  if (!output.includes(expected)) {
+    throw new Error(`Expected regression output to contain:\n${expected}`);
+  }
+}
+
+function assertNotIncludes(output, unexpected) {
+  if (output.includes(unexpected)) {
+    throw new Error(`Regression output unexpectedly contained:\n${unexpected}`);
+  }
+}
+
+function runRegressionTests() {
+  const cwd = path.join(__dirname, "..", "examples", "regression");
+  const cmtDir = "_build/default/src/.regression_fixture.objs/byte";
+
+  console.log(`${cwd}: dune clean && dune build`);
+  child_process.execFileSync("dune", ["clean", "--root", "."], {
+    cwd,
+    stdio: [0, 1, 2],
+  });
+  child_process.execFileSync("dune", ["build", "--root", "."], {
+    cwd,
+    stdio: [0, 1, 2],
+  });
+
+  console.log(`${cwd}: reanalyze regression assertions`);
+  const output = child_process.execFileSync(
+    reanalyzeFile,
+    ["-ci", "-debug", "-native-build-target", ".", "-dce-cmt", cmtDir],
+    {
+      cwd,
+      encoding: "utf8",
+    }
+  );
+
+  assertIncludes(output, "+definitely_dead is never used");
+  assertIncludes(output, "Source:src/Generated_source.ml");
+}
+
 function checkSetup() {
   console.log("Checking if --version outputs the right version");
   let output;
@@ -89,6 +129,7 @@ function main() {
   try {
     checkSetup();
     cleanBuildExamples();
+    runRegressionTests();
     checkDiff();
 
     console.log("Test successful!");
