@@ -97,9 +97,15 @@ function runRegressionTests() {
   assertIncludes(output, "+definitely_dead is never used");
   assertIncludes(output, "Source:src/Generated_source.ml");
   assertIncludes(output, "Live Value +Functor_argument.Ordered.+compare");
+  assertIncludes(output, "Live Value +Local_side_effects.+_info");
+  assertIncludes(output, "Live Value +Local_side_effects.+process");
+  assertIncludes(output, "Live Value +Local_side_effects.+register");
 
   assertNotIncludes(output, "Parent is a dead module");
   assertNotIncludes(output, "Dead Value +Functor_argument.Ordered.+compare");
+  assertNotIncludes(output, "Dead Value +Local_side_effects.+_info");
+  assertNotIncludes(output, "Dead Value +Local_side_effects.+process");
+  assertNotIncludes(output, "Dead Value +Local_side_effects.+register");
 }
 
 function checkSetup() {
