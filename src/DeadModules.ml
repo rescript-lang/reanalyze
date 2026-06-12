@@ -2,6 +2,20 @@ let active () = true
 
 let table = Hashtbl.create 1
 
+let moduleAncestors moduleName =
+  let parts = String.split_on_char '.' moduleName in
+  let rec loop prefix parts acc =
+    match parts with
+    | [] -> acc
+    | "" :: rest -> loop prefix rest acc
+    | part :: rest ->
+      let prefix =
+        match prefix with "" -> part | _ -> prefix ^ "." ^ part
+      in
+      loop prefix rest (prefix :: acc)
+  in
+  loop "" parts []
+
 let markDead ~isType ~loc path =
   if active () then
     let moduleName = path |> Common.Path.toModuleName ~isType in
@@ -12,10 +26,13 @@ let markDead ~isType ~loc path =
 let markLive ~isType ~(loc : Location.t) path =
   if active () then
     let moduleName = path |> Common.Path.toModuleName ~isType in
-    match Hashtbl.find_opt table moduleName with
-    | None -> Hashtbl.replace table moduleName (true, loc)
-    | Some (false, loc) -> Hashtbl.replace table moduleName (true, loc)
-    | Some (true, _) -> ()
+    (* A live nested item keeps each enclosing module live too. *)
+    moduleName |> moduleAncestors
+    |> List.iter (fun moduleName ->
+           match Hashtbl.find_opt table moduleName with
+           | None -> Hashtbl.replace table moduleName (true, loc)
+           | Some (false, loc) -> Hashtbl.replace table moduleName (true, loc)
+           | Some (true, _) -> ())
 
 let checkModuleDead ~fileName:pos_fname moduleName =
   if active () then
