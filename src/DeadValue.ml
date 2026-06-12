@@ -271,6 +271,25 @@ let rec getSignature (moduleType : Types.module_type) =
     | _ -> [])
   | _ -> []
 
+let rec addModuleValueReferences ~locFrom (moduleType : Types.module_type) =
+  moduleType |> getSignature
+  |> List.iter (fun (signatureItem : Types.signature_item) ->
+         match signatureItem with
+         | Types.Sig_value _ ->
+           let _id, locTo, _kind, _valType =
+             signatureItem |> Compat.getSigValue
+           in
+           if not locTo.loc_ghost then
+             addValueReference ~addFileReference:true ~locFrom ~locTo
+         | Types.Sig_module _ | Types.Sig_modtype _ -> (
+           (* Functor arguments are used through their module signatures, so
+              mark nested signature values such as Set.OrderedType.compare. *)
+           match signatureItem |> Compat.getSigModuleModtype with
+           | Some (_id, moduleType, _moduleLoc) ->
+             addModuleValueReferences ~locFrom moduleType
+           | None -> ())
+         | _ -> ())
+
 let rec processSignatureItem ~doTypes ~doValues ~moduleLoc ~path
     (si : Types.signature_item) =
   match si with
@@ -310,6 +329,14 @@ let traverseStructure ~doTypes ~doExternals =
   let super = Tast_mapper.default in
   let expr self e = e |> collectExpr super self in
   let pat self p = p |> collectPattern super self in
+  let module_expr self (moduleExpr : Typedtree.module_expr) =
+    (match moduleExpr.mod_desc with
+    | Tmod_apply (_functorExpr, argumentExpr, _coercion) ->
+      addModuleValueReferences ~locFrom:argumentExpr.mod_loc
+        argumentExpr.mod_type
+    | _ -> ());
+    super.Tast_mapper.module_expr self moduleExpr
+  in
   let value_binding self vb = vb |> collectValueBinding super self in
   let structure_item self (structureItem : Typedtree.structure_item) =
     let oldModulePath = ModulePath.getCurrent () in
@@ -386,7 +413,7 @@ let traverseStructure ~doTypes ~doExternals =
     ModulePath.setCurrent oldModulePath;
     result
   in
-  {super with expr; pat; structure_item; value_binding}
+  {super with expr; module_expr; pat; structure_item; value_binding}
 
 (* Merge a location's references to another one's *)
 let processValueDependency
