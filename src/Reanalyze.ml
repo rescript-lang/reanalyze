@@ -1,6 +1,6 @@
 open Common
 
-let loadCmtFile cmtFilePath =
+let loadCmtFile ~cmtRoot cmtFilePath =
   let cmt_infos = Cmt_format.read_cmt cmtFilePath in
   let excludePath sourceFile =
     !Cli.excludePaths
@@ -15,7 +15,7 @@ let loadCmtFile cmtFilePath =
            try String.sub sourceFile 0 (String.length prefix) = prefix
            with Invalid_argument _ -> false)
   in
-  match cmt_infos.cmt_annots |> FindSourceFile.cmt with
+  match FindSourceFile.cmt ?cmtRoot cmt_infos with
   | Some sourceFile when not (excludePath sourceFile) ->
     if !Cli.debug then
       Log_.item "Scanning %s Source:%s@."
@@ -43,7 +43,7 @@ let processCmtFiles ~cmtRoot =
     Filename.check_suffix path ".cmt" || Filename.check_suffix path ".cmti"
   in
   let processCmtFilePaths cmtFilePaths =
-    cmtFilePaths |> List.iter loadCmtFile
+    cmtFilePaths |> List.iter (loadCmtFile ~cmtRoot)
   in
   match cmtRoot with
   | Some root ->
