@@ -1,0 +1,4 @@
+(library
+ (name regression_fixture)
+ (modules Generated_source Main)
+ (flags :standard -w -27-32-34-37-39 -bin-annot))

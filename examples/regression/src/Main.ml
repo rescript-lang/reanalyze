@@ -1,0 +1,1 @@
+let definitely_dead () = ()
