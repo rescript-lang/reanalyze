@@ -916,7 +916,7 @@ module Compile = struct
     | Texp_tuple expressions ->
       expressions |> Compat.tupleExpressions
       |> List.map (expression ~ctx) |> Command.unorderedSequence
-#if OCAML_VERSION >= (5, 5, 0)
+#if OCAML_VERSION >= (5, 4, 0)
     | Texp_array (_, expressions) ->
 #else
     | Texp_array expressions ->

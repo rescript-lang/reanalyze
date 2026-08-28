@@ -27,7 +27,7 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
         ({pat_desc = Tpat_any}, id, {loc = {loc_start; loc_ghost} as loc})
     #else
     | Tpat_var (id, {loc = {loc_start; loc_ghost} as loc}, _)
-    #if OCAML_VERSION >= (5, 5, 0)
+    #if OCAML_VERSION >= (5, 4, 0)
     | Tpat_alias
         ({pat_desc = Tpat_any}, id, {loc = {loc_start; loc_ghost} as loc}, _, _)
     #else
@@ -269,7 +269,7 @@ let collectPattern :
   | Typedtree.Tpat_record (cases, _clodsedFlag) ->
     cases
     |> List.iter (fun (_loc, {
-#if OCAML_VERSION >= (5, 5, 0)
+#if OCAML_VERSION >= (5, 4, 0)
                               Data_types.lbl_loc
 #else
                               Types.lbl_loc

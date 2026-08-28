@@ -60,7 +60,7 @@ let rec exprNoSideEffects (expr : Typedtree.expression) =
   | Texp_variant (_lbl, eo) -> eo |> exprOptNoSideEffects
   | Texp_field (e, _lid, _ld) -> e |> exprNoSideEffects
   | Texp_setfield _ -> false
-#if OCAML_VERSION >= (5, 5, 0)
+#if OCAML_VERSION >= (5, 4, 0)
   | Texp_array (_, el) -> el |> List.for_all exprNoSideEffects
 #else
   | Texp_array el -> el |> List.for_all exprNoSideEffects

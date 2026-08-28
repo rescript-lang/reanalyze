@@ -39,7 +39,7 @@ let rec getAttributePayload checkText (attributes : Typedtree.attributes) =
     | {pexp_desc = Pexp_construct ({txt}, _); _} ->
       Some (ConstructPayload (txt |> Longident.flatten |> String.concat "."))
     | {pexp_desc =
-#if OCAML_VERSION >= (5, 5, 0)
+#if OCAML_VERSION >= (5, 4, 0)
         Pexp_tuple labelledExprs} ->
       let exprs = List.map snd labelledExprs in
 #else

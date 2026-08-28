@@ -30,7 +30,7 @@ module Kind = struct
         ( declTypes |> List.map (fun (_lbl, t) -> t |> fromType) |> Array.of_list,
           retType |> fromType )
     | Ttuple ts ->
-#if OCAML_VERSION >= (5, 5, 0)
+#if OCAML_VERSION >= (5, 4, 0)
       Tuple (ts |> List.map (fun (_, t) -> fromType t))
 #else
       Tuple (ts |> List.map fromType)

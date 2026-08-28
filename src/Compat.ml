@@ -269,35 +269,35 @@ let constant_desc d =
 #endif
 
 let tupleExpressions xs =
-#if OCAML_VERSION >= (5, 5, 0)
+#if OCAML_VERSION >= (5, 4, 0)
   List.map snd xs
 #else
   xs
 #endif
 
 let tupleTypes xs =
-#if OCAML_VERSION >= (5, 5, 0)
+#if OCAML_VERSION >= (5, 4, 0)
   List.map snd xs
 #else
   xs
 #endif
 
 let tuplePatterns xs =
-#if OCAML_VERSION >= (5, 5, 0)
+#if OCAML_VERSION >= (5, 4, 0)
   List.map snd xs
 #else
   xs
 #endif
 
 let applyArgToOption arg =
-#if OCAML_VERSION >= (5, 5, 0)
+#if OCAML_VERSION >= (5, 4, 0)
   match arg with Typedtree.Arg e -> Some e | Typedtree.Omitted () -> None
 #else
   arg
 #endif
 
 let applyArgOfExpression e =
-#if OCAML_VERSION >= (5, 5, 0)
+#if OCAML_VERSION >= (5, 4, 0)
   Typedtree.Arg e
 #else
   Some e

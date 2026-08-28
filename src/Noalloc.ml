@@ -70,7 +70,7 @@ let rec processFunDefPat ~funDef ~env ~mem (pat : Typedtree.pattern) =
   | Tpat_alias ({pat_desc = Tpat_any}, id, _) ->
   #else
   | Tpat_var (id, _, _)
-  #if OCAML_VERSION >= (5, 5, 0)
+  #if OCAML_VERSION >= (5, 4, 0)
   | Tpat_alias ({pat_desc = Tpat_any}, id, _, _, _) ->
   #else
   | Tpat_alias ({pat_desc = Tpat_any}, id, _, _) ->
@@ -257,7 +257,7 @@ and processExpr ~funDef ~env ~mem (expr : Typedtree.expression) =
     let offset = ref 0 in
     lbl_all
     |> Array.exists (fun (ld :
-#if OCAML_VERSION >= (5, 5, 0)
+#if OCAML_VERSION >= (5, 4, 0)
                              Data_types.label_description
 #else
                              Types.label_description
