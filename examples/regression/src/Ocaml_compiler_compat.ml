@@ -2,8 +2,9 @@
    The regression ensures reanalyze can traverse the resulting typed tree
    across all supported compiler versions. *)
 
-(* OCaml 5.4 added labels to tuple elements and an extra type field to alias
-   patterns. It also added a mutability flag to array expressions. *)
+(* OCaml 5.4 changed tuple elements to carry an optional label and added an
+   extra type field to alias patterns. It also added a mutability flag to array
+   expressions. *)
 let tuple_alias ((left, right) as pair) =
   let values = [|left; right|] in
   (pair, values)
