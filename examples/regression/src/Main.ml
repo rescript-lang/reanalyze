@@ -5,4 +5,4 @@ let () =
   Functor_argument.use_set ();
   Functor_argument.use_anonymous_set ();
   Local_side_effects.start ();
-  ignore (Ocaml_compiler_compat.run ())
+  Ocaml_compiler_compat.run ()

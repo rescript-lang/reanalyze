@@ -16,4 +16,4 @@ let local_exception_value =
 
 let run () =
   let _pair, values = tuple_alias (local_module_value, local_exception_value) in
-  (optional (), optional ~value:values.(0) ())
+  ignore (optional (), optional ~value:values.(0) ())
