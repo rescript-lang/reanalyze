@@ -271,6 +271,9 @@ let traverseAst () =
     | _ -> false
   in
   let raiseArgs args =
+    let args =
+      args |> List.map (fun (lbl, arg) -> (lbl, Compat.applyArgToOption arg))
+    in
     match args with
     | [(_, Some {Typedtree.exp_desc = Texp_construct ({txt}, _, _)})] ->
       [Exn.fromLid txt] |> Exceptions.fromList
@@ -310,27 +313,35 @@ let traverseAst () =
         :: !currentEvents
     | Texp_apply
         ( {exp_desc = Texp_ident (_, _, atat)},
-          [(_lbl1, Some {exp_desc = Texp_ident (_, _, val_desc)}); arg] )
+          [arg1; arg] )
       when (* raise @@ Exn(...) *)
-           atat |> isApply && val_desc |> isRaise ->
+           atat |> isApply
+           && (match snd arg1 |> Compat.applyArgToOption with
+              | Some {exp_desc = Texp_ident (_, _, val_desc)} -> isRaise val_desc
+              | _ -> false) ->
       let exceptions = [arg] |> raiseArgs in
       currentEvents := {Event.exceptions; loc; kind = Raises} :: !currentEvents;
-      arg |> snd |> iterExprOpt self
+      arg |> snd |> Compat.applyArgToOption |> iterExprOpt self
     | Texp_apply
         ( {exp_desc = Texp_ident (_, _, atat)},
-          [arg; (_lbl1, Some {exp_desc = Texp_ident (_, _, val_desc)})] )
+          [arg; arg2] )
       when (*  Exn(...) |> raise *)
-           atat |> isRevapply && val_desc |> isRaise ->
+           atat |> isRevapply
+           && (match snd arg2 |> Compat.applyArgToOption with
+              | Some {exp_desc = Texp_ident (_, _, val_desc)} -> isRaise val_desc
+              | _ -> false) ->
       let exceptions = [arg] |> raiseArgs in
       currentEvents := {Event.exceptions; loc; kind = Raises} :: !currentEvents;
-      arg |> snd |> iterExprOpt self
+      arg |> snd |> Compat.applyArgToOption |> iterExprOpt self
     | Texp_apply (({exp_desc = Texp_ident (_, _, val_desc)} as e), args) ->
       if val_desc |> isRaise then
         let exceptions = args |> raiseArgs in
         currentEvents :=
           {Event.exceptions; loc; kind = Raises} :: !currentEvents
       else e |> iterExpr self;
-      args |> List.iter (fun (_, eOpt) -> eOpt |> iterExprOpt self)
+      args
+      |> List.iter (fun (_, arg) ->
+             arg |> Compat.applyArgToOption |> iterExprOpt self)
     | Texp_match _ ->
       let e, cases, partial = Compat.getTexpMatch expr.exp_desc in
       let exceptionPatterns = expr.exp_desc |> Compat.texpMatchGetExceptions in

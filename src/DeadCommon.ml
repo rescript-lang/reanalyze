@@ -341,7 +341,11 @@ module ProcessDeadAnnotations = struct
       | Tpat_alias ({pat_desc = Tpat_any}, id, {loc = {loc_start = pos}}) ->
       #else
       | Tpat_var (id, {loc = {loc_start = pos}}, _)
+      #if OCAML_VERSION >= (5, 4, 0)
+      | Tpat_alias ({pat_desc = Tpat_any}, id, {loc = {loc_start = pos}}, _, _) ->
+      #else
       | Tpat_alias ({pat_desc = Tpat_any}, id, {loc = {loc_start = pos}}, _) ->
+      #endif
       #endif
         if !currentlyDisableWarnings then pos |> annotateLive;
         vb_attributes

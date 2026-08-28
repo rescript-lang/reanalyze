@@ -28,7 +28,7 @@ let rec exprNoSideEffects (expr : Typedtree.expression) =
   | Texp_function _ -> true
   | Texp_apply ({exp_desc = Texp_ident (path, _, _)}, args)
     when path |> pathIsWhitelistedForSideEffects ->
-    args |> List.for_all (fun (_, eo) -> eo |> exprOptNoSideEffects)
+    args |> List.for_all (fun (_, arg) -> arg |> applyArgNoSideEffects)
   | Texp_apply _ -> false
   | Texp_sequence (e1, e2) -> e1 |> exprNoSideEffects && e2 |> exprNoSideEffects
   | Texp_let (_, vbs, e) ->
@@ -44,16 +44,27 @@ let rec exprNoSideEffects (expr : Typedtree.expression) =
     let e, cases, partial = expr.exp_desc |> Compat.getTexpMatch in
     partial = Total && e |> exprNoSideEffects
     && cases |> List.for_all caseNoSideEffects
+#if OCAML_VERSION >= (5, 5, 0)
+  | Texp_struct_item ({str_desc = Tstr_exception _ | Tstr_open _}, e) ->
+    e |> exprNoSideEffects
+  | Texp_struct_item _ -> false
+#else
   | Texp_letmodule _ -> false
+#endif
   | Texp_lazy e -> e |> exprNoSideEffects
   | Texp_try _ ->
     let e, cases = expr.exp_desc |> Compat.getTexpTry in
     e |> exprNoSideEffects && cases |> List.for_all caseNoSideEffects
-  | Texp_tuple el -> el |> List.for_all exprNoSideEffects
+  | Texp_tuple el ->
+    el |> Compat.tupleExpressions |> List.for_all exprNoSideEffects
   | Texp_variant (_lbl, eo) -> eo |> exprOptNoSideEffects
   | Texp_field (e, _lid, _ld) -> e |> exprNoSideEffects
   | Texp_setfield _ -> false
+#if OCAML_VERSION >= (5, 4, 0)
+  | Texp_array (_, el) -> el |> List.for_all exprNoSideEffects
+#else
   | Texp_array el -> el |> List.for_all exprNoSideEffects
+#endif
   | Texp_ifthenelse (e1, e2, eo) ->
     e1 |> exprNoSideEffects && e2 |> exprNoSideEffects
     && eo |> exprOptNoSideEffects
@@ -66,7 +77,9 @@ let rec exprNoSideEffects (expr : Typedtree.expression) =
   | Texp_instvar _ -> true
   | Texp_setinstvar _ -> false
   | Texp_override _ -> false
+#if OCAML_VERSION < (5, 5, 0)
   | Texp_letexception (_ec, e) -> e |> exprNoSideEffects
+#endif
   | Texp_object _ -> true
   | Texp_pack _ -> false
   | Texp_unreachable -> false
@@ -75,6 +88,9 @@ let rec exprNoSideEffects (expr : Typedtree.expression) =
 
 and exprOptNoSideEffects eo =
   match eo with None -> true | Some e -> e |> exprNoSideEffects
+
+and applyArgNoSideEffects arg =
+  arg |> Compat.applyArgToOption |> exprOptNoSideEffects
 
 and fieldNoSideEffects ((_ld, rld) : _ * Typedtree.record_label_definition) =
   match rld with

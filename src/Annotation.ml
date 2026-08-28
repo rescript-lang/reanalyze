@@ -38,7 +38,24 @@ let rec getAttributePayload checkText (attributes : Typedtree.attributes) =
       fromExpr e
     | {pexp_desc = Pexp_construct ({txt}, _); _} ->
       Some (ConstructPayload (txt |> Longident.flatten |> String.concat "."))
-    | {pexp_desc = Pexp_tuple exprs | Pexp_array exprs} ->
+    | {pexp_desc =
+#if OCAML_VERSION >= (5, 4, 0)
+        Pexp_tuple labelledExprs} ->
+      let exprs = List.map snd labelledExprs in
+#else
+        Pexp_tuple exprs} ->
+#endif
+      let payloads =
+        exprs |> List.rev
+        |> List.fold_left
+             (fun payloads expr ->
+               match expr |> fromExpr with
+               | Some payload -> payload :: payloads
+               | None -> payloads)
+             []
+      in
+      Some (TuplePayload payloads)
+    | {pexp_desc = Pexp_array exprs} ->
       let payloads =
         exprs |> List.rev
         |> List.fold_left

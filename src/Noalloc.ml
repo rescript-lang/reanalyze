@@ -22,6 +22,7 @@ let processCallee ~env ~funDef ~loc callee =
 let rec processTyp ~(funDef : Il.funDef) ~loc (typ : Types.type_expr) =
   match Compat.get_desc typ with
   | Ttuple ts ->
+    let ts = Compat.tupleTypes ts in
     let scopes = ts |> List.map (processTyp ~funDef ~loc) in
     Il.Tuple scopes
   | Tlink t -> t |> processTyp ~funDef ~loc
@@ -69,7 +70,11 @@ let rec processFunDefPat ~funDef ~env ~mem (pat : Typedtree.pattern) =
   | Tpat_alias ({pat_desc = Tpat_any}, id, _) ->
   #else
   | Tpat_var (id, _, _)
+  #if OCAML_VERSION >= (5, 4, 0)
+  | Tpat_alias ({pat_desc = Tpat_any}, id, _, _, _) ->
+  #else
   | Tpat_alias ({pat_desc = Tpat_any}, id, _, _) ->
+  #endif
   #endif
     let scope = pat.pat_type |> processTyp ~funDef ~loc:pat.pat_loc in
     let newEnv =
@@ -80,6 +85,7 @@ let rec processFunDefPat ~funDef ~env ~mem (pat : Typedtree.pattern) =
     when Compat.unboxPatCstrTxt pat.pat_desc = Longident.Lident "()" ->
     (env, Il.Tuple [])
   | Tpat_tuple pats ->
+    let pats = Compat.tuplePatterns pats in
     let newEnv, scopes =
       pats
       |> List.fold_left
@@ -154,6 +160,7 @@ let rec processLocalBinding ~env ~(pat : Typedtree.pattern)
   #endif
     env |> Il.Env.add ~id:(id |> Ident.name) ~def:(LocalScope scope)
   | Tpat_tuple pats, Tuple scopes ->
+    let pats = Compat.tuplePatterns pats in
     let patsAndScopes = (List.combine pats scopes [@doesNotRaise]) in
     patsAndScopes
     |> List.fold_left
@@ -190,7 +197,7 @@ and processExpr ~funDef ~env ~mem (expr : Typedtree.expression) =
     let kind = vd.val_type |> Il.Kind.fromType in
     args
     |> List.iteri (fun i ((argLabel : Asttypes.arg_label), argOpt) ->
-           match (argLabel, argOpt) with
+           match (argLabel, Compat.applyArgToOption argOpt) with
            | Nolabel, Some (arg : Typedtree.expression) ->
              (match kind with
              | Arrow (declKinds, _) ->
@@ -221,7 +228,8 @@ and processExpr ~funDef ~env ~mem (expr : Typedtree.expression) =
           Format.fprintf ppf "Cannot decode function parameters");
       assert false);
     body |> processExpr ~funDef ~env ~mem
-  | Texp_tuple l -> l |> List.iter (processExpr ~funDef ~env ~mem)
+  | Texp_tuple l ->
+    l |> Compat.tupleExpressions |> List.iter (processExpr ~funDef ~env ~mem)
   | Texp_let (Nonrecursive, [vb], inExpr) ->
     let scope =
       vb.vb_expr.exp_type |> processTyp ~funDef ~loc:vb.vb_expr.exp_loc
@@ -248,7 +256,13 @@ and processExpr ~funDef ~env ~mem (expr : Typedtree.expression) =
   | Texp_field (e, {loc}, {lbl_name; lbl_all}) ->
     let offset = ref 0 in
     lbl_all
-    |> Array.exists (fun (ld : Types.label_description) ->
+    |> Array.exists (fun (ld :
+#if OCAML_VERSION >= (5, 4, 0)
+                             Data_types.label_description
+#else
+                             Types.label_description
+#endif
+                          ) ->
            if ld.lbl_name = lbl_name then true
            else
              let size = ld.lbl_arg |> sizeOfTyp ~loc in
@@ -277,7 +291,10 @@ let rec processGlobal ~env ~id ~mem (expr : Typedtree.expression) =
       Log_.warning ~count:false ~loc:expr.exp_loc ~name:"Noalloc" (fun ppf () ->
           Format.fprintf ppf "processGlobal Id not found: %s" id);
       assert false)
-  | Texp_tuple es -> Tuple (es |> List.map (processGlobal ~env ~id ~mem))
+  | Texp_tuple es ->
+    Tuple
+      (es |> Compat.tupleExpressions
+      |> List.map (processGlobal ~env ~id ~mem))
   | _ ->
     Log_.warning ~count:false ~loc:expr.exp_loc ~name:"Noalloc" (fun ppf () ->
         Format.fprintf ppf "processGlobal not supported yet");
