@@ -268,6 +268,41 @@ let constant_desc d =
   d
 #endif
 
+let tupleExpressions xs =
+#if OCAML_VERSION >= (5, 5, 0)
+  List.map snd xs
+#else
+  xs
+#endif
+
+let tupleTypes xs =
+#if OCAML_VERSION >= (5, 5, 0)
+  List.map snd xs
+#else
+  xs
+#endif
+
+let tuplePatterns xs =
+#if OCAML_VERSION >= (5, 5, 0)
+  List.map snd xs
+#else
+  xs
+#endif
+
+let applyArgToOption arg =
+#if OCAML_VERSION >= (5, 5, 0)
+  match arg with Typedtree.Arg e -> Some e | Typedtree.Omitted () -> None
+#else
+  arg
+#endif
+
+let applyArgOfExpression e =
+#if OCAML_VERSION >= (5, 5, 0)
+  Typedtree.Arg e
+#else
+  Some e
+#endif
+
 let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
 #if OCAML_VERSION >= (5, 3, 0)
   let module UidTbl = Shape.Uid.Tbl in

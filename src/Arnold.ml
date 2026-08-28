@@ -565,7 +565,11 @@ module ExtendFunctionTable = struct
         let functionName = Path.name callee in
         args
         |> List.iter (fun ((argLabel : Asttypes.arg_label), argOpt) ->
-               match (argLabel, argOpt |> extractLabelledArgument) with
+               match
+                 ( argLabel,
+                   argOpt |> Compat.applyArgToOption
+                   |> extractLabelledArgument )
+               with
                | Labelled label, Some (path, loc)
                  when path |> FunctionTable.isInFunctionInTable ~functionTable
                  ->
@@ -607,7 +611,10 @@ module CheckExpressionWellFormed = struct
         let functionName = Path.name functionPath in
         args
         |> List.iter (fun ((argLabel : Asttypes.arg_label), argOpt) ->
-               match argOpt |> ExtendFunctionTable.extractLabelledArgument with
+               match
+                 argOpt |> Compat.applyArgToOption
+                 |> ExtendFunctionTable.extractLabelledArgument
+               with
                | Some (path, loc) -> (
                  match argLabel with
                  | Labelled label -> (
@@ -690,7 +697,7 @@ module Compile = struct
             innerFunctionDefinition.kind
             |> List.map (fun (entry : Kind.entry) ->
                    ( Asttypes.Labelled entry.label,
-                     Some
+                     Compat.applyArgOfExpression
                        {
                          expr with
                          exp_desc =
@@ -713,11 +720,14 @@ module Compile = struct
             args
             |> List.find_opt (fun arg ->
                    match arg with
-                   | Asttypes.Labelled s, Some _ -> s = label
+                   | Asttypes.Labelled s, arg ->
+                     Compat.applyArgToOption arg <> None && s = label
                    | _ -> false)
           in
           let argOpt =
-            match argOpt with Some (_, Some e) -> Some e | _ -> None
+            match argOpt with
+            | Some (_, arg) -> Compat.applyArgToOption arg
+            | _ -> None
           in
           let functionArg () =
             match
@@ -903,7 +913,14 @@ module Compile = struct
       |> Command.unorderedSequence
     | Texp_setfield (e1, _loc, _desc, e2) ->
       [e1; e2] |> List.map (expression ~ctx) |> Command.unorderedSequence
-    | Texp_tuple expressions | Texp_array expressions ->
+    | Texp_tuple expressions ->
+      expressions |> Compat.tupleExpressions
+      |> List.map (expression ~ctx) |> Command.unorderedSequence
+#if OCAML_VERSION >= (5, 5, 0)
+    | Texp_array (_, expressions) ->
+#else
+    | Texp_array expressions ->
+#endif
       expressions |> List.map (expression ~ctx) |> Command.unorderedSequence
     | Texp_assert _ -> Command.nothing
     | Texp_try _ ->
@@ -934,11 +951,13 @@ module Compile = struct
     | Texp_override _ ->
       notImplemented "Texp_override";
       assert false
-    | Texp_letmodule _ ->
-      notImplemented "Texp_letmodule";
-      assert false
-    | Texp_letexception _ ->
-      notImplemented "Texp_letexception";
+#if OCAML_VERSION >= (5, 5, 0)
+    | Texp_struct_item _ ->
+      notImplemented "Texp_struct_item";
+#else
+    | Texp_letmodule _ | Texp_letexception _ ->
+      notImplemented "Texp_letmodule/Texp_letexception";
+#endif
       assert false
     | Texp_lazy _ ->
       notImplemented "Texp_lazy";
@@ -966,7 +985,9 @@ module Compile = struct
   and evalArgs ~args ~ctx command =
     (* Don't assume any evaluation order on the arguments *)
     let commands =
-      args |> List.map (fun (_, eOpt) -> eOpt |> expressionOpt ~ctx)
+      args
+      |> List.map (fun (_, arg) ->
+             arg |> Compat.applyArgToOption |> expressionOpt ~ctx)
     in
     let open Command in
     unorderedSequence commands +++ command

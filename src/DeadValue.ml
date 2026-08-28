@@ -27,8 +27,13 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
         ({pat_desc = Tpat_any}, id, {loc = {loc_start; loc_ghost} as loc})
     #else
     | Tpat_var (id, {loc = {loc_start; loc_ghost} as loc}, _)
+    #if OCAML_VERSION >= (5, 5, 0)
+    | Tpat_alias
+        ({pat_desc = Tpat_any}, id, {loc = {loc_start; loc_ghost} as loc}, _, _)
+    #else
     | Tpat_alias
         ({pat_desc = Tpat_any}, id, {loc = {loc_start; loc_ghost} as loc}, _)
+    #endif
     #endif
       when (not loc_ghost) && not vb.vb_loc.loc_ghost ->
       let name = Ident.name id |> Name.create ~isInterface:false in
@@ -91,6 +96,9 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
   r
 
 let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ~path args =
+  let args =
+    List.map (fun (lbl, arg) -> (lbl, Compat.applyArgToOption arg)) args
+  in
   if expType |> DeadOptionalArgs.hasOptionalArgs then (
     let supplied = ref [] in
     let suppliedMaybe = ref [] in
@@ -260,7 +268,13 @@ let collectPattern :
   (match pat.pat_desc with
   | Typedtree.Tpat_record (cases, _clodsedFlag) ->
     cases
-    |> List.iter (fun (_loc, {Types.lbl_loc = {loc_start = posTo}}, _pat) ->
+    |> List.iter (fun (_loc, {
+#if OCAML_VERSION >= (5, 5, 0)
+                              Data_types.lbl_loc
+#else
+                              Types.lbl_loc
+#endif
+                                = {loc_start = posTo}}, _pat) ->
            if !Config.analyzeTypes then
              DeadType.addTypeReference ~posFrom ~posTo)
   | _ -> ());

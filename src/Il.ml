@@ -29,7 +29,12 @@ module Kind = struct
       Arrow
         ( declTypes |> List.map (fun (_lbl, t) -> t |> fromType) |> Array.of_list,
           retType |> fromType )
-    | Ttuple ts -> Tuple (ts |> List.map fromType)
+    | Ttuple ts ->
+#if OCAML_VERSION >= (5, 5, 0)
+      Tuple (ts |> List.map (fun (_, t) -> fromType t))
+#else
+      Tuple (ts |> List.map fromType)
+#endif
     | _ -> Star
 end
 
