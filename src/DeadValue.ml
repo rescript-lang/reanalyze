@@ -141,12 +141,25 @@ let rec moduleIdent (moduleExpr : Typedtree.module_expr) =
   | Tmod_constraint (inner, _, _, _) -> moduleIdent inner
   | _ -> None
 
-(* The next functor expression physically equal to the first component gets
-   the second as its key: the module binding's name for named functors, and
-   the enclosing functor's key for curried parameters. Other functors (inline
-   applications) are keyed by their own position. *)
-let functorChainNext : (Typedtree.module_expr * Lexing.position) option ref =
-  ref None
+(* Keys of functor expressions, by node identity: the module binding's name
+   for named functors, and the enclosing functor's key for curried parameters.
+   Functors not listed (inline applications) are keyed by their own position.
+   A list rather than a single slot, as the mapper may visit a binding's body
+   (and the bindings nested in it) before its module expression. *)
+let functorKeys : (Typedtree.module_expr * Lexing.position) list ref = ref []
+
+let setFunctorKey (moduleExpr : Typedtree.module_expr) pos =
+  functorKeys := (moduleExpr, pos) :: !functorKeys
+
+let findFunctorKey (moduleExpr : Typedtree.module_expr) =
+  match List.find_opt (fun (e, _) -> e == moduleExpr) !functorKeys with
+  | Some (_, pos) -> Some pos
+  | None -> None
+
+(* Functors bound with [let module], by identifier: such bindings are not
+   registered as declarations before OCaml 5.5, so applications cannot find
+   them by uid. *)
+let letModuleFunctors : (Ident.t * Lexing.position) list ref = ref []
 
 let rec pathComponents (path : Path.t) =
   match path with
@@ -194,6 +207,11 @@ let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
     (match (parameter, pathComponents path) with
     | Some {functorDef; paramIndex}, Some components ->
       let key = (functorDef, paramIndex, components) in
+      if !Common.Cli.debug then
+        Log_.item "parameterCall %s functor:%s index:%d@."
+          (String.concat "." components)
+          (functorDef |> posToString)
+          paramIndex;
       let calls =
         match Hashtbl.find_opt parameterCalls key with
         | Some calls -> calls
@@ -274,8 +292,11 @@ let rec collectExpr super self (e : Typedtree.expression) =
      the structure item handler covers. *)
   #if OCAML_VERSION < (5, 5, 0)
   (match e.exp_desc with
-  | Texp_letmodule (_, name, _, moduleExpr, _) ->
-    functorChainNext := Some (moduleExpr, name.loc.loc_start)
+  | Texp_letmodule (id, name, _, moduleExpr, _) ->
+    setFunctorKey moduleExpr name.loc.loc_start;
+    (match id with
+    | Some id -> letModuleFunctors := (id, name.loc.loc_start) :: !letModuleFunctors
+    | None -> ())
   | _ -> ());
   #endif
   (match e.exp_desc with
@@ -664,7 +685,7 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
         | None -> None)
       | Tmod_constraint (inner, _, _, _) -> headKey inner
       | Tmod_functor _ ->
-        (* Inline functor: keyed by its own position, see [functorChainNext]. *)
+        (* Inline functor: keyed by its own position, see [functorKeys]. *)
         Some (e.mod_loc.loc_start, 0)
       | Tmod_ident (path, lid) -> (
         match !identResolutions.moduleDefinition lid.loc (Path.last path) with
@@ -672,11 +693,28 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
           match (moduleIdent definition, definition.mod_desc) with
           | None, Tmod_apply _ -> headKey definition
           | _ -> Some (nameLoc.loc_start, 0))
-        | None -> None)
+        | None -> (
+          match
+            List.find_opt
+              (fun (id, _) -> Ident.same id (Path.head path))
+              !letModuleFunctors
+          with
+          | Some (_, pos) -> Some (pos, 0)
+          | None -> None
+          | exception _ -> None))
       | _ -> None
     in
     let head, args = flatten moduleExpr [] in
-    match headKey head with
+    let key = headKey head in
+    if !Common.Cli.debug then
+      Log_.item "functorApplication %s key:%s args:%d@."
+        (moduleExpr.mod_loc.loc_start |> posToString)
+        (match key with
+        | Some (pos, consumed) ->
+          Printf.sprintf "%s+%d" (pos |> posToString) consumed
+        | None -> "none")
+        (List.length args);
+    match key with
     | Some (key, consumed) ->
       args
       |> List.iteri (fun i argumentExpr ->
@@ -699,17 +737,16 @@ let traverseStructure ~doTypes ~doExternals =
     (match moduleExpr.mod_desc with
     | Tmod_constraint (inner, _, _, _) -> (
       (* [module F : FT = functor ...]: carry the binding's key through. *)
-      match !functorChainNext with
-      | Some (next, pos) when next == moduleExpr ->
-        functorChainNext := Some (inner, pos)
-      | _ -> ())
+      match findFunctorKey moduleExpr with
+      | Some pos -> setFunctorKey inner pos
+      | None -> ())
     | Tmod_functor (param, body) ->
       let functorDef =
-        match !functorChainNext with
-        | Some (next, pos) when next == moduleExpr -> pos
-        | _ -> moduleExpr.mod_loc.loc_start
+        match findFunctorKey moduleExpr with
+        | Some pos -> pos
+        | None -> moduleExpr.mod_loc.loc_start
       in
-      functorChainNext := Some (body, functorDef);
+      setFunctorKey body functorDef;
       let paramIndex =
         !functorParameters
         |> List.filter (fun p -> p.functorDef = functorDef)
@@ -761,7 +798,7 @@ let traverseStructure ~doTypes ~doExternals =
     (match structureItem.str_desc with
     | Tstr_module {mb_expr; mb_id; mb_loc; mb_name} -> (
       currentModuleBindingPos := mb_name.loc.loc_start;
-      functorChainNext := Some (mb_expr, mb_name.loc.loc_start);
+      setFunctorKey mb_expr mb_name.loc.loc_start;
       let hasInterface =
         match mb_expr.mod_desc with Tmod_constraint _ -> true | _ -> false
       in
@@ -917,8 +954,11 @@ let processStructure ~cmt_value_dependencies ~cmt_ident_resolutions ~doTypes
   let traverseStructure = traverseStructure ~doTypes ~doExternals in
   identResolutions := cmt_ident_resolutions;
   recordedApplications := [];
+  letModuleFunctors := [];
+  functorKeys := [];
   structure |> traverseStructure.structure traverseStructure |> ignore;
   recordedApplications := [];
+  functorKeys := [];
   identResolutions := Compat.emptyIdentResolutions;
   let valueDependencies = cmt_value_dependencies |> List.rev in
   delayedValueDependencies :=
