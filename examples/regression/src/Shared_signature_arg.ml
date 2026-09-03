@@ -285,3 +285,29 @@ end
 
 let run_shadow () =
   ignore (run_letalias () + Applied_h.run () + Shadow.Applied3.run ())
+
+(* A nested module in the parameter's signature, constrained by a named
+   module type: [M.N.g] must be credited to the argument's [N.g]. *)
+module type With_nested = sig
+  module N : Shared_signature.O
+end
+
+module Nested_arg : With_nested = struct
+  module N = struct
+    let g ?(x = 0) () = x
+  end
+end
+
+module Nested_other : With_nested = struct
+  module N = struct
+    let g ?(x = 0) () = x
+  end
+end
+
+module Apply_nested (M : With_nested) = struct
+  let run () = M.N.g ~x:1 ()
+end
+
+module Applied_nested = Apply_nested (Nested_arg)
+
+let run_nested () = ignore (Applied_nested.run () + Nested_other.N.g ())

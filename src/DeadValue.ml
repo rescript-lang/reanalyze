@@ -609,12 +609,19 @@ let findSignatureItem name signature =
 
 (* The value items a module coercion uses, with the path of submodules
    leading to each. *)
+(* Signature of a module type, with aliases of named module types expanded
+   ([module N : Other.O] inside a signature is [Mty_ident] in the typed tree,
+   which exposes no items). Only runtime modules ([Sig_module]) are walked:
+   a [Sig_modtype] declaration has no fields. *)
+let expandedSignature (moduleType : Types.module_type) =
+  moduleType |> !identResolutions.expandModuleType |> getSignature
+
 let rec iterAllModuleValues ~path (moduleType : Types.module_type) f =
-  moduleType |> getSignature
+  moduleType |> expandedSignature
   |> List.iter (fun (signatureItem : Types.signature_item) ->
          match signatureItem with
          | Types.Sig_value _ -> f ~path signatureItem
-         | Types.Sig_module _ | Types.Sig_modtype _ -> (
+         | Types.Sig_module _ -> (
            match signatureItem |> Compat.getSigModuleModtype with
            | Some (id, moduleType, _moduleLoc) ->
              iterAllModuleValues ~path:(path @ [Ident.name id]) moduleType f
@@ -622,45 +629,27 @@ let rec iterAllModuleValues ~path (moduleType : Types.module_type) f =
          | _ -> ())
 
 let rec iterCoercedValues ~path ~coercion ~actualType f =
-  let actualSignature = actualType |> getSignature in
+  let actualSignature = actualType |> expandedSignature in
   match coercion with
   | Typedtree.Tcoerce_none -> iterAllModuleValues ~path actualType f
-  | Typedtree.Tcoerce_structure (values, modules) ->
-    let actualFields =
-      actualSignature
-      |> List.filter (function
-           | Types.Sig_type _ | Types.Sig_module _ | Types.Sig_modtype _ ->
-             false
-           | _ -> true)
-    in
-    values
-    |> List.iter (fun (index, _coercion) ->
-           match nth_opt actualFields index with
+  | Typedtree.Tcoerce_structure (fields, _idPositions) ->
+    (* [fields] has one entry per runtime component of the target, giving
+       the position in the source's runtime fields and the coercion of that
+       component; submodules recurse with theirs. The second list only maps
+       source module identifiers to positions, for aliases. *)
+    let runtimeFields = actualSignature |> List.filter Compat.isRuntimeField in
+    fields
+    |> List.iter (fun (index, coercion) ->
+           match nth_opt runtimeFields index with
            | Some (Types.Sig_value _ as actualItem) -> f ~path actualItem
-           | Some _ -> ()
-           | None -> ());
-    let actualModules =
-      actualSignature
-      |> List.filter (function
-           | Types.Sig_module _ | Types.Sig_modtype _ -> true
-           | _ -> false)
-    in
-    modules
-    |> List.iter (fun (id, index, coercion) ->
-           let actualItem =
-             match actualSignature |> findSignatureItem (Ident.name id) with
-             | Some item -> Some item
-             | None -> nth_opt actualModules index
-           in
-           match actualItem with
-           | Some actualItem -> (
+           | Some (Types.Sig_module _ as actualItem) -> (
              match actualItem |> Compat.getSigModuleModtype with
              | Some (actualId, actualType, _moduleLoc) ->
                iterCoercedValues
                  ~path:(path @ [Ident.name actualId])
                  ~coercion ~actualType f
              | None -> ())
-           | None -> ())
+           | _ -> ())
   | Typedtree.Tcoerce_alias (_env, _path, coercion) ->
     iterCoercedValues ~path ~coercion ~actualType f
   | Typedtree.Tcoerce_functor (_argCoercion, resultCoercion) ->
@@ -813,7 +802,7 @@ let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
       | None -> None)
   in
   let rec viaSignature (moduleType : Types.module_type) components =
-    let signature = moduleType |> getSignature in
+    let signature = moduleType |> expandedSignature in
     match components with
     | [] -> None
     | [name] -> (
@@ -824,11 +813,11 @@ let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
       | _ -> None)
     | m :: rest -> (
       match signature |> findSignatureItem m with
-      | Some item -> (
+      | Some (Types.Sig_module _ as item) -> (
         match item |> Compat.getSigModuleModtype with
         | Some (_id, moduleType, _loc) -> viaSignature moduleType rest
         | None -> None)
-      | None -> None)
+      | _ -> None)
   in
   let moduleType = argumentModuleType argumentExpr in
   Direct
@@ -941,6 +930,23 @@ let traverseStructure ~doTypes ~doExternals =
         | _ -> moduleExpr.mod_loc
       in
       let actualType = argumentModuleType argumentExpr in
+      if !Common.Cli.debug then
+        Log_.item "functorArgument %s coercion:%s type:%s items:%d@."
+          (argumentExpr.mod_loc.loc_start |> posToString)
+          (match coercion with
+          | Tcoerce_none -> "none"
+          | Tcoerce_structure (vs, ms) ->
+            Printf.sprintf "structure(%d values, %d modules)" (List.length vs)
+              (List.length ms)
+          | Tcoerce_alias _ -> "alias"
+          | Tcoerce_functor _ -> "functor"
+          | Tcoerce_primitive _ -> "primitive")
+          (match actualType with
+          | Mty_ident p -> "ident " ^ Path.name p
+          | Mty_signature _ -> "signature"
+          | Mty_functor _ -> "functor"
+          | Mty_alias p -> "alias " ^ Path.name p)
+          (List.length (expandedSignature actualType));
       let parameter =
         match ident with
         | Some (path, _) when Compat.shapeResolutionAvailable -> (
