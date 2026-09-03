@@ -19,4 +19,6 @@ let () =
   Shared_signature_arg.run_nested ();
   Shared_signature_arg.run_chain ();
   Cross_alias_use.run ();
+  Cross_alias_use.run_partial ();
+  Shared_signature_arg.run_local_partial ();
   ignore (Included_sig.M.f ())

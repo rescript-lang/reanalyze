@@ -240,6 +240,15 @@ function runRegressionTests() {
       "optional argument x of function Opt_cross.+g is always supplied"
     );
     assertIncludes(output, "Live Value +Included_sig.M.+f");
+    // Partial applications: held by a let module, and bound in another file.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_letpartial.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_cross_partial.+g is always supplied"
+    );
     assertIncludes(
       output,
       "optional argument x of function Opt_constrained.+g is always supplied"

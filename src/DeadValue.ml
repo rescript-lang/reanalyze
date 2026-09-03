@@ -214,7 +214,7 @@ let findFunctorKey (moduleExpr : Typedtree.module_expr) =
 (* Functors that applications in the same file cannot find by uid, keyed by
    identifier: [let module] bindings (not registered as declarations before
    OCaml 5.5) and recursive modules (whose occurrences have no uid). *)
-let functorsByIdent : (Ident.t * Lexing.position) list ref = ref []
+let functorsByIdent : (Ident.t * (Lexing.position * int)) list ref = ref []
 
 let rec pathComponents (path : Path.t) =
   match path with
@@ -377,27 +377,19 @@ let rec functorKeyOfHead ~fuel (e : Typedtree.module_expr) =
     | Tmod_functor _ ->
       (* Inline functor: keyed by its own position, see [functorKeys]. *)
       Some (e.mod_loc.loc_start, 0)
-    | Tmod_ident (path, lid) -> (
+    | Tmod_ident (path, _lid) -> (
       let byIdent () =
         match
           List.find_opt
             (fun (id, _) -> Ident.same id (Path.head path))
             !functorsByIdent
         with
-        | Some (_, pos) -> Some (pos, 0)
+        | Some (_, key) -> Some key
         | None -> None
         | exception _ -> None
       in
-      match !identResolutions.moduleDefinition lid.loc (Path.last path) with
-      | Some (nameLoc, definition) -> (
-        match (moduleIdent definition, definition.mod_desc) with
-        | None, Tmod_apply _ -> functorKeyOfHead ~fuel:(fuel - 1) definition
-        | Some _, _ -> (
-          (* An alias: chase it, falling back to the alias's own binding. *)
-          match functorKeyOfHead ~fuel:(fuel - 1) definition with
-          | Some key -> Some key
-          | None -> Some (nameLoc.loc_start, 0))
-        | _ -> Some (nameLoc.loc_start, 0))
+      match !identResolutions.headKey fuel e with
+      | Some (nameLoc, consumed) -> Some (nameLoc.loc_start, consumed)
       | None -> byIdent ())
     | _ -> None
 
@@ -414,14 +406,15 @@ let rec collectExpr super self (e : Typedtree.expression) =
     registerParameterAlias id moduleExpr;
     (match id with
     | Some id ->
-      (* [let module G = F in]: G stands for F's key. *)
+      (* [let module G = F in] or [let module G = F (A) in]: G stands for
+         F's key, with the arguments already consumed. *)
       let key =
-        match moduleIdent moduleExpr with
-        | Some _ -> (
+        match moduleExpr.mod_desc with
+        | Tmod_functor _ -> (name.loc.loc_start, 0)
+        | _ -> (
           match functorKeyOfHead ~fuel:8 moduleExpr with
-          | Some (key, 0) -> key
-          | _ -> name.loc.loc_start)
-        | None -> name.loc.loc_start
+          | Some key -> key
+          | None -> (name.loc.loc_start, 0))
       in
       functorsByIdent := (id, key) :: !functorsByIdent
     | None -> ())
@@ -1007,7 +1000,7 @@ let traverseStructure ~doTypes ~doExternals =
              match mb.mb_id with
              | Some id ->
                functorsByIdent :=
-                 (id, mb.mb_name.loc.loc_start) :: !functorsByIdent
+                 (id, (mb.mb_name.loc.loc_start, 0)) :: !functorsByIdent
              | None -> ())
     | Tstr_primitive vd when doExternals && !Config.analyzeExternals ->
       let currentModulePath = ModulePath.getCurrent () in
