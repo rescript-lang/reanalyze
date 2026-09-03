@@ -365,15 +365,13 @@ let addValueReferenceOrRedirect ~(locFrom : Location.t) ~(locTo : Location.t)
    arguments already consumed by partial applications it stands for, as in
    [module G = F (A)] followed by [G (B)]. Aliases ([module G = F]) are
    chased within the current file. *)
-let rec functorKeyOfHead ~fuel (e : Typedtree.module_expr) =
-  if fuel = 0 then None
-  else
+let rec functorKeyOfHead (e : Typedtree.module_expr) =
     match e.mod_desc with
     | Tmod_apply (functorExpr, _, _) -> (
-      match functorKeyOfHead ~fuel functorExpr with
+      match functorKeyOfHead functorExpr with
       | Some (key, consumed) -> Some (key, consumed + 1)
       | None -> None)
-    | Tmod_constraint (inner, _, _, _) -> functorKeyOfHead ~fuel inner
+    | Tmod_constraint (inner, _, _, _) -> functorKeyOfHead inner
     | Tmod_functor _ ->
       (* Inline functor: keyed by its own position, see [functorKeys]. *)
       Some (e.mod_loc.loc_start, 0)
@@ -388,7 +386,7 @@ let rec functorKeyOfHead ~fuel (e : Typedtree.module_expr) =
         | None -> None
         | exception _ -> None
       in
-      match !identResolutions.headKey fuel e with
+      match !identResolutions.headKey Compat.noHeadVisited e with
       | Some (nameLoc, consumed) -> Some (nameLoc.loc_start, consumed)
       | None -> byIdent ())
     | _ -> None
@@ -412,7 +410,7 @@ let rec collectExpr super self (e : Typedtree.expression) =
         match moduleExpr.mod_desc with
         | Tmod_functor _ -> (name.loc.loc_start, 0)
         | _ -> (
-          match functorKeyOfHead ~fuel:8 moduleExpr with
+          match functorKeyOfHead moduleExpr with
           | Some key -> key
           | None -> (name.loc.loc_start, 0))
       in
@@ -842,7 +840,7 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
       | _ -> (e, args)
     in
     let head, args = flatten moduleExpr [] in
-    let key = functorKeyOfHead ~fuel:8 head in
+    let key = functorKeyOfHead head in
     if !Common.Cli.debug then
       Log_.item "functorApplication %s key:%s args:%d@."
         (moduleExpr.mod_loc.loc_start |> posToString)

@@ -21,4 +21,6 @@ let () =
   Cross_alias_use.run ();
   Cross_alias_use.run_partial ();
   Shared_signature_arg.run_local_partial ();
-  ignore (Included_sig.M.f ())
+  ignore (Included_sig.M.f ());
+  ignore (Included_sig.W.X.f ());
+  Shared_signature_arg.run_alias9 ()

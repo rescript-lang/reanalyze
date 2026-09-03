@@ -365,3 +365,23 @@ let run_letpartial () =
   Applied.run ()
 
 let run_local_partial () = ignore (run_letpartial ())
+
+
+(* A functor reached through nine aliases. *)
+module Opt_alias9 : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Alias1 = Apply_opt
+module Alias2 = Alias1
+module Alias3 = Alias2
+module Alias4 = Alias3
+module Alias5 = Alias4
+module Alias6 = Alias5
+module Alias7 = Alias6
+module Alias8 = Alias7
+module Alias9 = Alias8
+
+module Applied_alias9 = Alias9 (Opt_alias9)
+
+let run_alias9 () = ignore (Applied_alias9.run ())
