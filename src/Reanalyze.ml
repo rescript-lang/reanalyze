@@ -43,6 +43,7 @@ let processCmtFiles ~cmtRoot =
     Filename.check_suffix path ".cmt" || Filename.check_suffix path ".cmti"
   in
   let processCmtFilePaths cmtFilePaths =
+    cmtFilePaths |> List.iter Compat.registerCmtFile;
     cmtFilePaths |> List.iter (loadCmtFile ~cmtRoot)
   in
   match cmtRoot with
@@ -88,6 +89,7 @@ let runAnalysis ~cmtRoot ~ppf =
 
   processCmtFiles ~cmtRoot;
   if runConfig.dce then (
+    DeadValue.forceDelayedItems ();
     DeadException.forceDelayedItems ();
     DeadOptionalArgs.forceDelayedItems ();
     DeadCommon.reportDead ~checkOptionalArg:DeadOptionalArgs.check ppf;

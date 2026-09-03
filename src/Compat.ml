@@ -303,26 +303,80 @@ let applyArgOfExpression e =
   Some e
 #endif
 
+(* Index of the .cmt/.cmti files under analysis, keyed by compilation unit
+   name. Populated before processing so declaration dependencies pointing at
+   other units (e.g. a functor result constrained by a module type defined in
+   another file) can be resolved regardless of processing order. *)
+let cmtFilesByUnit : (string, string list) Hashtbl.t = Hashtbl.create 256
+
+let unitNameOfCmtFile path =
+  path |> Filename.basename |> Filename.remove_extension
+  |> String.capitalize_ascii
+
+let registerCmtFile path =
+  let unit = unitNameOfCmtFile path in
+  let existing =
+    match Hashtbl.find_opt cmtFilesByUnit unit with
+    | Some paths -> paths
+    | None -> []
+  in
+  if not (List.mem path existing) then
+    Hashtbl.replace cmtFilesByUnit unit (path :: existing)
+
 let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
 #if OCAML_VERSION >= (5, 3, 0)
   let module UidTbl = Shape.Uid.Tbl in
   let uid_to_decl = UidTbl.create 1024 in
   UidTbl.iter (UidTbl.replace uid_to_decl) cmt_infos.cmt_uid_to_decl;
+  let loadedFiles = Hashtbl.create 16 in
   let add_uid_to_decl_from_cmt path =
-    if Sys.file_exists path then
+    if (not (Hashtbl.mem loadedFiles path)) && Sys.file_exists path then (
+      Hashtbl.replace loadedFiles path ();
       try
         let cmt_infos = Cmt_format.read_cmt path in
-        UidTbl.iter (UidTbl.replace uid_to_decl) cmt_infos.cmt_uid_to_decl
-      with _ -> ()
+        UidTbl.iter
+          (fun uid decl ->
+            if not (UidTbl.mem uid_to_decl uid) then
+              UidTbl.replace uid_to_decl uid decl)
+          cmt_infos.cmt_uid_to_decl
+      with _ -> ())
   in
+  Hashtbl.replace loadedFiles cmtFilePath ();
   add_uid_to_decl_from_cmt
     ((cmtFilePath |> Filename.remove_extension) ^ ".cmti");
+  let loadedUnits = Hashtbl.create 16 in
+  let load_unit comp_unit =
+    if not (Hashtbl.mem loadedUnits comp_unit) then (
+      Hashtbl.replace loadedUnits comp_unit ();
+      let indexed =
+        match Hashtbl.find_opt cmtFilesByUnit comp_unit with
+        | Some paths -> paths
+        | None -> []
+      in
+      (* Fall back to sibling files, for callers that did not register. *)
+      let dir = Filename.dirname cmtFilePath in
+      let siblings =
+        [".cmt"; ".cmti"]
+        |> List.concat_map (fun ext ->
+               [
+                 Filename.concat dir (comp_unit ^ ext);
+                 Filename.concat dir (String.uncapitalize_ascii comp_unit ^ ext);
+               ])
+      in
+      List.iter add_uid_to_decl_from_cmt (indexed @ siblings))
+  in
   let loc_of_value_decl = function
     | Typedtree.Value {val_loc; _} -> Some val_loc
     | Typedtree.Value_binding {vb_pat = {pat_loc; _}; _} -> Some pat_loc
     | _ -> None
   in
   let loc_of_uid uid =
+    (match UidTbl.find_opt uid_to_decl uid with
+    | None -> (
+      match uid with
+      | Shape.Uid.Item {comp_unit; _} -> load_unit comp_unit
+      | _ -> ())
+    | Some _ -> ());
     match UidTbl.find_opt uid_to_decl uid with
     | Some item_decl -> loc_of_value_decl item_decl
     | None -> None
