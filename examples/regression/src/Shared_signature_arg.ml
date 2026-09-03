@@ -833,3 +833,29 @@ module Arg_p2 = struct
 end
 
 module Applied_fp2 = F_param (Arg_p2)
+
+(* Constraint-wrapped right-hand sides where a functor key is derived: a
+   recursive binding of a constrained partial application, and a let-module
+   binding of a constrained functor. *)
+module Opt_recc : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_letc : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module rec G_c : Opt_functor = (Apply2 (Chosen) : Opt_functor)
+
+module Applied_recc = G_c (Opt_recc)
+
+let run_letc () =
+  let module F : Opt_functor =
+    (functor (M : Shared_signature.O) -> struct
+      let run () = M.g ~x:1 ()
+    end : Opt_functor)
+  in
+  let module A = F (Opt_letc) in
+  A.run ()
+
+let run_constrained () = ignore (Applied_recc.run () + run_letc ())
