@@ -246,6 +246,15 @@ function runRegressionTests() {
       output,
       "optional argument x of function Opt_alias9.+g is always supplied"
     );
+    // A nested functor applied through Outer (A).Inner; a recursive alias.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_ext.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_rec_alias.+g is always supplied"
+    );
     // Partial applications: held by a let module, and bound in another file.
     assertIncludes(
       output,

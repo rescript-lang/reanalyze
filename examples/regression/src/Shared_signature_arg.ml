@@ -385,3 +385,31 @@ module Alias9 = Alias8
 module Applied_alias9 = Alias9 (Opt_alias9)
 
 let run_alias9 () = ignore (Applied_alias9.run ())
+
+(* A nested functor applied through an extended path: [Outer_f (A).Inner (B)]. *)
+module Opt_ext : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Outer_f (A : Shared_signature.S) = struct
+  module Inner (B : Shared_signature.O) = struct
+    let run () = A.f () + B.g ~x:1 ()
+  end
+end
+
+module Applied_outer_f = Outer_f (Chosen)
+module Applied_ext = Applied_outer_f.Inner (Opt_ext)
+
+(* A recursive module binding aliasing a functor. *)
+module Opt_rec_alias : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module rec Rec_alias : functor (M : Shared_signature.O) -> sig
+  val run : unit -> int
+end =
+  Apply_opt
+
+module Applied_rec_alias = Rec_alias (Opt_rec_alias)
+
+let run_ext () = ignore (Applied_ext.run () + Applied_rec_alias.run ())

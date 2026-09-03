@@ -997,8 +997,17 @@ let traverseStructure ~doTypes ~doExternals =
              claimFunctorKey mb.mb_expr mb.mb_name.loc.loc_start;
              match mb.mb_id with
              | Some id ->
-               functorsByIdent :=
-                 (id, (mb.mb_name.loc.loc_start, 0)) :: !functorsByIdent
+               (* [module rec G : T = F], or a partial application: G stands
+                  for F's key. *)
+               let key =
+                 match (moduleIdent mb.mb_expr, mb.mb_expr.mod_desc) with
+                 | None, Tmod_functor _ -> (mb.mb_name.loc.loc_start, 0)
+                 | _ -> (
+                   match functorKeyOfHead mb.mb_expr with
+                   | Some key -> key
+                   | None -> (mb.mb_name.loc.loc_start, 0))
+               in
+               functorsByIdent := (id, key) :: !functorsByIdent
              | None -> ())
     | Tstr_primitive vd when doExternals && !Config.analyzeExternals ->
       let currentModulePath = ModulePath.getCurrent () in
