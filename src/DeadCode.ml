@@ -10,9 +10,11 @@ let processSignature ~doValues ~doTypes (signature : Types.signature) =
 
 (* Restrict the declarations taken from a file's signature to definitions of
    the file itself, see [DeadValue.setSignatureValueFilter]. *)
-let setSignatureValueFilter ~(fileName : string option) ~moduleTypeRanges =
+let setSignatureValueFilter ~(fileName : string option) ~buildDir
+    ~moduleTypeRanges =
   match fileName with
-  | Some fileName -> DeadValue.setSignatureValueFilter ~fileName ~moduleTypeRanges
+  | Some fileName ->
+    DeadValue.setSignatureValueFilter ~fileName ~buildDir ~moduleTypeRanges
   | None -> DeadValue.isSignatureValueDeclaration := fun _ -> true
 
 (* Locations of every [module type] declaration of a file, at any depth. *)
@@ -73,6 +75,7 @@ let processCmt ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
   | Interface signature ->
     ProcessDeadAnnotations.signature signature;
     setSignatureValueFilter ~fileName:cmt_infos.cmt_sourcefile
+      ~buildDir:cmt_infos.cmt_builddir
       ~moduleTypeRanges:(moduleTypeRangesOfSignature signature);
     processSignature ~doValues:true ~doTypes:true signature.sig_type
   | Implementation structure ->
@@ -81,6 +84,7 @@ let processCmt ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
     in
     ProcessDeadAnnotations.structure ~doGenType:(not cmtiExists) structure;
     setSignatureValueFilter ~fileName:cmt_infos.cmt_sourcefile
+      ~buildDir:cmt_infos.cmt_builddir
       ~moduleTypeRanges:(moduleTypeRangesOfStructure structure);
     processSignature ~doValues:true ~doTypes:false structure.str_type;
     let doExternals =
