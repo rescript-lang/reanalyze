@@ -203,7 +203,8 @@ let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
     | _ -> ());
     call
     |> DeadOptionalArgs.addReferences ~locFrom ~locTo ?locToImpl
-         ~forwardable:(parameter = None) ~path)
+         ~forwardable:(parameter = None || not Compat.shapeResolutionAvailable)
+         ~path)
 
 (* Implementation locations of identifier occurrences resolved through
    shapes. See [Compat.resolveIdentOccurrences]. *)
@@ -256,7 +257,7 @@ let addValueReferenceOrRedirect ~(locFrom : Location.t) ~(locTo : Location.t)
     ~path =
   let pair = (locTo.loc_start, (effectiveLocFrom locFrom).loc_start) in
   let locToImpl = findResolution ~identLoc:locFrom ~path in
-  (if isFunctorParameterPath path then
+  (if isFunctorParameterPath path && Compat.shapeResolutionAvailable then
      nonForwardableReferences := PosPairSet.add pair !nonForwardableReferences
    else if locToImpl = None && PosPairSet.mem pair !nonForwardableReferences
    then
@@ -625,19 +626,19 @@ let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
       | None -> viaSignature moduleType components)
     | None -> viaSignature moduleType components
 
-(* Applications already recorded as part of an outer curried application. *)
-let recordedApplications = ref PosSet.empty
+(* Applications already recorded as part of an outer curried application,
+   by node identity (a ppx may emit distinct applications at one position). *)
+let recordedApplications : Typedtree.module_expr list ref = ref []
 
 (* [F (A) (B)] is [Tmod_apply (Tmod_apply (F, A), B)]: collect the functor and
    the arguments in order, and defer crediting the calls made through each
    parameter to the corresponding argument. *)
 let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
-  if not (PosSet.mem moduleExpr.mod_loc.loc_start !recordedApplications) then
+  if not (List.memq moduleExpr !recordedApplications) then
     let rec flatten (e : Typedtree.module_expr) args =
       match e.mod_desc with
       | Tmod_apply (functorExpr, argumentExpr, _) ->
-        recordedApplications :=
-          PosSet.add e.mod_loc.loc_start !recordedApplications;
+        recordedApplications := e :: !recordedApplications;
         flatten functorExpr (argumentExpr :: args)
       | Tmod_constraint (inner, _, _, _) -> flatten inner args
       | Tmod_ident (path, lid) ->
@@ -668,6 +669,12 @@ let traverseStructure ~doTypes ~doExternals =
   let module_expr self (moduleExpr : Typedtree.module_expr) =
     let oldFunctorParameters = !functorParameters in
     (match moduleExpr.mod_desc with
+    | Tmod_constraint (inner, _, _, _) -> (
+      (* [module F : FT = functor ...]: carry the binding's key through. *)
+      match !functorChainNext with
+      | Some (next, pos) when next == moduleExpr ->
+        functorChainNext := Some (inner, pos)
+      | _ -> ())
     | Tmod_functor (param, body) ->
       let functorDef =
         match !functorChainNext with
@@ -881,7 +888,9 @@ let processStructure ~cmt_value_dependencies ~cmt_ident_resolutions ~doTypes
     ~doExternals (structure : Typedtree.structure) =
   let traverseStructure = traverseStructure ~doTypes ~doExternals in
   identResolutions := cmt_ident_resolutions;
+  recordedApplications := [];
   structure |> traverseStructure.structure traverseStructure |> ignore;
+  recordedApplications := [];
   identResolutions := Compat.emptyIdentResolutions;
   let valueDependencies = cmt_value_dependencies |> List.rev in
   delayedValueDependencies :=

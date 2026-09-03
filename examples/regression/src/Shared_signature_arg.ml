@@ -85,3 +85,23 @@ let run_even_more () =
   ignore
     (Applied_constrained.run () + Applied_inline.run ()
    + Applied_constrained_value.run ())
+
+(* Named functor with a whole-functor signature: the binding expression is a
+   constraint around the functor. *)
+module Opt_sigfun : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Apply_sig : functor (M : Shared_signature.O) -> sig
+  val run : unit -> int
+end =
+functor
+  (M : Shared_signature.O)
+  ->
+  struct
+    let run () = M.g ~x:1 ()
+  end
+
+module Applied_sig = Apply_sig (Opt_sigfun)
+
+let run_sig () = ignore (Applied_sig.run ())

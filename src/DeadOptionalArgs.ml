@@ -71,12 +71,15 @@ let addReferences ~(locFrom : Location.t) ~(locTo : Location.t)
         (posFrom |> posToString))
 
 (* A call through a functor parameter, credited to the implementation the
-   functor was applied to. *)
+   functor was applied to. When [posTo] could only be resolved to a module
+   type item rather than a declaration (no shapes, e.g. before OCaml 5.3, or
+   an argument without a resolvable shape), the call is forwarded to the
+   implementations of that item, conservatively. *)
 let addCallToImplementation ~(posTo : Lexing.position) (argNames, argNamesMaybe)
     =
   if active () then
     delayedItems :=
-      {posTo; posToImpl = None; forwardable = false; argNames; argNamesMaybe}
+      {posTo; posToImpl = None; forwardable = true; argNames; argNamesMaybe}
       :: !delayedItems
 
 (* Once all declarations are known, calls whose target is not a declaration
