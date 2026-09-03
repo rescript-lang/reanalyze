@@ -12,7 +12,7 @@ const projectRoot = path.join(__dirname, "..");
 const filename = `reanalyze-v${pjson.version}.tgz`;
 
 const targetLink = (version) =>
-  `https://github.com/cristianoc/reanalyze/releases/download/v${version}/${filename}`;
+  `https://github.com/rescript-lang/reanalyze/releases/download/v${version}/${filename}`;
 
 const target = targetLink(pjson.version);
 
