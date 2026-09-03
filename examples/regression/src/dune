@@ -6,6 +6,7 @@
   Live_ancestors
   Local_side_effects
   Main
+  Nested_module_type
   Ocaml_compiler_compat
   Shared_signature
   Shared_signature_arg
