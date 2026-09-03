@@ -15,4 +15,5 @@ let () =
   Shared_signature_arg.run_alias ();
   Shared_signature_arg.run_forwarded ();
   Nested_module_type.run ();
-  Shared_signature_arg.run_shadow ()
+  Shared_signature_arg.run_shadow ();
+  Shared_signature_arg.run_nested ()

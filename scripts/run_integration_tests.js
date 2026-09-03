@@ -211,6 +211,16 @@ function runRegressionTests() {
     );
     assertIncludes(output, "Live Value +Shared_signature_arg.Use_t.+h");
     assertIncludes(output, "Live Value +Shared_signature_arg.Shadow.Use3.+k");
+    // A nested module of the parameter constrained by a named module type.
+    assertIncludes(output, "Live Value +Shared_signature_arg.Nested_arg.N.+g");
+    assertIncludes(
+      output,
+      "optional argument x of function Nested_arg.N.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Nested_other.N.+g is never used"
+    );
     assertIncludes(
       output,
       "optional argument x of function Opt_constrained.+g is always supplied"

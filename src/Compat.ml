@@ -149,6 +149,19 @@ let getTypeVariant (tk: ('a, 'b) type_kind) = match tk with
 #endif
   | _ -> assert false
 
+(* Whether a signature item occupies a runtime slot, as the positions of a
+   [Tcoerce_structure] count them: values (not primitives), extension
+   constructors, present modules and classes. *)
+let isRuntimeField (si : Types.signature_item) =
+  match si with
+  | Types.Sig_value (_, {val_kind = Val_prim _}, _) -> false
+  | Types.Sig_value _ -> true
+  | Types.Sig_typext _ -> true
+  | Types.Sig_module (_, Mp_present, _, _, _) -> true
+  | Types.Sig_module (_, Mp_absent, _, _, _) -> false
+  | Types.Sig_class _ -> true
+  | _ -> false
+
 let getSigModuleModtype si = match si with
 #if OCAML_VERSION >= (4, 08, 0)
   | Types.Sig_module(id, _, {Types.md_type=moduleType; md_loc=loc}, _, _)
@@ -788,15 +801,36 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
              local None
          | _ -> None
        in
-       let rec expand fuel (moduleType : Types.module_type) =
+       (* The declared type of the module a path denotes: a strengthened
+          signature turns submodules into aliases ([module N = Arg.N]),
+          which expose no items. *)
+       let moduleTypeOfModulePath (path : Path.t) =
+         match moduleShapeOfPath path with
+         | Some shape -> (
+           match Reduce.reduce_for_uid Env.empty shape |> uidOfResult with
+           | Some uid -> (
+             match declOfUid ~currentCmtFile:cmtFilePath ~imports ~local uid with
+             | Some (Typedtree.Module_binding {mb_expr}) -> Some mb_expr.mod_type
+             | Some (Typedtree.Module {md_type}) -> Some md_type.mty_type
+             | _ -> None)
+           | None -> None)
+         | None -> None
+       in
+       (* Aliases are followed until a signature is reached; the visited
+          paths break cycles. *)
+       let rec expand visited (moduleType : Types.module_type) =
          match moduleType with
-         | Mty_ident path when fuel > 0 -> (
+         | Mty_ident path when not (List.exists (Path.same path) visited) -> (
            match moduleTypeOfPath path with
-           | Some expanded -> expand (fuel - 1) expanded
+           | Some expanded -> expand (path :: visited) expanded
+           | None -> moduleType)
+         | Mty_alias path when not (List.exists (Path.same path) visited) -> (
+           match moduleTypeOfModulePath path with
+           | Some expanded -> expand (path :: visited) expanded
            | None -> moduleType)
          | _ -> moduleType
        in
-       expand 8);
+       expand []);
   }
 #else
   let _ = (cmtFilePath, cmt_infos) in
