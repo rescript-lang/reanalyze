@@ -419,9 +419,26 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
           | matching -> matching)
         | _ -> loaded
       in
-      (* Candidates still spanning several build directories (same name and
-         same interface) cannot be told apart: resolve nothing rather than
-         redirect into the wrong target. *)
+      (* Copies of one compiled source (e.g. a library's objects and its
+         _build/install copy, or byte and native objects) are one unit: keep
+         the first of each. Candidates that are still distinct sources in
+         several build directories (same name and same interface) cannot be
+         told apart: resolve nothing rather than redirect into the wrong
+         target. *)
+      let loaded =
+        let seen = Hashtbl.create 4 in
+        loaded
+        |> List.filter (fun (_, (cmt_infos : Cmt_format.cmt_infos)) ->
+               let key =
+                 ( cmt_infos.cmt_sourcefile,
+                   cmt_infos.cmt_builddir,
+                   cmt_infos.cmt_impl_shape <> None )
+               in
+               if Hashtbl.mem seen key then false
+               else (
+                 Hashtbl.replace seen key ();
+                 true))
+      in
       let loaded =
         match
           loaded |> List.map (fun (p, _) -> Filename.dirname p)

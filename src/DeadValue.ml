@@ -763,9 +763,13 @@ let setSignatureValueFilter ~(fileName : string) ~(buildDir : string)
       | Some i -> String.sub (Filename.basename path) 0 i
       | None -> Filename.basename path
     in
-    (* Drop [.] segments and resolve [..], which one side may carry. *)
+    (* Drop [.] segments and resolve [..], which one side may carry; both
+       separators, as Windows paths may carry either. *)
     let segments =
-      String.split_on_char '/' (Filename.dirname path)
+      String.split_on_char '/'
+        (String.map
+           (fun c -> if c = '\\' then '/' else c)
+           (Filename.dirname path))
       |> List.fold_left
            (fun acc segment ->
              match (segment, acc) with

@@ -359,6 +359,51 @@ function runRegressionTests() {
   assertNotIncludes(output, "Dead Value +Local_side_effects.+register");
 }
 
+// A broad root may hold copies of the same compiled unit (a library's
+// objects and its _build/install copy, byte and native objects). Scanning
+// such a root must give exactly the single-directory result: copies are
+// neither scanned twice nor mistaken for distinct units.
+function runDuplicateLayoutTest() {
+  const fs = require("fs");
+  const os = require("os");
+  const cwd = path.join(__dirname, "..", "examples", "regression");
+  const cmtDir = path.join(
+    cwd,
+    "_build/default/src/.regression_fixture.objs/byte"
+  );
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "reanalyze-dup-"));
+  for (const dir of ["a", "b", "c"]) fs.mkdirSync(path.join(root, dir));
+  for (const file of fs.readdirSync(cmtDir)) {
+    if (!/\.cmti?$/.test(file)) continue;
+    // Dependencies duplicated in a and b, consumers in c.
+    const dirs = /Shared_signature|Cross_/.test(file) ? ["a", "b"] : ["c"];
+    for (const dir of dirs)
+      fs.copyFileSync(path.join(cmtDir, file), path.join(root, dir, file));
+  }
+  const filter = (output) =>
+    output
+      .split("\n")
+      .filter((line) => /never used|always supplied|dead module/.test(line))
+      .sort()
+      .join("\n");
+  const run = (dir) =>
+    child_process.execFileSync(
+      reanalyzeFile,
+      ["-ci", "-native-build-target", ".", "-dce-cmt", dir],
+      { cwd, encoding: "utf8" }
+    );
+  console.log(`${cwd}: reanalyze duplicate-layout comparison`);
+  const single = filter(run(cmtDir));
+  const duplicated = filter(run(root));
+  fs.rmSync(root, { recursive: true, force: true });
+  if (single !== duplicated) {
+    throw new Error(
+      "Scanning a root with duplicated compiled units changed the result:\n" +
+        duplicated
+    );
+  }
+}
+
 function checkSetup() {
   console.log("Checking if --version outputs the right version");
   let output;
@@ -391,6 +436,7 @@ function main() {
     checkSetup();
     cleanBuildExamples();
     runRegressionTests();
+    runDuplicateLayoutTest();
     checkDiff();
 
     console.log("Test successful!");
