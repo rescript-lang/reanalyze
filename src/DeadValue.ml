@@ -1100,7 +1100,24 @@ let traverseStructure ~doTypes ~doExternals =
              false
       in
       let rec fixpoint n = if n > 0 && resolveKeys () then fixpoint (n - 1) in
-      fixpoint (List.length moduleBindings)
+      fixpoint (List.length moduleBindings);
+      (* Likewise for aliases of a functor parameter: [module rec G : S = H
+         and H : S = M] registers H first, then G through H. *)
+      let registerAliases () =
+        moduleBindings
+        |> List.fold_left
+             (fun changed (mb : Typedtree.module_binding) ->
+               match mb.mb_id with
+               | Some id when findFunctorParameter (Pident id) = None ->
+                 registerParameterAlias mb.mb_id mb.mb_expr;
+                 findFunctorParameter (Pident id) <> None || changed
+               | _ -> changed)
+             false
+      in
+      let rec aliasFixpoint n =
+        if n > 0 && registerAliases () then aliasFixpoint (n - 1)
+      in
+      aliasFixpoint (List.length moduleBindings)
     | Tstr_primitive vd when doExternals && !Config.analyzeExternals ->
       let currentModulePath = ModulePath.getCurrent () in
       let path = currentModulePath.path @ [!Common.currentModuleName] in
