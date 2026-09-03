@@ -168,6 +168,20 @@ function runRegressionTests() {
       output,
       "optional argument x of function Opt_letmodule.+g is always supplied"
     );
+    // ... through an alias of the parameter, and for a recursive functor. The
+    // aliased call must not leak to another implementation.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_alias.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_alias_other.+g is never used"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_rec.+g is always supplied"
+    );
     assertIncludes(
       output,
       "optional argument x of function Opt_constrained.+g is always supplied"
