@@ -128,6 +128,10 @@ function runRegressionTests() {
     output,
     "optional argument x of function Opt_direct.+g is never used"
   );
+  // Arguments wrapped in a constraint by a named module type are still used.
+  assertIncludes(output, "Live Value +Shared_signature_arg.Chosen2.+f");
+  assertNotIncludes(output, "Dead Value +Shared_signature_arg.Chosen2.+f");
+  assertNotIncludes(output, "Dead Value +Shared_signature_arg.Opt_constrained.+g");
   // Precise attribution through a shared named module type relies on shape
   // reduction of identifier occurrences, available from OCaml 5.3. Earlier
   // versions conservatively keep every implementation of the item live.
@@ -138,11 +142,21 @@ function runRegressionTests() {
     assertNotIncludes(output, "Live Value +Shared_signature_arg.Ignored.+f");
     assertIncludes(output, "Dead Value +Shared_signature_arg.Local_unused.+f");
     assertNotIncludes(output, "Live Value +Shared_signature_arg.Local_unused.+f");
-    // A call through a functor parameter is credited to the actual argument.
+    // A call through a functor parameter is credited to the actual argument,
+    // including through a constraint and for an inline functor.
     assertIncludes(
       output,
       "optional argument x of function Opt_chosen.+g is always supplied"
     );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_constrained.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_inline.+g is always supplied"
+    );
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Ignored2.+f");
   }
 
   assertNotIncludes(output, "Parent is a dead module");

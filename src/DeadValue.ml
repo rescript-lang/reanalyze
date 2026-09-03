@@ -133,6 +133,21 @@ type delayedApplication = {
 
 let delayedApplications : delayedApplication list ref = ref []
 
+(* The module path an argument or functor expression denotes, through any
+   [( M : S )] constraints. *)
+let rec moduleIdent (moduleExpr : Typedtree.module_expr) =
+  match moduleExpr.mod_desc with
+  | Tmod_ident (path, lid) -> Some (path, lid)
+  | Tmod_constraint (inner, _, _, _) -> moduleIdent inner
+  | _ -> None
+
+(* The next functor expression physically equal to the first component gets
+   the second as its key: the module binding's name for named functors, and
+   the enclosing functor's key for curried parameters. Other functors (inline
+   applications) are keyed by their own position. *)
+let functorChainNext : (Typedtree.module_expr * Lexing.position) option ref =
+  ref None
+
 let rec pathComponents (path : Path.t) =
   match path with
   | Pident _ -> Some []
@@ -552,13 +567,26 @@ let rec processSignatureItem ~doTypes ~doValues ~moduleLoc ~path
     | None -> ())
   | _ -> ()
 
+(* The type of a functor argument, with an explicit constraint by a named
+   module type [(M : Other.S)] expanded to that module type's signature: the
+   typed tree leaves it as [Mty_ident], which exposes no items. *)
+let rec argumentModuleType (argumentExpr : Typedtree.module_expr) =
+  match (argumentExpr.mod_desc, argumentExpr.mod_type) with
+  | ( Tmod_constraint
+        (_, _, Tmodtype_explicit {mty_desc = Tmty_ident (path, lid)}, _),
+      Mty_ident _ ) -> (
+    match !identResolutions.moduleTypeOf lid.loc (Path.last path) with
+    | Some moduleType -> moduleType
+    | None -> argumentExpr.mod_type)
+  | Tmod_constraint (inner, _, _, _), Mty_ident _ -> argumentModuleType inner
+  | _ -> argumentExpr.mod_type
+
 (* Implementation of a value of an actual functor argument, by path. *)
 let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
   let shape =
-    match argumentExpr.mod_desc with
-    | Tmod_ident (path, lid) ->
-      !identResolutions.moduleShape lid.loc (Path.last path)
-    | _ -> None
+    match moduleIdent argumentExpr with
+    | Some (path, lid) -> !identResolutions.moduleShape lid.loc (Path.last path)
+    | None -> None
   in
   let resolutions = !identResolutions in
   let rec viaShape shape components =
@@ -588,13 +616,14 @@ let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
         | None -> None)
       | None -> None)
   in
+  let moduleType = argumentModuleType argumentExpr in
   fun components ->
     match shape with
     | Some shape -> (
       match viaShape shape components with
       | Some loc -> Some loc
-      | None -> viaSignature argumentExpr.mod_type components)
-    | None -> viaSignature argumentExpr.mod_type components
+      | None -> viaSignature moduleType components)
+    | None -> viaSignature moduleType components
 
 (* Applications already recorded as part of an outer curried application. *)
 let recordedApplications = ref PosSet.empty
@@ -610,24 +639,26 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
         recordedApplications :=
           PosSet.add e.mod_loc.loc_start !recordedApplications;
         flatten functorExpr (argumentExpr :: args)
-      | Tmod_ident (path, lid) -> Some (path, lid, args)
+      | Tmod_constraint (inner, _, _, _) -> flatten inner args
+      | Tmod_ident (path, lid) ->
+        Some (!identResolutions.moduleDefLoc lid.loc (Path.last path), args)
+      | Tmod_functor _ ->
+        (* Inline functor: keyed by its own position, see [functorChainNext]. *)
+        Some (Some e.mod_loc, args)
       | _ -> None
     in
     match flatten moduleExpr [] with
-    | Some (path, lid, args) -> (
-      match !identResolutions.moduleDefLoc lid.loc (Path.last path) with
-      | Some defLoc ->
-        args
-        |> List.iteri (fun argIndex argumentExpr ->
-               delayedApplications :=
-                 {
-                   appliedFunctor = defLoc.loc_start;
-                   argIndex;
-                   resolveItem = argumentItemResolver argumentExpr;
-                 }
-                 :: !delayedApplications)
-      | None -> ())
-    | None -> ()
+    | Some (Some defLoc, args) ->
+      args
+      |> List.iteri (fun argIndex argumentExpr ->
+             delayedApplications :=
+               {
+                 appliedFunctor = defLoc.loc_start;
+                 argIndex;
+                 resolveItem = argumentItemResolver argumentExpr;
+               }
+               :: !delayedApplications)
+    | _ -> ()
 
 (* Traverse the AST *)
 let traverseStructure ~doTypes ~doExternals =
@@ -637,15 +668,27 @@ let traverseStructure ~doTypes ~doExternals =
   let module_expr self (moduleExpr : Typedtree.module_expr) =
     let oldFunctorParameters = !functorParameters in
     (match moduleExpr.mod_desc with
-    | Tmod_functor (Named (Some id, _, _), _) ->
-      let functorDef = !currentModuleBindingPos in
+    | Tmod_functor (param, body) ->
+      let functorDef =
+        match !functorChainNext with
+        | Some (next, pos) when next == moduleExpr -> pos
+        | _ -> moduleExpr.mod_loc.loc_start
+      in
+      functorChainNext := Some (body, functorDef);
       let paramIndex =
         !functorParameters
         |> List.filter (fun p -> p.functorDef = functorDef)
         |> List.length
       in
-      functorParameters :=
-        {paramId = id; functorDef; paramIndex} :: !functorParameters
+      (match param with
+      | Named (Some id, _, _) ->
+        functorParameters :=
+          {paramId = id; functorDef; paramIndex} :: !functorParameters
+      | _ ->
+        (* Unnamed or unit parameter: still occupies an index. *)
+        functorParameters :=
+          {paramId = Ident.create_local "_"; functorDef; paramIndex}
+          :: !functorParameters)
     | _ -> ());
     (match moduleExpr.mod_desc with
     | Tmod_apply (_functorExpr, argumentExpr, coercion) ->
@@ -653,14 +696,23 @@ let traverseStructure ~doTypes ~doExternals =
          value exposed by the actual argument module. When the argument is a
          module path, its shape lets the references target that module's
          implementation rather than a shared module type item. *)
+      let ident = moduleIdent argumentExpr in
       let shape =
-        match argumentExpr.mod_desc with
-        | Tmod_ident (path, lid) ->
+        match ident with
+        | Some (path, lid) ->
           !identResolutions.moduleShape lid.loc (Path.last path)
-        | _ -> None
+        | None -> None
       in
-      addCoercedModuleValueReferences ~locFrom:argumentExpr.mod_loc ~coercion
-        ?shape ~actualType:argumentExpr.mod_type ();
+      (* A constraint node [(M : S)] can carry a ghost location, which would
+         drop the references: use the module path's own location then. *)
+      let locFrom =
+        match ident with
+        | Some (_, lid) when not lid.loc.loc_ghost -> lid.loc
+        | _ when not argumentExpr.mod_loc.loc_ghost -> argumentExpr.mod_loc
+        | _ -> moduleExpr.mod_loc
+      in
+      addCoercedModuleValueReferences ~locFrom ~coercion ?shape
+        ~actualType:(argumentModuleType argumentExpr) ();
       recordFunctorApplication moduleExpr
     | _ -> ());
     let r = super.Tast_mapper.module_expr self moduleExpr in
@@ -674,6 +726,7 @@ let traverseStructure ~doTypes ~doExternals =
     (match structureItem.str_desc with
     | Tstr_module {mb_expr; mb_id; mb_loc; mb_name} -> (
       currentModuleBindingPos := mb_name.loc.loc_start;
+      functorChainNext := Some (mb_expr, mb_name.loc.loc_start);
       let hasInterface =
         match mb_expr.mod_desc with Tmod_constraint _ -> true | _ -> false
       in
