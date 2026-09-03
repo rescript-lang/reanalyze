@@ -306,6 +306,15 @@ function runRegressionTests() {
     // functor's result.
     assertIncludes(output, "Live Value +Shared_signature_arg.Use_u.+f");
     assertIncludes(output, "Live Value +Shared_signature_arg.Use_u2.+k");
+    // A forward alias of the parameter in a recursive group.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_recfwd.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_recfwd_other.+g is never used"
+    );
     // Partial applications: held by a let module, and bound in another file.
     assertIncludes(
       output,

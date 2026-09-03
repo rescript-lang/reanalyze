@@ -665,3 +665,23 @@ module Applied_u = Apply_u ((Use_u : U_alias))
 module Applied_u2 = Apply_u2 ((Use_u2 : U_applied))
 
 let run_u () = ignore (Applied_u.run () + Applied_u2.run ())
+
+(* A forward alias of the parameter inside a recursive group. *)
+module Opt_recfwd : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_recfwd_other : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Apply_recfwd (M : Shared_signature.O) = struct
+  module rec G : Shared_signature.O = H
+  and H : Shared_signature.O = M
+
+  let run () = G.g ~x:1 ()
+end
+
+module Applied_recfwd = Apply_recfwd (Opt_recfwd)
+
+let run_recfwd () = ignore (Applied_recfwd.run () + Opt_recfwd_other.g ())
