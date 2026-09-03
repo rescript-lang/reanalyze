@@ -592,11 +592,36 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
   let values = Hashtbl.create 64 in
   let modules = Hashtbl.create 16 in
   let moduleUids = Hashtbl.create 16 in
+  (* Occurrences sharing a key but spelled differently (distinct identifiers
+     a ppx emitted at one position, e.g. [A.f] and [B.f]) cannot be told apart
+     from the typed tree, whose paths differ from the written identifiers under
+     [open] and aliases: such keys are left unresolved, conservatively. *)
+  (* [Longident.last] and [flatten] are fatal on [Lapply] ([F(X).t]): such
+     occurrences are not values or modules of interest here. *)
+  let lidText (lid : Longident.t) =
+    match Longident.flatten lid with
+    | components -> Some (String.concat "." components)
+    | exception Misc.Fatal_error -> None
+  in
+  let spelled = Hashtbl.create 64 in
+  let ambiguous = Hashtbl.create 4 in
+  cmt_infos.cmt_ident_occurrences
+  |> List.iter (fun ((lid : Longident.t Location.loc), _) ->
+         if not lid.loc.loc_ghost then
+           match lidText lid.txt with
+           | None -> ()
+           | Some text -> (
+             let k = key lid.loc (Longident.last lid.txt) in
+             match Hashtbl.find_opt spelled k with
+             | Some other when other <> text -> Hashtbl.replace ambiguous k ()
+             | _ -> Hashtbl.replace spelled k text));
   cmt_infos.cmt_ident_occurrences
   |> List.iter (fun ((lid : Longident.t Location.loc), result) ->
-         if not lid.loc.loc_ghost then
+         if (not lid.loc.loc_ghost) && lidText lid.txt <> None then
            let name = Longident.last lid.txt in
            let k = key lid.loc name in
+           if Hashtbl.mem ambiguous k then ()
+           else
            match result with
            | Shape_reduce.Unresolved shape ->
              (* Definition in another unit: reduce lazily, as a value and as a

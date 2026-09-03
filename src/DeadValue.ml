@@ -154,6 +154,22 @@ let functorKeys : (Typedtree.module_expr * Lexing.position) list ref = ref []
 let setFunctorKey (moduleExpr : Typedtree.module_expr) pos =
   functorKeys := (moduleExpr, pos) :: !functorKeys
 
+(* Keys must identify one functor definition. Applications only learn a
+   position (through the binding's declaration, possibly in another file), so
+   two distinct definitions a ppx emitted at one position cannot be told
+   apart: such keys are not credited at all, conservatively. *)
+let functorKeyOwners : (Lexing.position, Typedtree.module_expr) Hashtbl.t =
+  Hashtbl.create 16
+
+let ambiguousFunctorKeys = ref PosSet.empty
+
+let claimFunctorKey (moduleExpr : Typedtree.module_expr) pos =
+  match Hashtbl.find_opt functorKeyOwners pos with
+  | Some owner when owner != moduleExpr ->
+    ambiguousFunctorKeys := PosSet.add pos !ambiguousFunctorKeys
+  | Some _ -> ()
+  | None -> Hashtbl.replace functorKeyOwners pos moduleExpr
+
 let findFunctorKey (moduleExpr : Typedtree.module_expr) =
   match List.find_opt (fun (e, _) -> e == moduleExpr) !functorKeys with
   | Some (_, pos) -> Some pos
@@ -318,6 +334,7 @@ let rec collectExpr super self (e : Typedtree.expression) =
   (match e.exp_desc with
   | Texp_letmodule (id, name, _, moduleExpr, _) ->
     setFunctorKey moduleExpr name.loc.loc_start;
+    claimFunctorKey moduleExpr name.loc.loc_start;
     registerParameterAlias id moduleExpr;
     (match id with
     | Some id -> functorsByIdent := (id, name.loc.loc_start) :: !functorsByIdent
@@ -769,7 +786,9 @@ let traverseStructure ~doTypes ~doExternals =
       let functorDef =
         match findFunctorKey moduleExpr with
         | Some pos -> pos
-        | None -> moduleExpr.mod_loc.loc_start
+        | None ->
+          claimFunctorKey moduleExpr moduleExpr.mod_loc.loc_start;
+          moduleExpr.mod_loc.loc_start
       in
       setFunctorKey body functorDef;
       let paramIndex =
@@ -825,6 +844,7 @@ let traverseStructure ~doTypes ~doExternals =
     | Tstr_module {mb_expr; mb_id; mb_loc; mb_name} -> (
       currentModuleBindingPos := mb_name.loc.loc_start;
       setFunctorKey mb_expr mb_name.loc.loc_start;
+      claimFunctorKey mb_expr mb_name.loc.loc_start;
       registerParameterAlias mb_id mb_expr;
       let hasInterface =
         match mb_expr.mod_desc with Tmod_constraint _ -> true | _ -> false
@@ -851,6 +871,7 @@ let traverseStructure ~doTypes ~doExternals =
       moduleBindings
       |> List.iter (fun (mb : Typedtree.module_binding) ->
              setFunctorKey mb.mb_expr mb.mb_name.loc.loc_start;
+             claimFunctorKey mb.mb_expr mb.mb_name.loc.loc_start;
              match mb.mb_id with
              | Some id ->
                functorsByIdent :=
@@ -969,6 +990,7 @@ let forceDelayedItems () =
   delayedApplications := [];
   applications
   |> List.iter (fun {appliedFunctor; argIndex; resolveItem} ->
+         if not (PosSet.mem appliedFunctor !ambiguousFunctorKeys) then
          Hashtbl.iter
            (fun (def, index, components) calls ->
              if def = appliedFunctor && index = argIndex then
@@ -992,9 +1014,11 @@ let processStructure ~cmt_value_dependencies ~cmt_ident_resolutions ~doTypes
   recordedApplications := [];
   functorsByIdent := [];
   functorKeys := [];
+  Hashtbl.reset functorKeyOwners;
   structure |> traverseStructure.structure traverseStructure |> ignore;
   recordedApplications := [];
   functorKeys := [];
+  Hashtbl.reset functorKeyOwners;
   identResolutions := Compat.emptyIdentResolutions;
   let valueDependencies = cmt_value_dependencies |> List.rev in
   delayedValueDependencies :=
