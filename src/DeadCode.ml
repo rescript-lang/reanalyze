@@ -53,7 +53,16 @@ and moduleTypeRangesOfModuleType (moduleType : Typedtree.module_type) =
   match moduleType.mty_desc with
   | Tmty_signature signature -> moduleTypeRangesOfSignature signature
   | Tmty_functor (_, body) -> moduleTypeRangesOfModuleType body
-  | Tmty_with (base, _) -> moduleTypeRangesOfModuleType base
+  | Tmty_with (base, constraints) ->
+    (* A [with module type S = sig ... end] constraint carries a module type
+       whose items must not count as declarations either. *)
+    moduleTypeRangesOfModuleType base
+    @ (constraints
+      |> List.concat_map (fun (_, _, (constraint_ : Typedtree.with_constraint)) ->
+             match constraint_ with
+             | Twith_modtype mty | Twith_modtypesubst mty ->
+               mty.mty_loc :: moduleTypeRangesOfModuleType mty
+             | _ -> []))
   | _ -> []
 
 let processCmt ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =

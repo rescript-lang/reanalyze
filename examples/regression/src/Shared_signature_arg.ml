@@ -413,3 +413,23 @@ end =
 module Applied_rec_alias = Rec_alias (Opt_rec_alias)
 
 let run_ext () = ignore (Applied_ext.run () + Applied_rec_alias.run ())
+
+(* A recursive alias of the parameter inside the body. *)
+module Opt_recalias : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_recalias_other : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Apply_recalias (M : Shared_signature.O) = struct
+  module rec N : Shared_signature.O = M
+
+  let run () = N.g ~x:1 ()
+end
+
+module Applied_recalias = Apply_recalias (Opt_recalias)
+
+let run_shadow_rec () =
+  ignore (Applied_recalias.run () + Opt_recalias_other.g ())
