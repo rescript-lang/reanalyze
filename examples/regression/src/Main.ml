@@ -26,4 +26,6 @@ let () =
   Shared_signature_arg.run_alias9 ();
   Shared_signature_arg.run_ext ();
   Shared_signature_arg.run_shadow_rec ();
-  ignore (Included_sig.W2.X.f ())
+  ignore (Included_sig.W2.X.f ());
+  ignore (Included_sig.W3.X.f ());
+  Shared_signature_arg.run_incl_f ()

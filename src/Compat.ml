@@ -851,26 +851,27 @@ let rec makeResolver ~cmtFilePath
          | Pdot (parent, name) -> (
            match bindingOfPath parent with
            | Some (_, definition, resolver, applied) -> (
-             (* Peel the applied functor layers, then find the member. *)
-             let rec body (e : Typedtree.module_expr) applied =
+             (* Peel the applied functor layers, then find the member, the
+                last binding of that name (also through [include]s). *)
+             let rec memberIn (e : Typedtree.module_expr) applied =
                match e.mod_desc with
-               | Tmod_constraint (inner, _, _, _) -> body inner applied
+               | Tmod_constraint (inner, _, _, _) -> memberIn inner applied
                | Tmod_functor (_, inner) when applied > 0 ->
-                 body inner (applied - 1)
-               | Tmod_structure structure when applied = 0 -> Some structure
-               | _ -> None
-             in
-             match body definition applied with
-             | Some structure -> (
-               (* The last binding of that name is the visible one. *)
-               let member =
+                 memberIn inner (applied - 1)
+               | Tmod_apply (functorExpr, _, _) ->
+                 memberIn functorExpr (applied + 1)
+               | Tmod_ident (p, _) when applied = 0 -> (
+                 match bindingOfPath (Pdot (p, name)) with
+                 | Some (loc, expr, _, 0) -> Some (loc, expr)
+                 | _ -> None)
+               | Tmod_structure structure when applied = 0 ->
                  structure.str_items
                  |> List.fold_left
                       (fun acc (item : Typedtree.structure_item) ->
                         match item.str_desc with
                         | Tstr_module ({mb_name = {txt = Some n}} as mb)
                           when n = name ->
-                          Some mb
+                          Some (mb.mb_name.loc, mb.mb_expr)
                         | Tstr_recmodule mbs -> (
                           match
                             mbs
@@ -878,14 +879,18 @@ let rec makeResolver ~cmtFilePath
                                  (fun (mb : Typedtree.module_binding) ->
                                    mb.mb_name.txt = Some name)
                           with
-                          | Some mb -> Some mb
+                          | Some mb -> Some (mb.mb_name.loc, mb.mb_expr)
+                          | None -> acc)
+                        | Tstr_include {incl_mod} -> (
+                          match memberIn incl_mod 0 with
+                          | Some member -> Some member
                           | None -> acc)
                         | _ -> acc)
                       None
-               in
-               match member with
-               | Some mb -> Some (mb.mb_name.loc, mb.mb_expr, resolver, 0)
-               | None -> None)
+               | _ -> None
+             in
+             match memberIn definition applied with
+             | Some (loc, expr) -> Some (loc, expr, resolver, 0)
              | None -> None)
            | None -> None)
          | Papply (functorPath, _) -> (
