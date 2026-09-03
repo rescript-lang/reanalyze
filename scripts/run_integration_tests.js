@@ -200,6 +200,9 @@ function runRegressionTests() {
       output,
       "optional argument x of function Opt_incl_other.+g is never used"
     );
+    // A module type declared inside a module.
+    assertIncludes(output, "Live Value +Nested_module_type.Outer.Used.+f");
+    assertIncludes(output, "Dead Value +Nested_module_type.Outer.Unused.+f");
     assertIncludes(
       output,
       "optional argument x of function Opt_constrained.+g is always supplied"
