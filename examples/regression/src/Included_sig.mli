@@ -16,3 +16,12 @@ module W : sig
   module X : S2
 end
 with type t = int
+
+module W2 : sig
+  module type S
+
+  module X : S
+end
+with module type S = sig
+  val f : unit -> int
+end

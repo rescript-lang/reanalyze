@@ -17,3 +17,13 @@ module W = struct
     let f () = 7
   end
 end
+
+module W2 = struct
+  module type S = sig
+    val f : unit -> int
+  end
+
+  module X = struct
+    let f () = 8
+  end
+end

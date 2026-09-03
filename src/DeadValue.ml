@@ -995,6 +995,7 @@ let traverseStructure ~doTypes ~doExternals =
       |> List.iter (fun (mb : Typedtree.module_binding) ->
              setFunctorKey mb.mb_expr mb.mb_name.loc.loc_start;
              claimFunctorKey mb.mb_expr mb.mb_name.loc.loc_start;
+             registerParameterAlias mb.mb_id mb.mb_expr;
              match mb.mb_id with
              | Some id ->
                (* [module rec G : T = F], or a partial application: G stands

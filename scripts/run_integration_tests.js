@@ -255,6 +255,17 @@ function runRegressionTests() {
       output,
       "optional argument x of function Opt_rec_alias.+g is always supplied"
     );
+    // A recursive alias of the parameter; a module type introduced by a
+    // with-constraint.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_recalias.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_recalias_other.+g is never used"
+    );
+    assertIncludes(output, "Live Value +Included_sig.W2.X.+f");
     // Partial applications: held by a let module, and bound in another file.
     assertIncludes(
       output,

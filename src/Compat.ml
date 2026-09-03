@@ -636,7 +636,9 @@ let rec makeResolver ~cmtFilePath
     ~(occurrences : (Longident.t Location.loc * Shape_reduce.result) list) :
     identResolutions =
   let module Reduce = Shape_reduce.Make (struct
-    let fuel = 10
+    (* Bounds the reduction of recursive shapes; long alias and projection
+       chains must not be cut short by it. *)
+    let fuel = 100
 
     let read_unit_shape ~unit_name =
       match loadUnitInfo ~currentCmtFile:cmtFilePath ~imports unit_name with
@@ -860,19 +862,26 @@ let rec makeResolver ~cmtFilePath
              in
              match body definition applied with
              | Some structure -> (
+               (* The last binding of that name is the visible one. *)
                let member =
                  structure.str_items
-                 |> List.find_map (fun (item : Typedtree.structure_item) ->
+                 |> List.fold_left
+                      (fun acc (item : Typedtree.structure_item) ->
                         match item.str_desc with
                         | Tstr_module ({mb_name = {txt = Some n}} as mb)
                           when n = name ->
                           Some mb
-                        | Tstr_recmodule mbs ->
-                          mbs
-                          |> List.find_opt
-                               (fun (mb : Typedtree.module_binding) ->
-                                 mb.mb_name.txt = Some name)
-                        | _ -> None)
+                        | Tstr_recmodule mbs -> (
+                          match
+                            mbs
+                            |> List.find_opt
+                                 (fun (mb : Typedtree.module_binding) ->
+                                   mb.mb_name.txt = Some name)
+                          with
+                          | Some mb -> Some mb
+                          | None -> acc)
+                        | _ -> acc)
+                      None
                in
                match member with
                | Some mb -> Some (mb.mb_name.loc, mb.mb_expr, resolver, 0)
