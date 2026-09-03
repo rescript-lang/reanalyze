@@ -1,7 +1,21 @@
 open Common
 
+(* Compiled units already scanned, by source: a broad root may hold copies
+   of the same artifact (a library's objects and its _build/install copy,
+   byte and native objects), which must not be scanned twice. *)
+let scannedUnits = Hashtbl.create 256
+
 let loadCmtFile ~cmtRoot cmtFilePath =
   let cmt_infos = Cmt_format.read_cmt cmtFilePath in
+  let unitKey =
+    ( cmt_infos.cmt_sourcefile,
+      cmt_infos.cmt_builddir,
+      cmt_infos.cmt_interface_digest,
+      Filename.check_suffix cmtFilePath ".cmti" )
+  in
+  if Hashtbl.mem scannedUnits unitKey then ()
+  else
+  let () = Hashtbl.replace scannedUnits unitKey () in
   let excludePath sourceFile =
     !Cli.excludePaths
     |> List.exists (fun prefix_ ->
