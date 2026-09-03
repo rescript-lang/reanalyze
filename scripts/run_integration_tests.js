@@ -287,6 +287,21 @@ function runRegressionTests() {
     // A module type rooted at a functor application.
     assertIncludes(output, "Live Value +Shared_signature_arg.Used_mt.+f");
     assertIncludes(output, "Dead Value +Shared_signature_arg.Unused_mt.+f");
+    // Module types rooted at a functor parameter: M.T, M.Sub.T2,
+    // Outer (M).SM, through a parameter alias, and through include.
+    assertIncludes(output, "Live Value +Shared_signature_arg.Apply_pt.Use_p.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Apply_pt.Unused_p.+f");
+    assertIncludes(output, "Live Value +Shared_signature_arg.Apply_pt.Use_p2.+h");
+    assertIncludes(output, "Live Value +Shared_signature_arg.Apply_app.Use_a.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Apply_app.Unused_a.+f");
+    assertIncludes(
+      output,
+      "Live Value +Shared_signature_arg.Apply_pt2.Use_alias_mt.+f"
+    );
+    assertIncludes(
+      output,
+      "Live Value +Shared_signature_arg.Apply_pt2.Use_include_mt.+f"
+    );
     // Partial applications: held by a let module, and bound in another file.
     assertIncludes(
       output,

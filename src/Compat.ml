@@ -570,6 +570,9 @@ type identResolutions = {
   moduleTypeOf : Location.t -> string -> Types.module_type option;
       (** occurrence location, last name -> the module type a
           [module type X = ...] declaration denotes *)
+  shapeValueItems : moduleShape -> (string * Location.t) list;
+      (** the values a module shape exports, with their implementations; a
+          fallback when the module's signature cannot be expanded *)
   bindingOfPath :
     Path.t ->
     (Location.t * Typedtree.module_expr * identResolutions option * int) option;
@@ -596,6 +599,7 @@ let emptyIdentResolutions =
     projModule = (fun _ _ -> None);
     moduleDefLoc = (fun _ _ -> None);
     moduleTypeOf = (fun _ _ -> None);
+    shapeValueItems = (fun _ -> []);
     bindingOfPath = (fun _ -> None);
     headKey = (fun _ _ -> None);
     expandModuleType = (fun mt -> mt);
@@ -745,6 +749,12 @@ let rec makeResolver ~cmtFilePath
   let nonGhost (loc : Location.t option) =
     match loc with Some l when not l.loc_ghost -> loc | _ -> None
   in
+  let projValueLoc shape name =
+    let item = Shape.proj shape (Shape.Item.make name Value) in
+    match Reduce.reduce_for_uid Env.empty item |> uidOfResult with
+    | Some uid -> locOfUid uid |> nonGhost
+    | None -> None
+  in
   let selfRef = ref emptyIdentResolutions in
   let bindingOfUid =
     moduleBindingOfUid ~currentCmtFile:cmtFilePath ~imports ~local
@@ -865,12 +875,7 @@ let rec makeResolver ~cmtFilePath
         match Hashtbl.find_opt modules (key loc name) with
         | Some s -> s
         | None -> None);
-    projValue =
-      (fun shape name ->
-        let item = Shape.proj shape (Shape.Item.make name Value) in
-        match Reduce.reduce_for_uid Env.empty item |> uidOfResult with
-        | Some uid -> locOfUid uid |> nonGhost
-        | None -> None);
+    projValue = projValueLoc;
     projModule =
       (fun shape name ->
         Some (Shape.proj shape (Shape.Item.make name Module)));
@@ -894,6 +899,20 @@ let rec makeResolver ~cmtFilePath
             moduleTypeOfUid ~currentCmtFile:cmtFilePath ~imports ~local uid
           | None -> None)
         | None -> None);
+    shapeValueItems =
+      (fun shape ->
+        match (Reduce.reduce Env.empty shape).desc with
+        | Struct items ->
+          Shape.Item.Map.fold
+            (fun (name, kind) _ acc ->
+              match kind with
+              | Shape.Sig_component_kind.Value -> (
+                match projValueLoc shape name with
+                | Some loc -> (name, loc) :: acc
+                | None -> acc)
+              | _ -> acc)
+            items []
+        | _ -> []);
     bindingOfPath = (fun path -> bindingOfPath path);
     headKey =
       (let rec unwrap (e : Typedtree.module_expr) =
@@ -985,8 +1004,44 @@ let rec makeResolver ~cmtFilePath
          | _ -> None
        in
        let moduleTypeOfUid = moduleTypeOfUid ~currentCmtFile:cmtFilePath ~imports ~local in
+       let rec hasApply (path : Path.t) =
+         match path with
+         | Papply _ -> true
+         | Pdot (p, _) -> hasApply p
+         | _ -> false
+       in
+       (* [module type S] in the body of a functor the path applies, as in
+          [Outer (A).S]: found structurally, whatever the argument. *)
+       let rec moduleTypeInBody (e : Typedtree.module_expr) applied name =
+         match e.mod_desc with
+         | Tmod_constraint (inner, _, _, _) -> moduleTypeInBody inner applied name
+         | Tmod_functor (_, inner) when applied > 0 ->
+           moduleTypeInBody inner (applied - 1) name
+         | Tmod_apply (functorExpr, _, _) ->
+           moduleTypeInBody functorExpr (applied + 1) name
+         | Tmod_structure structure when applied = 0 ->
+           structure.str_items
+           |> List.fold_left
+                (fun acc (item : Typedtree.structure_item) ->
+                  match item.str_desc with
+                  | Tstr_modtype {mtd_name; mtd_type = Some {mty_type}}
+                    when mtd_name.txt = name ->
+                    Some mty_type
+                  | Tstr_include {incl_mod} -> (
+                    match moduleTypeInBody incl_mod 0 name with
+                    | Some mt -> Some mt
+                    | None -> acc)
+                  | _ -> acc)
+                None
+         | _ -> None
+       in
        let moduleTypeOfPath (path : Path.t) =
          match path with
+         | Pdot (p, name) when hasApply p -> (
+           match bindingOfPath p with
+           | Some (_, definition, _, applied) ->
+             moduleTypeInBody definition applied name
+           | None -> None)
          | Pdot (p, name) -> (
            match moduleShapeOfPath p with
            | Some shape -> (
