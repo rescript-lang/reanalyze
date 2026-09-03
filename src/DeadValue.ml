@@ -95,7 +95,8 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
   Current.lastBinding := oldLastBinding;
   r
 
-let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ~path args =
+let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
+    ~path args =
   let args =
     List.map (fun (lbl, arg) -> (lbl, Compat.applyArgToOption arg)) args
   in
@@ -127,7 +128,41 @@ let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ~path args =
              if argIsSupplied = None then suppliedMaybe := s :: !suppliedMaybe
            | _ -> ());
     (!supplied, !suppliedMaybe)
-    |> DeadOptionalArgs.addReferences ~locFrom ~locTo ~path)
+    |> DeadOptionalArgs.addReferences ~locFrom ~locTo ?locToImpl ~path)
+
+(* Occurrence start position -> implementation location, for identifiers
+   resolved through other compilation units' shapes. See
+   [Compat.resolveIdentOccurrences]. *)
+let identResolutions : (Lexing.position, Location.t) Hashtbl.t ref =
+  ref (Hashtbl.create 1)
+
+(* References whose target may be redirected to a shape-resolved
+   implementation. Decided in [forceDelayedItems], once every declaration is
+   known: if the original target is a declaration (e.g. a [val] in an .mli), it
+   is kept, otherwise the implementation is referenced. *)
+type redirectedReference = {
+  locFrom : Location.t;
+  locTo : Location.t;
+  locToImpl : Location.t;
+}
+
+let delayedRedirects : redirectedReference list ref = ref []
+
+let findResolution ~(identLoc : Location.t) =
+  Hashtbl.find_opt !identResolutions identLoc.loc_start
+
+let addValueReferenceOrRedirect ~(locFrom : Location.t) ~(locTo : Location.t) =
+  match findResolution ~identLoc:locFrom with
+  | Some locToImpl when locToImpl.loc_start <> locTo.loc_start ->
+    let lastBinding = !Current.lastBinding in
+    let locFrom =
+      match lastBinding = Location.none with
+      | true -> locFrom
+      | false -> lastBinding
+    in
+    if not locFrom.loc_ghost then
+      delayedRedirects := {locFrom; locTo; locToImpl} :: !delayedRedirects
+  | _ -> addValueReference ~addFileReference:true ~locFrom ~locTo
 
 let rec collectExpr super self (e : Typedtree.expression) =
   let locFrom = e.exp_loc in
@@ -143,19 +178,21 @@ let rec collectExpr super self (e : Typedtree.expression) =
           (Location.none.loc_start |> posToString)
           (locTo.loc_start |> posToString);
       ValueReferences.add locTo.loc_start Location.none.loc_start)
-    else addValueReference ~addFileReference:true ~locFrom ~locTo
+    else addValueReferenceOrRedirect ~locFrom ~locTo
   | Texp_apply
       ( {
           exp_desc =
             Texp_ident
               (path, _, {Types.val_loc = {loc_ghost = false; _} as locTo});
           exp_type;
+          exp_loc = identLoc;
         },
         args ) ->
+    let locToImpl = findResolution ~identLoc in
     args
     |> processOptionalArgs ~expType:exp_type
          ~locFrom:(locFrom : Location.t)
-         ~locTo ~path
+         ~locTo ?locToImpl ~path
   | Texp_let
       ( (* generated for functions with optional args *)
       Nonrecursive,
@@ -515,7 +552,10 @@ let processValueDependency
       (* The signature item is not a declaration (e.g. a [val] inside a named
          module type used to constrain a module or functor result), so it can
          never be resolved as dead. Forward the references made to the
-         signature item onto the implementation instead. *)
+         signature item onto the implementation instead. Occurrences resolved
+         through shapes already point at the implementation and are not in
+         this set; this is the conservative fallback for the rest, and keeps
+         every implementation of the item live. *)
       DeadOptionalArgs.forwardDelayedItems ~posFrom ~posTo;
       ValueReferences.find posFrom
       |> PosSet.iter (fun posRef ->
@@ -538,14 +578,27 @@ let processValueDependency
 let delayedValueDependencies = ref []
 
 let forceDelayedItems () =
+  let redirects = List.rev !delayedRedirects in
+  delayedRedirects := [];
+  redirects
+  |> List.iter (fun {locFrom; locTo; locToImpl} ->
+         let locTo =
+           match PosHash.find_opt decls locTo.loc_start with
+           | Some _ -> locTo
+           | None -> locToImpl
+         in
+         addValueReference ~addFileReference:true ~locFrom ~locTo);
+  DeadOptionalArgs.settleDelayedItems ();
   let dependencies = List.rev !delayedValueDependencies in
   delayedValueDependencies := [];
   dependencies |> List.iter processValueDependency
 
-let processStructure ~cmt_value_dependencies ~doTypes ~doExternals
-    (structure : Typedtree.structure) =
+let processStructure ~cmt_value_dependencies ~cmt_ident_resolutions ~doTypes
+    ~doExternals (structure : Typedtree.structure) =
   let traverseStructure = traverseStructure ~doTypes ~doExternals in
+  identResolutions := cmt_ident_resolutions;
   structure |> traverseStructure.structure traverseStructure |> ignore;
+  identResolutions := Hashtbl.create 1;
   let valueDependencies = cmt_value_dependencies |> List.rev in
   delayedValueDependencies :=
     List.rev_append valueDependencies !delayedValueDependencies
