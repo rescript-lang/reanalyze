@@ -284,6 +284,9 @@ function runRegressionTests() {
       output,
       "optional argument x of function Opt_y.+g is always supplied"
     );
+    // A module type rooted at a functor application.
+    assertIncludes(output, "Live Value +Shared_signature_arg.Used_mt.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Unused_mt.+f");
     // Partial applications: held by a let module, and bound in another file.
     assertIncludes(
       output,

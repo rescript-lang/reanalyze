@@ -974,6 +974,14 @@ let rec makeResolver ~cmtFilePath
            match moduleShapeOfPath p with
            | Some shape -> Some (Shape.proj shape (Shape.Item.make name Module))
            | None -> None)
+         | Papply (functorPath, argumentPath) -> (
+           (* [Outer (A).S]: the application's shape, reduced on projection. *)
+           match
+             (moduleShapeOfPath functorPath, moduleShapeOfPath argumentPath)
+           with
+           | Some functorShape, Some argumentShape ->
+             Some (Shape.app functorShape ~arg:argumentShape)
+           | _ -> None)
          | _ -> None
        in
        let moduleTypeOfUid = moduleTypeOfUid ~currentCmtFile:cmtFilePath ~imports ~local in

@@ -467,3 +467,30 @@ and Rec_h : Opt_functor = Apply_opt
 module Applied_rec_chain = Rec_g (Opt_rec_chain)
 
 let run_rec_chain () = ignore (Applied_rec_chain.run ())
+
+(* A module type rooted at a functor application: [Outer_mt (Chosen).SM]. *)
+module Outer_mt (A : Shared_signature.S) = struct
+  let _ = A.f
+
+  module type SM = sig
+    val f : unit -> int
+  end
+end
+
+module type S_app = Outer_mt(Chosen).SM
+
+module Apply_mt (M : S_app) = struct
+  let run () = M.f ()
+end
+
+module Used_mt : S_app = struct
+  let f () = 30
+end
+
+module Unused_mt : S_app = struct
+  let f () = 31
+end
+
+module Applied_mt = Apply_mt ((Used_mt : S_app))
+
+let run_mt () = ignore (Applied_mt.run ())
