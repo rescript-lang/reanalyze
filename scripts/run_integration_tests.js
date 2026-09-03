@@ -70,6 +70,16 @@ function assertNotIncludes(output, unexpected) {
   }
 }
 
+function ocamlVersionAtLeast(major, minor) {
+  const version = child_process
+    .execFileSync("ocamlc", ["-version"], { encoding: "utf8" })
+    .trim();
+  const [actualMajor, actualMinor] = version.split(".").map(Number);
+  return (
+    actualMajor > major || (actualMajor === major && actualMinor >= minor)
+  );
+}
+
 function runRegressionTests() {
   const cwd = path.join(__dirname, "..", "examples", "regression");
   const cmtDir = "_build/default/src/.regression_fixture.objs/byte";
@@ -103,6 +113,18 @@ function runRegressionTests() {
   assertIncludes(output, "Live Value +Local_side_effects.+_info");
   assertIncludes(output, "Live Value +Local_side_effects.+process");
   assertIncludes(output, "Live Value +Local_side_effects.+register");
+
+  // A call through one functor instance must never mark the used
+  // implementation dead.
+  assertIncludes(output, "Live Value +Shared_signature_used.Make.+f");
+  assertNotIncludes(output, "Dead Value +Shared_signature_used.Make.+f");
+  // Precise attribution through a shared named module type relies on shape
+  // reduction of identifier occurrences, available from OCaml 5.3. Earlier
+  // versions conservatively keep every implementation of the item live.
+  if (ocamlVersionAtLeast(5, 3)) {
+    assertIncludes(output, "Dead Value +Shared_signature_unused.Make.+f");
+    assertNotIncludes(output, "Live Value +Shared_signature_unused.Make.+f");
+  }
 
   assertNotIncludes(output, "Parent is a dead module");
   assertNotIncludes(output, "Dead Value +Functor_argument.Ordered.+compare");

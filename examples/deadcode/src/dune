@@ -9,7 +9,6 @@
   FunctorSigGen
   FunctorSigInline
   FunctorSigMli
-  FunctorSigOther
   FunctorSigUse
   Includes
   Main

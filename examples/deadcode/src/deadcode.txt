@@ -69,28 +69,6 @@
   <-- line 9
     let truly_dead k = k [@@dead "Make.+truly_dead"] 
 
-  Warning Dead Module
-  File "FunctorSigOther.ml", line 3, characters 0-150
-  +FunctorSigOther.Make is a dead module as all its items are dead.
-
-  Warning Dead Value
-  File "FunctorSigOther.ml", line 6, characters 2-25
-  Make.+find_opt is never used
-  <-- line 6
-    let find_opt k = Some k [@@dead "Make.+find_opt"] 
-
-  Warning Dead Value
-  File "FunctorSigOther.ml", line 8, characters 2-25
-  Make.+unused_in_sig is never used
-  <-- line 8
-    let unused_in_sig k = k [@@dead "Make.+unused_in_sig"] 
-
-  Warning Dead Value
-  File "FunctorSigOther.ml", line 10, characters 2-30
-  Make.+with_opt is never used
-  <-- line 10
-    let with_opt ?(x = 0) () = x [@@dead "Make.+with_opt"] 
-
   Warning Dead Value
   File "Includes.ml", line 4, characters 2-29
   +included_unused is never used
@@ -173,4 +151,4 @@
   <-- line 4
     | LiveA [@dead "live_variant.LiveA"] 
   
-  Analysis reported 31 issues (Warning Dead Module:3, Warning Dead Type:5, Warning Dead Value:20, Warning Redundant Optional Argument:2, Warning Unused Argument:1)
+  Analysis reported 27 issues (Warning Dead Module:2, Warning Dead Type:5, Warning Dead Value:17, Warning Redundant Optional Argument:2, Warning Unused Argument:1)
