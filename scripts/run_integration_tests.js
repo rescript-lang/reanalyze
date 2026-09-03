@@ -340,6 +340,16 @@ function runRegressionTests() {
     // (Arg_p2.X.f is live: an argument's coerced items count as used.)
     assertNotIncludes(output, "Value +Shared_signature_arg.Applied_fp2.X.+f");
     assertNotIncludes(output, "Value +Shared_signature_arg.F_param.X.+f");
+    // Constraint-wrapped right-hand sides: a recursive constrained partial
+    // application, and a let-module constrained functor.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_recc.+g is always supplied (1 calls)"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_letc.+g is always supplied (1 calls)"
+    );
     // Partial applications: held by a let module, and bound in another file.
     assertIncludes(
       output,

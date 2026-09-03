@@ -175,6 +175,12 @@ type parameterCoercion = {
 
 let parameterCoercions : parameterCoercion list ref = ref []
 
+(* A module expression under any [( M : S )] constraints. *)
+let rec unwrapConstraints (moduleExpr : Typedtree.module_expr) =
+  match moduleExpr.mod_desc with
+  | Tmod_constraint (inner, _, _, _) -> unwrapConstraints inner
+  | _ -> moduleExpr
+
 (* The module path an argument or functor expression denotes, through any
    [( M : S )] constraints. *)
 let rec moduleIdent (moduleExpr : Typedtree.module_expr) =
@@ -412,7 +418,7 @@ let rec collectExpr super self (e : Typedtree.expression) =
       (* [let module G = F in] or [let module G = F (A) in]: G stands for
          F's key, with the arguments already consumed. *)
       let key =
-        match moduleExpr.mod_desc with
+        match (unwrapConstraints moduleExpr).mod_desc with
         | Tmod_functor _ -> (name.loc.loc_start, 0)
         | _ -> (
           match functorKeyOfHead moduleExpr with
@@ -1121,8 +1127,8 @@ let traverseStructure ~doTypes ~doExternals =
         moduleBindings
         |> List.fold_left
              (fun changed (mb : Typedtree.module_binding) ->
-               match (mb.mb_id, moduleIdent mb.mb_expr, mb.mb_expr.mod_desc) with
-               | Some id, _, Tmod_apply _ | Some id, Some _, _ -> (
+               match (mb.mb_id, (unwrapConstraints mb.mb_expr).mod_desc) with
+               | Some id, (Tmod_apply _ | Tmod_ident _) -> (
                  match functorKeyOfHead mb.mb_expr with
                  | Some key when List.assq_opt id !functorsByIdent <> Some key ->
                    functorsByIdent :=

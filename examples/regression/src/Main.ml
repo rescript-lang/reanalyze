@@ -40,4 +40,5 @@ let () =
   Shared_signature_arg.run_sweep ();
   Shared_signature_arg.run_ord ();
   Shared_signature_arg.run_ord2 ();
-  Shared_signature_arg.run_ranges ()
+  Shared_signature_arg.run_ranges ();
+  Shared_signature_arg.run_constrained ()
