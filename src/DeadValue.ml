@@ -130,11 +130,9 @@ let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
     (!supplied, !suppliedMaybe)
     |> DeadOptionalArgs.addReferences ~locFrom ~locTo ?locToImpl ~path)
 
-(* Occurrence start position -> implementation location, for identifiers
-   resolved through other compilation units' shapes. See
-   [Compat.resolveIdentOccurrences]. *)
-let identResolutions : (Lexing.position, Location.t) Hashtbl.t ref =
-  ref (Hashtbl.create 1)
+(* Implementation locations of identifier occurrences resolved through
+   shapes. See [Compat.resolveIdentOccurrences]. *)
+let identResolutions = ref Compat.emptyIdentResolutions
 
 (* References whose target may be redirected to a shape-resolved
    implementation. Decided in [forceDelayedItems], once every declaration is
@@ -148,21 +146,54 @@ type redirectedReference = {
 
 let delayedRedirects : redirectedReference list ref = ref []
 
-let findResolution ~(identLoc : Location.t) =
-  Hashtbl.find_opt !identResolutions identLoc.loc_start
+let findResolution ~(identLoc : Location.t) ~(path : Path.t) =
+  !identResolutions.valueImpl identLoc (Path.last path)
 
-let addValueReferenceOrRedirect ~(locFrom : Location.t) ~(locTo : Location.t) =
-  match findResolution ~identLoc:locFrom with
-  | Some locToImpl when locToImpl.loc_start <> locTo.loc_start ->
-    let lastBinding = !Current.lastBinding in
-    let locFrom =
-      match lastBinding = Location.none with
-      | true -> locFrom
-      | false -> lastBinding
-    in
+(* Functor parameters in scope during traversal. A reference through a
+   parameter (e.g. [M.f] in [functor (M : S) -> ...]) is credited to the actual
+   arguments at application sites, via the coercion in [Tmod_apply]; it must
+   not be forwarded to every implementation of the module type item. *)
+let functorParameters : Ident.t list ref = ref []
+
+let isFunctorParameterPath (path : Path.t) =
+  match Path.head path with
+  | head -> List.exists (Ident.same head) !functorParameters
+  | exception _ -> false
+
+(* (module type item position, referencing position) pairs that must not be
+   forwarded to implementations. *)
+module PosPairSet = Set.Make (struct
+  type t = Lexing.position * Lexing.position
+
+  let compare = compare
+end)
+
+let nonForwardableReferences = ref PosPairSet.empty
+
+let effectiveLocFrom (locFrom : Location.t) =
+  let lastBinding = !Current.lastBinding in
+  match lastBinding = Location.none with
+  | true -> locFrom
+  | false -> lastBinding
+
+let addRedirect ~(locFrom : Location.t) ~(locTo : Location.t) ~locToImpl =
+  match locToImpl with
+  | Some (locToImpl : Location.t) when locToImpl.loc_start <> locTo.loc_start ->
+    let locFrom = effectiveLocFrom locFrom in
     if not locFrom.loc_ghost then
       delayedRedirects := {locFrom; locTo; locToImpl} :: !delayedRedirects
   | _ -> addValueReference ~addFileReference:true ~locFrom ~locTo
+
+let addValueReferenceOrRedirect ~(locFrom : Location.t) ~(locTo : Location.t)
+    ~path =
+  let pair = (locTo.loc_start, (effectiveLocFrom locFrom).loc_start) in
+  (if isFunctorParameterPath path then
+     nonForwardableReferences := PosPairSet.add pair !nonForwardableReferences
+   else if PosPairSet.mem pair !nonForwardableReferences then
+     (* A non-parameter reference from the same position keeps it
+        forwardable. *)
+     nonForwardableReferences := PosPairSet.remove pair !nonForwardableReferences);
+  addRedirect ~locFrom ~locTo ~locToImpl:(findResolution ~identLoc:locFrom ~path)
 
 let rec collectExpr super self (e : Typedtree.expression) =
   let locFrom = e.exp_loc in
@@ -178,7 +209,7 @@ let rec collectExpr super self (e : Typedtree.expression) =
           (Location.none.loc_start |> posToString)
           (locTo.loc_start |> posToString);
       ValueReferences.add locTo.loc_start Location.none.loc_start)
-    else addValueReferenceOrRedirect ~locFrom ~locTo
+    else addValueReferenceOrRedirect ~locFrom ~locTo ~path:_path
   | Texp_apply
       ( {
           exp_desc =
@@ -188,7 +219,7 @@ let rec collectExpr super self (e : Typedtree.expression) =
           exp_loc = identLoc;
         },
         args ) ->
-    let locToImpl = findResolution ~identLoc in
+    let locToImpl = findResolution ~identLoc ~path in
     args
     |> processOptionalArgs ~expType:exp_type
          ~locFrom:(locFrom : Location.t)
@@ -347,28 +378,46 @@ let findSignatureItem name signature =
          | Some itemName -> itemName = name
          | None -> false)
 
-let addValueReferenceFromSignatureItem ~locFrom signatureItem =
-  let _id, locTo, _kind, _valType = signatureItem |> Compat.getSigValue in
+(* [shape], when known, is the shape of the module the signature items belong
+   to; it is used to reference the implementation of an item rather than a
+   shared module type item. See [Compat.resolveIdentOccurrences]. *)
+let addValueReferenceFromSignatureItem ~locFrom ?shape signatureItem =
+  let id, locTo, _kind, _valType = signatureItem |> Compat.getSigValue in
   if not locTo.loc_ghost then
-    addValueReference ~addFileReference:true ~locFrom ~locTo
+    let locToImpl =
+      match shape with
+      | Some shape -> !identResolutions.projValue shape (Ident.name id)
+      | None -> None
+    in
+    addRedirect ~locFrom ~locTo ~locToImpl
 
-let rec addAllModuleValueReferences ~locFrom (moduleType : Types.module_type) =
+let projModuleShape ?shape id =
+  match shape with
+  | Some shape -> !identResolutions.projModule shape (Ident.name id)
+  | None -> None
+
+let rec addAllModuleValueReferences ~locFrom ?shape
+    (moduleType : Types.module_type) =
   moduleType |> getSignature
   |> List.iter (fun (signatureItem : Types.signature_item) ->
          match signatureItem with
          | Types.Sig_value _ ->
-           addValueReferenceFromSignatureItem ~locFrom signatureItem
+           addValueReferenceFromSignatureItem ~locFrom ?shape signatureItem
          | Types.Sig_module _ | Types.Sig_modtype _ -> (
            match signatureItem |> Compat.getSigModuleModtype with
-           | Some (_id, moduleType, _moduleLoc) ->
-             addAllModuleValueReferences ~locFrom moduleType
+           | Some (id, moduleType, _moduleLoc) ->
+             addAllModuleValueReferences ~locFrom
+               ?shape:(projModuleShape ?shape id)
+               moduleType
            | None -> ())
          | _ -> ())
 
-let rec addCoercedModuleValueReferences ~locFrom ~coercion ~actualType =
+let rec addCoercedModuleValueReferences ~locFrom ~coercion ?shape ~actualType
+    () =
   let actualSignature = actualType |> getSignature in
   match coercion with
-  | Typedtree.Tcoerce_none -> addAllModuleValueReferences ~locFrom actualType
+  | Typedtree.Tcoerce_none ->
+    addAllModuleValueReferences ~locFrom ?shape actualType
   | Typedtree.Tcoerce_structure (values, modules) ->
     let actualFields =
       actualSignature
@@ -381,7 +430,7 @@ let rec addCoercedModuleValueReferences ~locFrom ~coercion ~actualType =
     |> List.iter (fun (index, _coercion) ->
            match nth_opt actualFields index with
            | Some (Types.Sig_value _ as actualItem) ->
-             addValueReferenceFromSignatureItem ~locFrom actualItem
+             addValueReferenceFromSignatureItem ~locFrom ?shape actualItem
            | Some _ -> ()
            | None -> ());
     let actualModules =
@@ -400,15 +449,17 @@ let rec addCoercedModuleValueReferences ~locFrom ~coercion ~actualType =
            match actualItem with
            | Some actualItem -> (
              match actualItem |> Compat.getSigModuleModtype with
-             | Some (_actualId, actualType, _moduleLoc) ->
-               addCoercedModuleValueReferences ~locFrom ~coercion ~actualType
+             | Some (actualId, actualType, _moduleLoc) ->
+               addCoercedModuleValueReferences ~locFrom ~coercion
+                 ?shape:(projModuleShape ?shape actualId)
+                 ~actualType ()
              | None -> ())
            | None -> ())
   | Typedtree.Tcoerce_alias (_env, _path, coercion) ->
-    addCoercedModuleValueReferences ~locFrom ~coercion ~actualType
+    addCoercedModuleValueReferences ~locFrom ~coercion ?shape ~actualType ()
   | Typedtree.Tcoerce_functor (_argCoercion, resultCoercion) ->
-    addCoercedModuleValueReferences ~locFrom ~coercion:resultCoercion
-      ~actualType
+    addCoercedModuleValueReferences ~locFrom ~coercion:resultCoercion ?shape
+      ~actualType ()
   | Typedtree.Tcoerce_primitive _ -> ()
 
 let rec processSignatureItem ~doTypes ~doValues ~moduleLoc ~path
@@ -451,14 +502,29 @@ let traverseStructure ~doTypes ~doExternals =
   let expr self e = e |> collectExpr super self in
   let pat self p = p |> collectPattern super self in
   let module_expr self (moduleExpr : Typedtree.module_expr) =
+    let oldFunctorParameters = !functorParameters in
+    (match moduleExpr.mod_desc with
+    | Tmod_functor (Named (Some id, _, _), _) ->
+      functorParameters := id :: !functorParameters
+    | _ -> ());
     (match moduleExpr.mod_desc with
     | Tmod_apply (_functorExpr, argumentExpr, coercion) ->
       (* Functor arguments are used through the parameter coercion, not every
-         value exposed by the actual argument module. *)
+         value exposed by the actual argument module. When the argument is a
+         module path, its shape lets the references target that module's
+         implementation rather than a shared module type item. *)
+      let shape =
+        match argumentExpr.mod_desc with
+        | Tmod_ident (path, lid) ->
+          !identResolutions.moduleShape lid.loc (Path.last path)
+        | _ -> None
+      in
       addCoercedModuleValueReferences ~locFrom:argumentExpr.mod_loc ~coercion
-        ~actualType:argumentExpr.mod_type
+        ?shape ~actualType:argumentExpr.mod_type ()
     | _ -> ());
-    super.Tast_mapper.module_expr self moduleExpr
+    let r = super.Tast_mapper.module_expr self moduleExpr in
+    functorParameters := oldFunctorParameters;
+    r
   in
   let value_binding self vb = vb |> collectValueBinding super self in
   let structure_item self (structureItem : Typedtree.structure_item) =
@@ -559,7 +625,12 @@ let processValueDependency
       DeadOptionalArgs.forwardDelayedItems ~posFrom ~posTo;
       ValueReferences.find posFrom
       |> PosSet.iter (fun posRef ->
-             if posRef <> posTo then
+             if
+               posRef <> posTo
+               && not
+                    (PosPairSet.mem (posFrom, posRef)
+                       !nonForwardableReferences)
+             then
                let locRef =
                  {
                    Location.loc_start = posRef;
@@ -598,7 +669,7 @@ let processStructure ~cmt_value_dependencies ~cmt_ident_resolutions ~doTypes
   let traverseStructure = traverseStructure ~doTypes ~doExternals in
   identResolutions := cmt_ident_resolutions;
   structure |> traverseStructure.structure traverseStructure |> ignore;
-  identResolutions := Hashtbl.create 1;
+  identResolutions := Compat.emptyIdentResolutions;
   let valueDependencies = cmt_value_dependencies |> List.rev in
   delayedValueDependencies :=
     List.rev_append valueDependencies !delayedValueDependencies

@@ -427,15 +427,63 @@ let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
          (valueTo.Types.val_loc, valueFrom.Types.val_loc))
 #endif
 
-(* Identifier occurrences whose definition lives in another compilation unit
-   (e.g. [Inst.H.find_opt] where [H] is an instance of a functor constrained by
-   a named module type) are reduced through the shapes of the other units, so
-   references land on the implementation rather than on the module type item.
-   Returns a table from the occurrence's start position to the implementation
-   location. *)
+(* Resolution of identifier occurrences to the implementation they denote.
+
+   An occurrence such as [Inst.H.find_opt], where [H] is an instance of a
+   functor constrained by a named module type, has a [val_loc] pointing at the
+   module type item. Reducing the occurrence's shape (through the shapes of the
+   other compilation units) yields the implementation instead, so references
+   land on the right definition rather than on the shared module type item.
+
+   Occurrences are keyed by their location and last name component, so that
+   distinct identifiers a ppx may emit at the same position do not collide. *)
+type moduleShape =
+#if OCAML_VERSION >= (5, 3, 0)
+  Shape.t
+#else
+  unit
+#endif
+
+type identResolutions = {
+  valueImpl : Location.t -> string -> Location.t option;
+      (** occurrence location, last name -> implementation location *)
+  moduleShape : Location.t -> string -> moduleShape option;
+      (** occurrence location, last name -> shape of the module *)
+  projValue : moduleShape -> string -> Location.t option;
+      (** implementation of a value item of a module shape *)
+  projModule : moduleShape -> string -> moduleShape option;
+      (** shape of a module item of a module shape *)
+}
+
+let emptyIdentResolutions =
+  {
+    valueImpl = (fun _ _ -> None);
+    moduleShape = (fun _ _ -> None);
+    projValue = (fun _ _ -> None);
+    projModule = (fun _ _ -> None);
+  }
+
+#if OCAML_VERSION >= (5, 3, 0)
+(* Find, inside the implementation shape of the current unit, the shape of the
+   item defined with [uid]. Used for modules defined locally, whose occurrences
+   the compiler resolves to a uid rather than leaving a shape. *)
+let rec findShapeByUid (shape : Shape.t) uid : Shape.t option =
+  if shape.uid = Some uid then Some shape
+  else
+    match shape.desc with
+    | Struct items ->
+      Shape.Item.Map.fold
+        (fun _item itemShape acc ->
+          match acc with
+          | Some _ -> acc
+          | None -> findShapeByUid itemShape uid)
+        items None
+    | Alias s -> findShapeByUid s uid
+    | _ -> None
+#endif
+
 let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
-    (Lexing.position, Location.t) Hashtbl.t =
-  let table = Hashtbl.create 64 in
+    identResolutions =
 #if OCAML_VERSION >= (5, 3, 0)
   let module Reduce = Shape_reduce.Make (struct
     let fuel = 10
@@ -446,25 +494,64 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
       | None -> None
   end) in
   let local = cmt_infos.cmt_uid_to_decl in
+  let locOfUid = locOfUid ~currentCmtFile:cmtFilePath ~local in
   let rec uidOfResult (result : Shape_reduce.result) =
     match result with
     | Resolved uid -> Some uid
     | Resolved_alias (_, result) -> uidOfResult result
     | _ -> None
   in
+  let key (loc : Location.t) name = (loc.loc_start, loc.loc_end, name) in
+  let values = Hashtbl.create 64 in
+  let modules = Hashtbl.create 16 in
   cmt_infos.cmt_ident_occurrences
   |> List.iter (fun ((lid : Longident.t Location.loc), result) ->
-         match result with
-         | Shape_reduce.Unresolved shape when not lid.loc.loc_ghost -> (
-           match Reduce.reduce_for_uid Env.empty shape |> uidOfResult with
-           | Some uid -> (
-             match locOfUid ~currentCmtFile:cmtFilePath ~local uid with
-             | Some loc when not loc.loc_ghost ->
-               Hashtbl.replace table lid.loc.loc_start loc
-             | _ -> ())
-           | None -> ())
-         | _ -> ());
+         if not lid.loc.loc_ghost then
+           let name = Longident.last lid.txt in
+           let k = key lid.loc name in
+           match result with
+           | Shape_reduce.Unresolved shape ->
+             (* Definition in another unit: reduce lazily, as a value and as a
+                module, depending on how the occurrence is used. *)
+             Hashtbl.replace values k (lazy (
+               match Reduce.reduce_for_uid Env.empty shape |> uidOfResult with
+               | Some uid -> locOfUid uid
+               | None -> None));
+             Hashtbl.replace modules k (Some shape)
+           | _ -> (
+             match uidOfResult result with
+             | Some uid ->
+               Hashtbl.replace values k (lazy (locOfUid uid));
+               Hashtbl.replace modules k
+                 (match cmt_infos.cmt_impl_shape with
+                 | Some impl -> findShapeByUid impl uid
+                 | None -> None)
+             | None -> ()));
+  let nonGhost (loc : Location.t option) =
+    match loc with Some l when not l.loc_ghost -> loc | _ -> None
+  in
+  {
+    valueImpl =
+      (fun loc name ->
+        match Hashtbl.find_opt values (key loc name) with
+        | Some l -> Lazy.force l |> nonGhost
+        | None -> None);
+    moduleShape =
+      (fun loc name ->
+        match Hashtbl.find_opt modules (key loc name) with
+        | Some s -> s
+        | None -> None);
+    projValue =
+      (fun shape name ->
+        let item = Shape.proj shape (Shape.Item.make name Value) in
+        match Reduce.reduce_for_uid Env.empty item |> uidOfResult with
+        | Some uid -> locOfUid uid |> nonGhost
+        | None -> None);
+    projModule =
+      (fun shape name ->
+        Some (Shape.proj shape (Shape.Item.make name Module)));
+  }
 #else
   let _ = (cmtFilePath, cmt_infos) in
+  emptyIdentResolutions
 #endif
-  table
