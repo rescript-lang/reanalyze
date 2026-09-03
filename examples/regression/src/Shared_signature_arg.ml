@@ -494,3 +494,128 @@ end
 module Applied_mt = Apply_mt ((Used_mt : S_app))
 
 let run_mt () = ignore (Applied_mt.run ())
+
+(* Module types rooted at a functor parameter: [M.T], [M.Sub.T], and
+   [Outer_mt (M).SM] with [M] the parameter. *)
+module type Has_t = sig
+  module type T = sig
+    val f : unit -> int
+  end
+
+  module Sub : sig
+    module type T2 = sig
+      val h : unit -> int
+    end
+  end
+end
+
+module Apply_pt (M : Has_t) = struct
+  module type T_alias = M.T
+  module type T2_alias = M.Sub.T2
+
+  module Use_p : T_alias = struct
+    let f () = 40
+  end
+
+  module Unused_p : T_alias = struct
+    let f () = 41
+  end
+
+  module Use_p2 : T2_alias = struct
+    let h () = 42
+  end
+
+  module Apply_t (X : T_alias) = struct
+    let run () = X.f ()
+  end
+
+  module Apply_t2 (X : T2_alias) = struct
+    let run () = X.h ()
+  end
+
+  module Applied_t = Apply_t ((Use_p : T_alias))
+  module Applied_t2 = Apply_t2 ((Use_p2 : T2_alias))
+
+  let run () = Applied_t.run () + Applied_t2.run ()
+end
+
+module Applied_pt = Apply_pt (struct
+  module type T = sig
+    val f : unit -> int
+  end
+
+  module Sub = struct
+    module type T2 = sig
+      val h : unit -> int
+    end
+  end
+end)
+
+module Apply_app (M : Shared_signature.S) = struct
+  module type T_app = Outer_mt(M).SM
+
+  module Use_a : T_app = struct
+    let f () = 43
+  end
+
+  module Unused_a : T_app = struct
+    let f () = 44
+  end
+
+  module Apply_a (X : T_app) = struct
+    let run () = X.f ()
+  end
+
+  module Applied_a = Apply_a ((Use_a : T_app))
+
+  let run () = Applied_a.run ()
+end
+
+module Applied_app = Apply_app (Chosen)
+
+let run_param_mt () = ignore (Applied_pt.run () + Applied_app.run ())
+
+(* Module types through a parameter alias and through [include] of the
+   parameter. *)
+module Apply_pt2 (M : Has_t) = struct
+  module N = M
+  module type T_via_alias = N.T
+
+  include M
+  module type T_via_include = T
+
+  module Use_alias_mt : T_via_alias = struct
+    let f () = 45
+  end
+
+  module Use_include_mt : T_via_include = struct
+    let f () = 46
+  end
+
+  module Apply_ta (X : T_via_alias) = struct
+    let run () = X.f ()
+  end
+
+  module Apply_ti (X : T_via_include) = struct
+    let run () = X.f ()
+  end
+
+  module Applied_ta = Apply_ta ((Use_alias_mt : T_via_alias))
+  module Applied_ti = Apply_ti ((Use_include_mt : T_via_include))
+
+  let run () = Applied_ta.run () + Applied_ti.run ()
+end
+
+module Applied_pt2 = Apply_pt2 (struct
+  module type T = sig
+    val f : unit -> int
+  end
+
+  module Sub = struct
+    module type T2 = sig
+      val h : unit -> int
+    end
+  end
+end)
+
+let run_param_mt2 () = ignore (Applied_pt2.run ())

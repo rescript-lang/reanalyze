@@ -103,6 +103,9 @@ type functorParameter = {
   prefix : string list;
       (** for an alias of (a submodule of) a parameter, [module N = M.Sub],
           the path from the parameter: ["Sub"] *)
+  paramType : Types.module_type option;
+      (** the parameter's declared module type, for module types rooted at
+          the parameter ([module type T = M.T]) *)
 }
 
 let functorParameters : functorParameter list ref = ref []
@@ -601,12 +604,49 @@ let findSignatureItem name signature =
 
 (* The value items a module coercion uses, with the path of submodules
    leading to each. *)
+(* Module type expansion, also for module types rooted at a functor
+   parameter in scope ([module type T = M.T], [M.Sub.T2]): those are found in
+   the parameter's declared module type. *)
+let rec expandModuleType ?(fuel = 16) (moduleType : Types.module_type) =
+  let expanded = !identResolutions.expandModuleType moduleType in
+  match expanded with
+  | Mty_ident path when fuel > 0 -> (
+    match moduleTypeViaParameter ~fuel path with
+    | Some moduleType -> expandModuleType ~fuel:(fuel - 1) moduleType
+    | None -> expanded)
+  | _ -> expanded
+
+and moduleTypeViaParameter ~fuel (path : Path.t) =
+  match (findFunctorParameter path, pathComponents path) with
+  | Some {paramType = Some paramType; prefix}, Some components -> (
+    let rec walk (moduleType : Types.module_type) components =
+      let signature = moduleType |> expandModuleType ~fuel:(fuel - 1) |> getSignature in
+      match components with
+      | [] -> None
+      | [name] -> (
+        match signature |> findSignatureItem name with
+        | Some (Types.Sig_modtype _ as item) -> (
+          match item |> Compat.getSigModuleModtype with
+          | Some (_, moduleType, _) -> Some moduleType
+          | None -> None)
+        | _ -> None)
+      | m :: rest -> (
+        match signature |> findSignatureItem m with
+        | Some (Types.Sig_module _ as item) -> (
+          match item |> Compat.getSigModuleModtype with
+          | Some (_, moduleType, _) -> walk moduleType rest
+          | None -> None)
+        | _ -> None)
+    in
+    walk paramType (prefix @ components))
+  | _ -> None
+
 (* Signature of a module type, with aliases of named module types expanded
    ([module N : Other.O] inside a signature is [Mty_ident] in the typed tree,
    which exposes no items). Only runtime modules ([Sig_module]) are walked:
    a [Sig_modtype] declaration has no fields. *)
 let expandedSignature (moduleType : Types.module_type) =
-  moduleType |> !identResolutions.expandModuleType |> getSignature
+  moduleType |> expandModuleType |> getSignature
 
 let rec iterAllModuleValues ~path (moduleType : Types.module_type) f =
   moduleType |> expandedSignature
@@ -652,6 +692,15 @@ let rec iterCoercedValues ~path ~coercion ~actualType f =
    known, is the argument module's shape: items are then redirected to their
    implementation rather than to a shared module type item. *)
 let addCoercedModuleValueReferences ~locFrom ~coercion ?shape ~actualType () =
+  (match (expandedSignature actualType, shape) with
+  | [], Some shape ->
+    (* The argument's signature could not be expanded (a module type this
+       analysis cannot resolve): reference the values its shape exports
+       instead, which is precise to this argument. *)
+    !identResolutions.shapeValueItems shape
+    |> List.iter (fun (_, locTo) ->
+           addValueReference ~addFileReference:true ~locFrom ~locTo)
+  | _ -> ());
   iterCoercedValues ~path:[] ~coercion ~actualType (fun ~path signatureItem ->
       let id, locTo, _kind, _valType = signatureItem |> Compat.getSigValue in
       if not locTo.loc_ghost then
@@ -757,7 +806,7 @@ let rec processSignatureItem ~doTypes ~doValues ~moduleLoc ~path
    module type [(M : Other.S)] expanded to that module type's signature: the
    typed tree leaves it as [Mty_ident], which exposes no items. *)
 let rec argumentModuleType (argumentExpr : Typedtree.module_expr) =
-  let expand = !identResolutions.expandModuleType in
+  let expand moduleType = expandModuleType moduleType in
   match (argumentExpr.mod_desc, argumentExpr.mod_type) with
   | ( Tmod_constraint
         (_, _, Tmodtype_explicit {mty_desc = Tmty_ident (path, lid)}, _),
@@ -890,14 +939,26 @@ let traverseStructure ~doTypes ~doExternals =
         |> List.length
       in
       (match param with
-      | Named (Some id, _, _) ->
+      | Named (Some id, _, mty) ->
         functorParameters :=
-          {paramId = id; functorDef; paramIndex; prefix = []}
+          {
+            paramId = id;
+            functorDef;
+            paramIndex;
+            prefix = [];
+            paramType = Some mty.mty_type;
+          }
           :: !functorParameters
       | _ ->
         (* Unnamed or unit parameter: still occupies an index. *)
         functorParameters :=
-          {paramId = Ident.create_local "_"; functorDef; paramIndex; prefix = []}
+          {
+            paramId = Ident.create_local "_";
+            functorDef;
+            paramIndex;
+            prefix = [];
+            paramType = None;
+          }
           :: !functorParameters)
     | _ -> ());
     (match moduleExpr.mod_desc with
@@ -1067,7 +1128,9 @@ let traverseStructure ~doTypes ~doExternals =
                        prefix = p.prefix @ components @ [Ident.name id];
                      }
                      :: !functorParameters
-                 | Sig_module _ -> (
+                 | Sig_module _ | Sig_modtype _ -> (
+                   (* Included modules, and module types ([module type T =
+                      T] after [include M]), stand for the parameter's. *)
                    match item |> Compat.getSigModuleModtype with
                    | Some (id, _, _) ->
                      functorParameters :=
