@@ -3,6 +3,7 @@
  (modules
   Cross_alias
   Cross_alias_use
+  Cross_include
   Functor_argument
   Generated_source
   Included_sig

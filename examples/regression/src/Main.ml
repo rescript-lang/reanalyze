@@ -20,6 +20,7 @@ let () =
   Shared_signature_arg.run_chain ();
   Cross_alias_use.run ();
   Cross_alias_use.run_partial ();
+  Cross_alias_use.run_incl ();
   Shared_signature_arg.run_local_partial ();
   ignore (Included_sig.M.f ());
   ignore (Included_sig.W.X.f ());
