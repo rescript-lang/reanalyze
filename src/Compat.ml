@@ -644,6 +644,18 @@ let rec makeResolver ~cmtFilePath
       | None -> None
   end) in
   let thisUnit = unitNameOfCmtFile cmtFilePath in
+  let compUnitShape name =
+    {Shape.uid = None; desc = Comp_unit name; approximated = false}
+  in
+  (* The uid of a declaration of this unit, by identifier. *)
+  let localUid (matches : Typedtree.item_declaration -> bool) =
+    Shape.Uid.Tbl.fold
+      (fun uid decl acc ->
+        match acc with
+        | Some _ -> acc
+        | None -> if matches decl then Some uid else None)
+      local None
+  in
   let locOfUid = locOfUid ~currentCmtFile:cmtFilePath ~imports ~local in
   let rec uidOfResult (result : Shape_reduce.result) =
     match result with
@@ -783,6 +795,97 @@ let rec makeResolver ~cmtFilePath
            resolverForUnit ~currentCmtFile:cmtFilePath ~imports comp_unit
          | _ -> None
        in
+       (* The key of a binding found for a module expression: a functor is
+          keyed by the binding; an alias or a partial application is chased
+          with the resolver of the unit binding it. *)
+       let keyOfBinding visited (loc : Location.t)
+           (definition : Typedtree.module_expr) resolver =
+         if loc.loc_ghost then None
+         else
+           match (unwrap definition).mod_desc with
+           | Tmod_apply _ | Tmod_ident _ -> (
+             match resolver with
+             | Some (resolver : identResolutions) -> (
+               match resolver.headKey visited definition with
+               | Some head -> Some head
+               | None -> Some (loc, 0))
+             | None -> Some (loc, 0))
+           | _ -> Some (loc, 0)
+       in
+       (* The binding a module path denotes, structurally: through units,
+          local bindings, and the bodies of applied functors, as in
+          [Outer (A).Inner]. Returns the binding, the resolver of its unit,
+          and the number of functor layers the path applied. *)
+       let rec bindingOfPath (path : Path.t) :
+           (Location.t * Typedtree.module_expr * identResolutions option * int)
+           option =
+         match path with
+         | Pident id when Ident.global id -> None
+         | Pident id -> (
+           let uid =
+             localUid (function
+               | Typedtree.Module_binding {mb_id = Some mbId} ->
+                 Ident.same mbId id
+               | _ -> false)
+           in
+           match uid with
+           | Some uid -> (
+             match bindingOfUid uid with
+             | Some (loc, definition) -> Some (loc, definition, Some self, 0)
+             | None -> None)
+           | None -> None)
+         | Pdot (Pident unit, name) when Ident.global unit -> (
+           let shape =
+             Shape.proj (compUnitShape (Ident.name unit))
+               (Shape.Item.make name Module)
+           in
+           match Reduce.reduce_for_uid Env.empty shape |> uidOfResult with
+           | Some uid -> (
+             match bindingOfUid uid with
+             | Some (loc, definition) ->
+               Some (loc, definition, resolverOfUid uid, 0)
+             | None -> None)
+           | None -> None)
+         | Pdot (parent, name) -> (
+           match bindingOfPath parent with
+           | Some (_, definition, resolver, applied) -> (
+             (* Peel the applied functor layers, then find the member. *)
+             let rec body (e : Typedtree.module_expr) applied =
+               match e.mod_desc with
+               | Tmod_constraint (inner, _, _, _) -> body inner applied
+               | Tmod_functor (_, inner) when applied > 0 ->
+                 body inner (applied - 1)
+               | Tmod_structure structure when applied = 0 -> Some structure
+               | _ -> None
+             in
+             match body definition applied with
+             | Some structure -> (
+               let member =
+                 structure.str_items
+                 |> List.find_map (fun (item : Typedtree.structure_item) ->
+                        match item.str_desc with
+                        | Tstr_module ({mb_name = {txt = Some n}} as mb)
+                          when n = name ->
+                          Some mb
+                        | Tstr_recmodule mbs ->
+                          mbs
+                          |> List.find_opt
+                               (fun (mb : Typedtree.module_binding) ->
+                                 mb.mb_name.txt = Some name)
+                        | _ -> None)
+               in
+               match member with
+               | Some mb -> Some (mb.mb_name.loc, mb.mb_expr, resolver, 0)
+               | None -> None)
+             | None -> None)
+           | None -> None)
+         | Papply (functorPath, _) -> (
+           match bindingOfPath functorPath with
+           | Some (loc, definition, resolver, applied) ->
+             Some (loc, definition, resolver, applied + 1)
+           | None -> None)
+         | _ -> None
+       in
        let rec headKey (visited : headVisited) (e : Typedtree.module_expr) =
          match e.mod_desc with
          | Tmod_apply (functorExpr, _, _) -> (
@@ -792,44 +895,35 @@ let rec makeResolver ~cmtFilePath
          | Tmod_constraint (inner, _, _, _) -> headKey visited inner
          | Tmod_functor _ -> Some (e.mod_loc, 0)
          | Tmod_ident (path, lid) -> (
-           match Hashtbl.find_opt moduleUids (key lid.loc (Path.last path)) with
-           | Some uid -> (
-             match Lazy.force uid with
-             | Some uid when not (List.mem uid visited) -> (
-               match bindingOfUid uid with
-               | Some (loc, _) when loc.loc_ghost -> None
-               | Some (loc, definition) -> (
-                 match (unwrap definition).mod_desc with
-                 | Tmod_apply _ | Tmod_ident _ -> (
-                   (* Bound to a partial application or an alias: chase it
-                      with the resolver of the unit binding it. *)
-                   match resolverOfUid uid with
-                   | Some resolver -> (
-                     match resolver.headKey (uid :: visited) definition with
-                     | Some head -> Some head
-                     | None -> Some (loc, 0))
-                   | None -> Some (loc, 0))
-                 | _ -> Some (loc, 0))
+           let byOccurrence =
+             match Longident.last lid.txt with
+             | exception Misc.Fatal_error -> None
+             | name -> (
+               match Hashtbl.find_opt moduleUids (key lid.loc name) with
+               | Some uid -> (
+                 match Lazy.force uid with
+                 | Some uid when not (List.mem uid visited) -> (
+                   match bindingOfUid uid with
+                   | Some (loc, definition) ->
+                     keyOfBinding (uid :: visited) loc definition
+                       (resolverOfUid uid)
+                   | None -> None)
+                 | _ -> None)
                | None -> None)
-             | _ -> None)
-           | None -> None)
+           in
+           match byOccurrence with
+           | Some head -> Some head
+           | None -> (
+             (* No usable occurrence (e.g. [Outer (A).Inner]): structurally. *)
+             match bindingOfPath path with
+             | Some (loc, definition, resolver, 0) ->
+               keyOfBinding visited loc definition resolver
+             | _ -> None))
          | _ -> None
        in
        headKey);
     expandModuleType =
-      (let compUnitShape name =
-         {Shape.uid = None; desc = Comp_unit name; approximated = false}
-       in
-       (* The uid of a declaration of the current unit, by identifier. *)
-       let localUid (matches : Typedtree.item_declaration -> bool) =
-         Shape.Uid.Tbl.fold
-           (fun uid decl acc ->
-             match acc with
-             | Some _ -> acc
-             | None -> if matches decl then Some uid else None)
-           local None
-       in
-       (* Shape of a module path rooted at a compilation unit or at a module
+      (       (* Shape of a module path rooted at a compilation unit or at a module
           of the current unit. *)
        let rec moduleShapeOfPath (path : Path.t) =
          match path with
