@@ -70,8 +70,10 @@ let processCmtFiles ~cmtRoot =
     let sourceDirs =
       Paths.readSourceDirs ~configSources:None |> List.sort String.compare
     in
+    (* Collect the cmt files of every source directory before processing any,
+       so cross-directory declaration dependencies can be resolved. *)
     sourceDirs
-    |> List.iter (fun sourceDir ->
+    |> List.concat_map (fun sourceDir ->
            let libBsSourceDir = Filename.concat lib_bs sourceDir in
            let files =
              match Sys.readdir libBsSourceDir |> Array.to_list with
@@ -80,8 +82,8 @@ let processCmtFiles ~cmtRoot =
            in
            let cmtFiles = files |> List.filter isCmtFile in
            cmtFiles |> List.sort String.compare
-           |> List.map (Filename.concat libBsSourceDir)
-           |> processCmtFilePaths)
+           |> List.map (Filename.concat libBsSourceDir))
+    |> processCmtFilePaths
 
 let runAnalysis ~cmtRoot ~ppf =
   Log_.Color.setup ();

@@ -3,6 +3,8 @@ module type S = sig
   val find_opt : int -> int option
 
   val unused_in_sig : int -> int
+
+  val with_opt : ?x:int -> unit -> int
 end
 
 module type T = sig

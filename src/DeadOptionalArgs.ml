@@ -61,6 +61,18 @@ let addReferences ~(locFrom : Location.t) ~(locTo : Location.t) ~path
         (argNamesMaybe |> String.concat ", ")
         (posFrom |> posToString))
 
+(* Calls recorded against a signature item that is not a declaration (e.g. a
+   [val] inside a named module type) are re-attributed to the implementation.
+   Must run before [forceDelayedItems]. *)
+let forwardDelayedItems ~(posFrom : Lexing.position) ~(posTo : Lexing.position)
+    =
+  let forwarded =
+    !delayedItems
+    |> List.filter_map (fun item ->
+           if item.posTo = posFrom then Some {item with posTo} else None)
+  in
+  delayedItems := forwarded @ !delayedItems
+
 let forceDelayedItems () =
   let items = !delayedItems |> List.rev in
   delayedItems := [];
