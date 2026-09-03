@@ -240,6 +240,12 @@ function runRegressionTests() {
       "optional argument x of function Opt_cross.+g is always supplied"
     );
     assertIncludes(output, "Live Value +Included_sig.M.+f");
+    // A module type nested in a with-constrained signature; nine aliases.
+    assertIncludes(output, "Live Value +Included_sig.W.X.+f");
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_alias9.+g is always supplied"
+    );
     // Partial applications: held by a let module, and bound in another file.
     assertIncludes(
       output,

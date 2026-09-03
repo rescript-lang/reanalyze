@@ -540,6 +540,21 @@ type moduleShape =
   unit
 #endif
 
+(* Bindings already chased when resolving a functor head, to break cycles. *)
+type headVisited =
+#if OCAML_VERSION >= (5, 3, 0)
+  Shape.Uid.t list
+#else
+  unit
+#endif
+
+let noHeadVisited : headVisited =
+#if OCAML_VERSION >= (5, 3, 0)
+  []
+#else
+  ()
+#endif
+
 type identResolutions = {
   valueImpl : Location.t -> string -> Location.t option;
       (** occurrence location, last name -> implementation location *)
@@ -555,12 +570,14 @@ type identResolutions = {
   moduleTypeOf : Location.t -> string -> Types.module_type option;
       (** occurrence location, last name -> the module type a
           [module type X = ...] declaration denotes *)
-  headKey : int -> Typedtree.module_expr -> (Location.t * int) option;
-      (** fuel, module expression -> the binding name location of the functor
-          it stands for, through aliases and partial applications (possibly
-          bound in other units, resolved with those units' own occurrence
-          data), and the number of arguments those partial applications
-          consumed; inline functors are keyed by their own location *)
+  headKey :
+    headVisited -> Typedtree.module_expr -> (Location.t * int) option;
+      (** visited bindings (start with [noHeadVisited]), module expression ->
+          the binding name location of the functor it stands for, through
+          aliases and partial applications (possibly bound in other units,
+          resolved with those units' own occurrence data), and the number of
+          arguments those partial applications consumed; inline functors are
+          keyed by their own location *)
   expandModuleType : Types.module_type -> Types.module_type;
       (** follow module type aliases ([module type S = Base]) until a signature
           or an unresolvable name is reached *)
@@ -766,39 +783,37 @@ let rec makeResolver ~cmtFilePath
            resolverForUnit ~currentCmtFile:cmtFilePath ~imports comp_unit
          | _ -> None
        in
-       let rec headKey fuel (e : Typedtree.module_expr) =
-         if fuel = 0 then None
-         else
-           match e.mod_desc with
-           | Tmod_apply (functorExpr, _, _) -> (
-             match headKey fuel functorExpr with
-             | Some (loc, consumed) -> Some (loc, consumed + 1)
-             | None -> None)
-           | Tmod_constraint (inner, _, _, _) -> headKey fuel inner
-           | Tmod_functor _ -> Some (e.mod_loc, 0)
-           | Tmod_ident (path, lid) -> (
-             match Hashtbl.find_opt moduleUids (key lid.loc (Path.last path)) with
-             | Some uid -> (
-               match Lazy.force uid with
-               | Some uid -> (
-                 match bindingOfUid uid with
-                 | Some (loc, _) when loc.loc_ghost -> None
-                 | Some (loc, definition) -> (
-                   match (unwrap definition).mod_desc with
-                   | Tmod_apply _ | Tmod_ident _ -> (
-                     (* Bound to a partial application or an alias: chase
-                        it with the resolver of the unit binding it. *)
-                     match resolverOfUid uid with
-                     | Some resolver -> (
-                       match resolver.headKey (fuel - 1) definition with
-                       | Some head -> Some head
-                       | None -> Some (loc, 0))
+       let rec headKey (visited : headVisited) (e : Typedtree.module_expr) =
+         match e.mod_desc with
+         | Tmod_apply (functorExpr, _, _) -> (
+           match headKey visited functorExpr with
+           | Some (loc, consumed) -> Some (loc, consumed + 1)
+           | None -> None)
+         | Tmod_constraint (inner, _, _, _) -> headKey visited inner
+         | Tmod_functor _ -> Some (e.mod_loc, 0)
+         | Tmod_ident (path, lid) -> (
+           match Hashtbl.find_opt moduleUids (key lid.loc (Path.last path)) with
+           | Some uid -> (
+             match Lazy.force uid with
+             | Some uid when not (List.mem uid visited) -> (
+               match bindingOfUid uid with
+               | Some (loc, _) when loc.loc_ghost -> None
+               | Some (loc, definition) -> (
+                 match (unwrap definition).mod_desc with
+                 | Tmod_apply _ | Tmod_ident _ -> (
+                   (* Bound to a partial application or an alias: chase it
+                      with the resolver of the unit binding it. *)
+                   match resolverOfUid uid with
+                   | Some resolver -> (
+                     match resolver.headKey (uid :: visited) definition with
+                     | Some head -> Some head
                      | None -> Some (loc, 0))
-                   | _ -> Some (loc, 0))
-                 | None -> None)
+                   | None -> Some (loc, 0))
+                 | _ -> Some (loc, 0))
                | None -> None)
-             | None -> None)
-           | _ -> None
+             | _ -> None)
+           | None -> None)
+         | _ -> None
        in
        headKey);
     expandModuleType =

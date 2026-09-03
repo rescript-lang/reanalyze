@@ -53,6 +53,7 @@ and moduleTypeRangesOfModuleType (moduleType : Typedtree.module_type) =
   match moduleType.mty_desc with
   | Tmty_signature signature -> moduleTypeRangesOfSignature signature
   | Tmty_functor (_, body) -> moduleTypeRangesOfModuleType body
+  | Tmty_with (base, _) -> moduleTypeRangesOfModuleType base
   | _ -> []
 
 let processCmt ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
