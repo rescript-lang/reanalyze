@@ -607,20 +607,21 @@ let findSignatureItem name signature =
 (* Module type expansion, also for module types rooted at a functor
    parameter in scope ([module type T = M.T], [M.Sub.T2]): those are found in
    the parameter's declared module type. *)
-let rec expandModuleType ?(fuel = 16) (moduleType : Types.module_type) =
+let rec expandModuleType ?(visited = []) (moduleType : Types.module_type) =
   let expanded = !identResolutions.expandModuleType moduleType in
   match expanded with
-  | Mty_ident path when fuel > 0 -> (
-    match moduleTypeViaParameter ~fuel path with
-    | Some moduleType -> expandModuleType ~fuel:(fuel - 1) moduleType
+  | Mty_ident path when not (List.exists (Path.same path) visited) -> (
+    let visited = path :: visited in
+    match moduleTypeViaParameter ~visited path with
+    | Some moduleType -> expandModuleType ~visited moduleType
     | None -> expanded)
   | _ -> expanded
 
-and moduleTypeViaParameter ~fuel (path : Path.t) =
+and moduleTypeViaParameter ~visited (path : Path.t) =
   match (findFunctorParameter path, pathComponents path) with
   | Some {paramType = Some paramType; prefix}, Some components -> (
     let rec walk (moduleType : Types.module_type) components =
-      let signature = moduleType |> expandModuleType ~fuel:(fuel - 1) |> getSignature in
+      let signature = moduleType |> expandModuleType ~visited |> getSignature in
       match components with
       | [] -> None
       | [name] -> (
@@ -746,17 +747,32 @@ let isSignatureValueDeclaration = ref (fun (_ : Location.t) -> true)
 
 let setSignatureValueFilter ~(fileName : string)
     ~(moduleTypeRanges : Location.t list) =
-  (* By module name: a preprocessed source is recorded as [foo.pp.ml] while
-     its positions say [foo.ml]. *)
-  let moduleName path =
-    match String.index_opt (Filename.basename path) '.' with
-    | Some i -> String.sub (Filename.basename path) 0 i
-    | None -> Filename.basename path
+  (* Full paths, without extensions (a preprocessed source is recorded as
+     [foo.pp.ml] while its positions say [foo.ml]); one may be relative to
+     the other's root, so a path suffix also matches. Basenames alone would
+     confuse same-named sources of different build targets. *)
+  let normalize path =
+    let dir = Filename.dirname path in
+    let base =
+      match String.index_opt (Filename.basename path) '.' with
+      | Some i -> String.sub (Filename.basename path) 0 i
+      | None -> Filename.basename path
+    in
+    if dir = "." then base else dir ^ "/" ^ base
   in
-  let name = moduleName fileName in
+  let endsWith ~suffix s =
+    let ls = String.length s and lsuf = String.length suffix in
+    ls >= lsuf && String.sub s (ls - lsuf) lsuf = suffix
+  in
+  let self = normalize fileName in
   isSignatureValueDeclaration :=
     fun (loc : Location.t) ->
-      let sameFile = moduleName loc.loc_start.pos_fname = name in
+      let other = normalize loc.loc_start.pos_fname in
+      let sameFile =
+        other = self
+        || endsWith ~suffix:("/" ^ other) self
+        || endsWith ~suffix:("/" ^ self) other
+      in
       if (not sameFile) && !Common.Cli.debug then
         Log_.item "signatureValueSkipped %s (file %s)@."
           (loc.loc_start |> posToString)

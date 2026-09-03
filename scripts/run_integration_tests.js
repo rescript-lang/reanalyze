@@ -302,6 +302,10 @@ function runRegressionTests() {
       output,
       "Live Value +Shared_signature_arg.Apply_pt2.Use_include_mt.+f"
     );
+    // Module types through an aliased or applied member of an applied
+    // functor's result.
+    assertIncludes(output, "Live Value +Shared_signature_arg.Use_u.+f");
+    assertIncludes(output, "Live Value +Shared_signature_arg.Use_u2.+k");
     // Partial applications: held by a let module, and bound in another file.
     assertIncludes(
       output,
