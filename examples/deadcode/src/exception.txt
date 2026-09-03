@@ -1,6 +1,6 @@
 
   Exception Analysis
   File "Exceptions.ml", line 3, characters 4-10
-  raises might raise A (Exceptions.ml:3:16) and is not annotated with @raises(A)
+  raises might raise A (Exceptions.ml:3:16) and is not annotated with [@raises A]
   
   Analysis reported 1 issues (Exception Analysis:1)

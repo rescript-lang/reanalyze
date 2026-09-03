@@ -37,56 +37,33 @@ let loadCmtFile ~cmtRoot cmtFilePath =
     if runConfig.termination then cmt_infos |> Arnold.processCmt
   | _ -> ()
 
-let processCmtFiles ~cmtRoot =
+let processCmtFiles ~root =
   let ( +++ ) = Filename.concat in
   let isCmtFile path =
     Filename.check_suffix path ".cmt" || Filename.check_suffix path ".cmti"
   in
-  let processCmtFilePaths cmtFilePaths =
-    cmtFilePaths |> List.iter (loadCmtFile ~cmtRoot)
+  Cli.cmtCommand := true;
+  let rec walkSubDirs dir =
+    let absDir = match dir = "" with true -> root | false -> root +++ dir in
+    let skipDir =
+      let base = Filename.basename dir in
+      base = "node_modules" || base = "_esy"
+    in
+    if skipDir || not (Sys.file_exists absDir) then []
+    else if Sys.is_directory absDir then
+      absDir |> Sys.readdir |> Array.fold_left
+        (fun acc d -> acc @ walkSubDirs (dir +++ d))
+        []
+    else if isCmtFile absDir then [absDir]
+    else []
   in
-  match cmtRoot with
-  | Some root ->
-    Cli.cmtCommand := true;
-    let rec walkSubDirs dir =
-      let absDir = match dir = "" with true -> root | false -> root +++ dir in
-      let skipDir =
-        let base = Filename.basename dir in
-        base = "node_modules" || base = "_esy"
-      in
-      if skipDir || not (Sys.file_exists absDir) then []
-      else if Sys.is_directory absDir then
-        absDir |> Sys.readdir |> Array.fold_left
-          (fun acc d -> acc @ walkSubDirs (dir +++ d))
-          []
-      else if isCmtFile absDir then [absDir]
-      else []
-    in
-    walkSubDirs "" |> processCmtFilePaths
-  | None ->
-    Lazy.force Paths.setReScriptProjectRoot;
-    let lib_bs = runConfig.projectRoot +++ ("lib" +++ "bs") in
-    let sourceDirs =
-      Paths.readSourceDirs ~configSources:None |> List.sort String.compare
-    in
-    sourceDirs
-    |> List.iter (fun sourceDir ->
-           let libBsSourceDir = Filename.concat lib_bs sourceDir in
-           let files =
-             match Sys.readdir libBsSourceDir |> Array.to_list with
-             | files -> files
-             | exception Sys_error _ -> []
-           in
-           let cmtFiles = files |> List.filter isCmtFile in
-           cmtFiles |> List.sort String.compare
-           |> List.map (Filename.concat libBsSourceDir)
-           |> processCmtFilePaths)
+  walkSubDirs "" |> List.iter (loadCmtFile ~cmtRoot:(Some root))
 
-let runAnalysis ~cmtRoot ~ppf =
+let runAnalysis ~root ~ppf =
   Log_.Color.setup ();
   if !Common.Cli.json then EmitJson.start ();
 
-  processCmtFiles ~cmtRoot;
+  processCmtFiles ~root;
   if runConfig.dce then (
     DeadException.forceDelayedItems ();
     DeadOptionalArgs.forceDelayedItems ();
@@ -109,48 +86,45 @@ let cli () =
     exit 0
     [@@raises exit]
   in
-  let rec setAll cmtRoot =
+  let setAll root =
     RunConfig.all ();
-    cmtRootRef := cmtRoot;
+    cmtRootRef := Some root;
     analysisKindSet := true
-  and setConfig () =
-    Paths.Config.processBsconfig ();
-    analysisKindSet := true
-  and setDCE cmtRoot =
+  in
+  let setDCE root =
     RunConfig.dce ();
-    cmtRootRef := cmtRoot;
+    cmtRootRef := Some root;
     analysisKindSet := true
-  and setException cmtRoot =
+  in
+  let setException root =
     RunConfig.exception_ ();
-    cmtRootRef := cmtRoot;
+    cmtRootRef := Some root;
     analysisKindSet := true
-  and setNoalloc () =
+  in
+  let setNoalloc root =
     RunConfig.noalloc ();
+    cmtRootRef := Some root;
     analysisKindSet := true
-  and setTermination cmtRoot =
+  in
+  let setTermination root =
     RunConfig.termination ();
-    cmtRootRef := cmtRoot;
+    cmtRootRef := Some root;
     analysisKindSet := true
-  and speclist =
+  in
+  let speclist =
     [
-      ("-all", Arg.Unit (fun () -> setAll None), "Run all the analyses.");
       ( "-all-cmt",
-        String (fun s -> setAll (Some s)),
+        Arg.String setAll,
         "root_path Run all the analyses for all the .cmt files under the root \
          path" );
       ("-ci", Unit (fun () -> Cli.ci := true), "Internal flag for use in CI");
-      ("-config", Unit setConfig, "Read the analysis mode from bsconfig.json");
-      ("-dce", Unit (fun () -> setDCE None), "Eperimental DCE");
       ("-debug", Unit (fun () -> Cli.debug := true), "Print debug information");
       ( "-dce-cmt",
-        String (fun s -> setDCE (Some s)),
+        String setDCE,
         "root_path Experimental DCE for all the .cmt files under the root path"
       );
-      ( "-exception",
-        Unit (fun () -> setException None),
-        "Experimental exception analysis" );
       ( "-exception-cmt",
-        String (fun s -> setException (Some s)),
+        String setException,
         "root_path Experimental exception analysis for all the .cmt files \
          under the root path" );
       ( "-native-build-target",
@@ -185,7 +159,7 @@ let cli () =
             Common.Cli.livePaths := paths @ Common.Cli.livePaths.contents),
         "comma-separated-path-prefixes Consider all values whose path has a \
          prefix in the list as live" );
-      ("-noalloc", Unit setNoalloc, "");
+      ("-noalloc-cmt", String setNoalloc, "");
       ( "-set-exit-code",
         Set Common.Cli.exitCode,
         "Exit with code 1 in case an issue is detected" );
@@ -196,11 +170,8 @@ let cli () =
             runConfig.suppress <- names @ runConfig.suppress),
         "comma-separated-path-prefixes Don't report on files whose path has a \
          prefix in the list" );
-      ( "-termination",
-        Unit (fun () -> setTermination None),
-        "Experimental termination analysis" );
       ( "-termination-cmt",
-        String (fun s -> setTermination (Some s)),
+        String setTermination,
         "root_path Experimental termination analysis for all the .cmt files \
          under the root path" );
       ( "-unsuppress",
@@ -220,9 +191,14 @@ let cli () =
   in
   let ppf = Format.std_formatter in
   Arg.parse speclist print_endline usage;
-  if !analysisKindSet = false then setConfig ();
-  let cmtRoot = !cmtRootRef in
-  runAnalysis ~cmtRoot ~ppf
+  match (!analysisKindSet, !cmtRootRef) with
+  | true, Some root -> runAnalysis ~root ~ppf
+  | _ ->
+    prerr_endline
+      "Error: no analysis selected. Pass one of -all-cmt, -dce-cmt, \
+       -exception-cmt, -termination-cmt with the root path containing the \
+       .cmt files.";
+    exit 1
   [@@raises exit]
 ;;
 

@@ -196,12 +196,12 @@ module Checks = struct
       Log_.warning ~loc ~name:"Exception Analysis" ~notClosed:true
         (fun ppf () ->
           Format.fprintf ppf
-            "@{<info>%s@} might raise %s and is not annotated with @raises(%s)"
+            "@{<info>%s@} might raise %s and is not annotated with [@raises %s]"
             name raisesTxt missingTxt);
       if !Common.Cli.json then (
-        EmitJson.emitAnnotate ~action:"Add @raises annotation"
+        EmitJson.emitAnnotate ~action:"Add [@raises] annotation"
           ~pos:(EmitJson.locToPos locFull)
-          ~text:(Format.asprintf "@raises(%s)\\n" missingTxt);
+          ~text:(Format.asprintf "[@raises %s]\\n" missingTxt);
         EmitJson.emitClose ()));
     if not (Exceptions.isEmpty redundantAnnotations) then
       Log_.warning ~loc ~name:"Exception Analysis" (fun ppf () ->
@@ -214,7 +214,7 @@ module Checks = struct
                 raiseSet
           in
           Format.fprintf ppf
-            "@{<info>%s@} %a and is annotated with redundant @raises(%a)" name
+            "@{<info>%s@} %a and is annotated with redundant [@raises %a]" name
             raisesDescription ()
             (Exceptions.pp ~exnTable:None)
             redundantAnnotations)

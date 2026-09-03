@@ -38,7 +38,7 @@ let pp ~exnTable ppf exceptions =
       | None -> Format.fprintf ppf "%s@{<info>%s@}" separator name)
     | None -> Format.fprintf ppf "%s@{<info>%s@}" separator name
   in
-  let isList = exceptions |> ExnSet.cardinal > 1 in
-  if isList then Format.fprintf ppf "[";
+  let isTuple = exceptions |> ExnSet.cardinal > 1 in
+  if isTuple then Format.fprintf ppf "(";
   exceptions |> ExnSet.iter ppExn;
-  if isList then Format.fprintf ppf "]"
+  if isTuple then Format.fprintf ppf ")"
