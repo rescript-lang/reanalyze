@@ -734,10 +734,30 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
       (let compUnitShape name =
          {Shape.uid = None; desc = Comp_unit name; approximated = false}
        in
-       (* Shape of a module path rooted at a compilation unit. *)
+       (* The uid of a declaration of the current unit, by identifier. *)
+       let localUid (matches : Typedtree.item_declaration -> bool) =
+         Shape.Uid.Tbl.fold
+           (fun uid decl acc ->
+             match acc with
+             | Some _ -> acc
+             | None -> if matches decl then Some uid else None)
+           local None
+       in
+       (* Shape of a module path rooted at a compilation unit or at a module
+          of the current unit. *)
        let rec moduleShapeOfPath (path : Path.t) =
          match path with
          | Pident id when Ident.global id -> Some (compUnitShape (Ident.name id))
+         | Pident id -> (
+           let uid =
+             localUid (function
+               | Typedtree.Module_binding {mb_id = Some mbId} ->
+                 Ident.same mbId id
+               | _ -> false)
+           in
+           match (uid, cmt_infos.cmt_impl_shape) with
+           | Some uid, Some impl -> findShapeByUid impl uid
+           | _ -> None)
          | Pdot (p, name) -> (
            match moduleShapeOfPath p with
            | Some shape -> Some (Shape.proj shape (Shape.Item.make name Module))
@@ -756,13 +776,13 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
              | None -> None)
            | None -> None)
          | Pident id ->
-           (* A module type of the current unit: by name among its
-              declarations. *)
+           (* A module type of the current unit, by identifier identity (the
+              same name may be declared in several scopes). *)
            Shape.Uid.Tbl.fold
              (fun _uid decl acc ->
                match (acc, decl) with
-               | None, Typedtree.Module_type {mtd_name; mtd_type = Some {mty_type}}
-                 when mtd_name.txt = Ident.name id ->
+               | None, Typedtree.Module_type {mtd_id; mtd_type = Some {mty_type}}
+                 when Ident.same mtd_id id ->
                  Some mty_type
                | _ -> acc)
              local None
