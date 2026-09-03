@@ -353,3 +353,15 @@ end
 module Applied_body = Apply_in_body (struct end)
 
 let run_chain () = ignore (Applied_chain.run () + Applied_body.run ())
+
+(* [let module G = F (A) in G (B)]: a local partial application. *)
+module Opt_letpartial : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+let run_letpartial () =
+  let module G = Apply2 (Chosen) in
+  let module Applied = G (Opt_letpartial) in
+  Applied.run ()
+
+let run_local_partial () = ignore (run_letpartial ())

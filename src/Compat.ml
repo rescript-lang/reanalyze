@@ -343,6 +343,9 @@ let registerCmtFile path =
 type unitInfo = {
   shape : Shape.t option;
   uidToDecl : Typedtree.item_declaration Shape.Uid.Tbl.t;
+  cmtPath : string;  (** the .cmt (or, failing that, the first file) loaded *)
+  unitImports : Misc.crcs;
+  occurrences : (Longident.t Location.loc * Shape_reduce.result) list;
 }
 
 (* Keyed by the list of files a unit is loaded from, so that same-named units
@@ -429,17 +432,26 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
       in
       let uidToDecl = Shape.Uid.Tbl.create 64 in
       let shape = ref None in
+      let implementation = ref None in
       loaded
-      |> List.iter (fun (_, (cmt_infos : Cmt_format.cmt_infos)) ->
+      |> List.iter (fun (path, (cmt_infos : Cmt_format.cmt_infos)) ->
              Shape.Uid.Tbl.iter
                (fun uid decl ->
                  if not (Shape.Uid.Tbl.mem uidToDecl uid) then
                    Shape.Uid.Tbl.replace uidToDecl uid decl)
                cmt_infos.cmt_uid_to_decl;
              match (!shape, cmt_infos.cmt_impl_shape) with
-             | None, Some _ -> shape := cmt_infos.cmt_impl_shape
+             | None, Some _ ->
+               shape := cmt_infos.cmt_impl_shape;
+               implementation := Some (path, cmt_infos)
              | _ -> ());
-      let info = {shape = !shape; uidToDecl} in
+      let cmtPath, unitImports, occurrences =
+        match (!implementation, loaded) with
+        | Some (path, cmt_infos), _ | None, (path, cmt_infos) :: _ ->
+          (path, cmt_infos.cmt_imports, cmt_infos.cmt_ident_occurrences)
+        | None, [] -> ("", [], [])
+      in
+      let info = {shape = !shape; uidToDecl; cmtPath; unitImports; occurrences} in
       Hashtbl.replace unitInfoCache cacheKey info;
       Some info)
 
@@ -543,10 +555,12 @@ type identResolutions = {
   moduleTypeOf : Location.t -> string -> Types.module_type option;
       (** occurrence location, last name -> the module type a
           [module type X = ...] declaration denotes *)
-  moduleDefinition :
-    Location.t -> string -> (Location.t * Typedtree.module_expr) option;
-      (** occurrence location, last name -> the module binding's name location
-          and expression *)
+  headKey : int -> Typedtree.module_expr -> (Location.t * int) option;
+      (** fuel, module expression -> the binding name location of the functor
+          it stands for, through aliases and partial applications (possibly
+          bound in other units, resolved with those units' own occurrence
+          data), and the number of arguments those partial applications
+          consumed; inline functors are keyed by their own location *)
   expandModuleType : Types.module_type -> Types.module_type;
       (** follow module type aliases ([module type S = Base]) until a signature
           or an unresolvable name is reached *)
@@ -560,7 +574,7 @@ let emptyIdentResolutions =
     projModule = (fun _ _ -> None);
     moduleDefLoc = (fun _ _ -> None);
     moduleTypeOf = (fun _ _ -> None);
-    moduleDefinition = (fun _ _ -> None);
+    headKey = (fun _ _ -> None);
     expandModuleType = (fun mt -> mt);
   }
 
@@ -594,22 +608,25 @@ let shapeResolutionAvailable =
   false
 #endif
 
-let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
-    identResolutions =
 #if OCAML_VERSION >= (5, 3, 0)
+(* Resolvers of other units, by .cmt path, for chasing definitions bound
+   there (aliases and partial applications of functors). *)
+let resolverCache : (string, identResolutions) Hashtbl.t = Hashtbl.create 16
+
+let rec makeResolver ~cmtFilePath
+    ~(local : Typedtree.item_declaration Shape.Uid.Tbl.t)
+    ~(imports : Misc.crcs) ~(implShape : Shape.t option)
+    ~(occurrences : (Longident.t Location.loc * Shape_reduce.result) list) :
+    identResolutions =
   let module Reduce = Shape_reduce.Make (struct
     let fuel = 10
 
     let read_unit_shape ~unit_name =
-      match
-        loadUnitInfo ~currentCmtFile:cmtFilePath ~imports:cmt_infos.cmt_imports
-          unit_name
-      with
+      match loadUnitInfo ~currentCmtFile:cmtFilePath ~imports unit_name with
       | Some {shape} -> shape
       | None -> None
   end) in
-  let local = cmt_infos.cmt_uid_to_decl in
-  let imports = cmt_infos.cmt_imports in
+  let thisUnit = unitNameOfCmtFile cmtFilePath in
   let locOfUid = locOfUid ~currentCmtFile:cmtFilePath ~imports ~local in
   let rec uidOfResult (result : Shape_reduce.result) =
     match result with
@@ -648,7 +665,7 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
   in
   let spelled = Hashtbl.create 64 in
   let ambiguous = Hashtbl.create 4 in
-  cmt_infos.cmt_ident_occurrences
+  occurrences
   |> List.iter (fun ((lid : Longident.t Location.loc), result) ->
          if not lid.loc.loc_ghost then
            match identity lid.txt result with
@@ -658,7 +675,7 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
              match Hashtbl.find_opt spelled k with
              | Some other when other <> id -> Hashtbl.replace ambiguous k ()
              | _ -> Hashtbl.replace spelled k id));
-  cmt_infos.cmt_ident_occurrences
+  occurrences
   |> List.iter (fun ((lid : Longident.t Location.loc), result) ->
          if (not lid.loc.loc_ghost) && lidText lid.txt <> None then
            let name = Longident.last lid.txt in
@@ -683,7 +700,7 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
              | Some uid ->
                Hashtbl.replace values k (lazy (locOfUid uid));
                Hashtbl.replace modules k
-                 (match cmt_infos.cmt_impl_shape with
+                 (match implShape with
                  | Some impl -> findShapeByUid impl uid
                  | None -> None);
                Hashtbl.replace moduleUids k (lazy (Some uid))
@@ -691,7 +708,7 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
   let nonGhost (loc : Location.t option) =
     match loc with Some l when not l.loc_ghost -> loc | _ -> None
   in
-  {
+  let rec self : identResolutions = {
     valueImpl =
       (fun loc name ->
         match Hashtbl.find_opt values (key loc name) with
@@ -731,57 +748,59 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
             moduleTypeOfUid ~currentCmtFile:cmtFilePath ~imports ~local uid
           | None -> None)
         | None -> None);
-    moduleDefinition =
+    headKey =
       (let bindingOfUid =
          moduleBindingOfUid ~currentCmtFile:cmtFilePath ~imports ~local
        in
-       (* The shape of the module defined with [uid], in its own unit. *)
-       let shapeOfDefinition (uid : Shape.Uid.t) =
-         let impl =
-           match uid with
-           | Shape.Uid.Item {comp_unit; _} -> (
-             match
-               loadUnitInfo ~currentCmtFile:cmtFilePath ~imports comp_unit
-             with
-             | Some {shape} -> shape
+       let rec unwrap (e : Typedtree.module_expr) =
+         match e.mod_desc with
+         | Tmod_constraint (inner, _, _, _) -> unwrap inner
+         | _ -> e
+       in
+       (* The resolver of the unit defining [uid]: this one, or that unit's
+          own, built from its occurrence data. *)
+       let resolverOfUid (uid : Shape.Uid.t) =
+         match uid with
+         | Shape.Uid.Item {comp_unit; _} when comp_unit = thisUnit -> Some self
+         | Shape.Uid.Item {comp_unit; _} ->
+           resolverForUnit ~currentCmtFile:cmtFilePath ~imports comp_unit
+         | _ -> None
+       in
+       let rec headKey fuel (e : Typedtree.module_expr) =
+         if fuel = 0 then None
+         else
+           match e.mod_desc with
+           | Tmod_apply (functorExpr, _, _) -> (
+             match headKey fuel functorExpr with
+             | Some (loc, consumed) -> Some (loc, consumed + 1)
+             | None -> None)
+           | Tmod_constraint (inner, _, _, _) -> headKey fuel inner
+           | Tmod_functor _ -> Some (e.mod_loc, 0)
+           | Tmod_ident (path, lid) -> (
+             match Hashtbl.find_opt moduleUids (key lid.loc (Path.last path)) with
+             | Some uid -> (
+               match Lazy.force uid with
+               | Some uid -> (
+                 match bindingOfUid uid with
+                 | Some (loc, _) when loc.loc_ghost -> None
+                 | Some (loc, definition) -> (
+                   match (unwrap definition).mod_desc with
+                   | Tmod_apply _ | Tmod_ident _ -> (
+                     (* Bound to a partial application or an alias: chase
+                        it with the resolver of the unit binding it. *)
+                     match resolverOfUid uid with
+                     | Some resolver -> (
+                       match resolver.headKey (fuel - 1) definition with
+                       | Some head -> Some head
+                       | None -> Some (loc, 0))
+                     | None -> Some (loc, 0))
+                   | _ -> Some (loc, 0))
+                 | None -> None)
+               | None -> None)
              | None -> None)
            | _ -> None
-         in
-         match impl with
-         | Some impl -> findShapeByUid impl uid
-         | None -> None
        in
-       let isAlias (definition : Typedtree.module_expr) =
-         let rec go (e : Typedtree.module_expr) =
-           match e.mod_desc with
-           | Tmod_ident _ -> true
-           | Tmod_constraint (inner, _, _, _) -> go inner
-           | _ -> false
-         in
-         go definition
-       in
-       (* [module G = A.F], possibly in another unit: chase the alias through
-          its shape, which needs no occurrence data of that unit. *)
-       let rec chase visited uid =
-         match bindingOfUid uid with
-         | Some (loc, _) when loc.loc_ghost -> None
-         | Some (_, definition) as def when isAlias definition -> (
-           match shapeOfDefinition uid with
-           | Some shape when not (List.mem uid visited) -> (
-             match Reduce.reduce_for_uid Env.empty shape |> uidOfResult with
-             | Some target when target <> uid -> (
-               match chase (uid :: visited) target with
-               | Some def -> Some def
-               | None -> def)
-             | _ -> def)
-           | _ -> def)
-         | def -> def
-       in
-       fun loc name ->
-         match Hashtbl.find_opt moduleUids (key loc name) with
-         | Some uid -> (
-           match Lazy.force uid with Some uid -> chase [] uid | None -> None)
-         | None -> None);
+       headKey);
     expandModuleType =
       (let compUnitShape name =
          {Shape.uid = None; desc = Comp_unit name; approximated = false}
@@ -807,7 +826,7 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
                  Ident.same mbId id
                | _ -> false)
            in
-           match (uid, cmt_infos.cmt_impl_shape) with
+           match (uid, implShape) with
            | Some uid, Some impl -> findShapeByUid impl uid
            | _ -> None)
          | Pdot (p, name) -> (
@@ -870,7 +889,31 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
          | _ -> moduleType
        in
        expand []);
-  }
+  } in
+  self
+
+and resolverForUnit ~currentCmtFile ~imports comp_unit =
+  match loadUnitInfo ~currentCmtFile ~imports comp_unit with
+  | Some info when info.cmtPath <> "" -> (
+    match Hashtbl.find_opt resolverCache info.cmtPath with
+    | Some resolver -> Some resolver
+    | None ->
+      let resolver =
+        makeResolver ~cmtFilePath:info.cmtPath ~local:info.uidToDecl
+          ~imports:info.unitImports ~implShape:info.shape
+          ~occurrences:info.occurrences
+      in
+      Hashtbl.replace resolverCache info.cmtPath resolver;
+      Some resolver)
+  | _ -> None
+#endif
+
+let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
+    identResolutions =
+#if OCAML_VERSION >= (5, 3, 0)
+  makeResolver ~cmtFilePath ~local:cmt_infos.cmt_uid_to_decl
+    ~imports:cmt_infos.cmt_imports ~implShape:cmt_infos.cmt_impl_shape
+    ~occurrences:cmt_infos.cmt_ident_occurrences
 #else
   let _ = (cmtFilePath, cmt_infos) in
   emptyIdentResolutions
