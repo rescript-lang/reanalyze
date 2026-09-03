@@ -758,13 +758,24 @@ let setSignatureValueFilter ~(fileName : string) ~(buildDir : string)
     let path =
       if Filename.is_relative path then Filename.concat buildDir path else path
     in
-    let dir = Filename.dirname path in
     let base =
       match String.index_opt (Filename.basename path) '.' with
       | Some i -> String.sub (Filename.basename path) 0 i
       | None -> Filename.basename path
     in
-    Filename.concat dir base
+    (* Drop [.] segments and resolve [..], which one side may carry. *)
+    let segments =
+      String.split_on_char '/' (Filename.dirname path)
+      |> List.fold_left
+           (fun acc segment ->
+             match (segment, acc) with
+             | ".", _ -> acc
+             | "..", _ :: rest -> rest
+             | _ -> segment :: acc)
+           []
+      |> List.rev
+    in
+    String.concat "/" (segments @ [base])
   in
   let self = normalize fileName in
   isSignatureValueDeclaration :=
