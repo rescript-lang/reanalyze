@@ -193,21 +193,12 @@ let functorKeys : (Typedtree.module_expr * Lexing.position) list ref = ref []
 let setFunctorKey (moduleExpr : Typedtree.module_expr) pos =
   functorKeys := (moduleExpr, pos) :: !functorKeys
 
-(* Keys must identify one functor definition. Applications only learn a
-   position (through the binding's declaration, possibly in another file), so
-   two distinct definitions a ppx emitted at one position cannot be told
-   apart: such keys are not credited at all, conservatively. *)
-let functorKeyOwners : (Lexing.position, Typedtree.module_expr) Hashtbl.t =
-  Hashtbl.create 16
-
-let ambiguousFunctorKeys = ref PosSet.empty
-
-let claimFunctorKey (moduleExpr : Typedtree.module_expr) pos =
-  match Hashtbl.find_opt functorKeyOwners pos with
-  | Some owner when owner != moduleExpr ->
-    ambiguousFunctorKeys := PosSet.add pos !ambiguousFunctorKeys
-  | Some _ -> ()
-  | None -> Hashtbl.replace functorKeyOwners pos moduleExpr
+(* Keys are positions, since applications only learn a definition through
+   its declaration's location (possibly in another file). Two distinct
+   definitions a ppx emitted at one position therefore share a key: the
+   calls through either's parameters are credited to the arguments of every
+   application of that key, which is tighter than forwarding to every
+   implementation and never hides a supplied argument. *)
 
 let findFunctorKey (moduleExpr : Typedtree.module_expr) =
   match List.find_opt (fun (e, _) -> e == moduleExpr) !functorKeys with
@@ -415,7 +406,6 @@ let rec collectExpr super self (e : Typedtree.expression) =
   (match e.exp_desc with
   | Texp_letmodule (id, name, _, moduleExpr, _) ->
     setFunctorKey moduleExpr name.loc.loc_start;
-    claimFunctorKey moduleExpr name.loc.loc_start;
     registerParameterAlias id moduleExpr;
     (match id with
     | Some id ->
@@ -757,34 +747,29 @@ let recordParameterCoercion ~locFrom ~coercion ~actualType
    items point at the module type's [val]s): they are not declarations. *)
 let isSignatureValueDeclaration = ref (fun (_ : Location.t) -> true)
 
-let setSignatureValueFilter ~(fileName : string)
+let setSignatureValueFilter ~(fileName : string) ~(buildDir : string)
     ~(moduleTypeRanges : Location.t list) =
-  (* Full paths, without extensions (a preprocessed source is recorded as
-     [foo.pp.ml] while its positions say [foo.ml]); one may be relative to
-     the other's root, so a path suffix also matches. Basenames alone would
-     confuse same-named sources of different build targets. *)
+  (* Full paths resolved against the build directory the compiler ran in
+     (both the recorded source file and positions are relative to it), and
+     compared exactly, without extensions (a preprocessed source is recorded
+     as [foo.pp.ml] while its positions say [foo.ml]). Basenames or suffixes
+     alone would confuse same-named sources in different directories. *)
   let normalize path =
+    let path =
+      if Filename.is_relative path then Filename.concat buildDir path else path
+    in
     let dir = Filename.dirname path in
     let base =
       match String.index_opt (Filename.basename path) '.' with
       | Some i -> String.sub (Filename.basename path) 0 i
       | None -> Filename.basename path
     in
-    if dir = "." then base else dir ^ "/" ^ base
-  in
-  let endsWith ~suffix s =
-    let ls = String.length s and lsuf = String.length suffix in
-    ls >= lsuf && String.sub s (ls - lsuf) lsuf = suffix
+    Filename.concat dir base
   in
   let self = normalize fileName in
   isSignatureValueDeclaration :=
     fun (loc : Location.t) ->
-      let other = normalize loc.loc_start.pos_fname in
-      let sameFile =
-        other = self
-        || endsWith ~suffix:("/" ^ other) self
-        || endsWith ~suffix:("/" ^ self) other
-      in
+      let sameFile = normalize loc.loc_start.pos_fname = self in
       if (not sameFile) && !Common.Cli.debug then
         Log_.item "signatureValueSkipped %s (file %s)@."
           (loc.loc_start |> posToString)
@@ -956,9 +941,7 @@ let traverseStructure ~doTypes ~doExternals =
       let functorDef =
         match findFunctorKey moduleExpr with
         | Some pos -> pos
-        | None ->
-          claimFunctorKey moduleExpr moduleExpr.mod_loc.loc_start;
-          moduleExpr.mod_loc.loc_start
+        | None -> moduleExpr.mod_loc.loc_start
       in
       setFunctorKey body functorDef;
       let paramIndex =
@@ -1056,7 +1039,6 @@ let traverseStructure ~doTypes ~doExternals =
     | Tstr_module {mb_expr; mb_id; mb_loc; mb_name} -> (
       currentModuleBindingPos := mb_name.loc.loc_start;
       setFunctorKey mb_expr mb_name.loc.loc_start;
-      claimFunctorKey mb_expr mb_name.loc.loc_start;
       registerParameterAlias mb_id mb_expr;
       let hasInterface =
         match mb_expr.mod_desc with Tmod_constraint _ -> true | _ -> false
@@ -1083,7 +1065,6 @@ let traverseStructure ~doTypes ~doExternals =
       moduleBindings
       |> List.iter (fun (mb : Typedtree.module_binding) ->
              setFunctorKey mb.mb_expr mb.mb_name.loc.loc_start;
-             claimFunctorKey mb.mb_expr mb.mb_name.loc.loc_start;
              registerParameterAlias mb.mb_id mb.mb_expr;
              match mb.mb_id with
              | Some id ->
@@ -1276,13 +1257,12 @@ let forceDelayedItems () =
   delayedApplications := List.rev !delayedApplications;
   Hashtbl.iter
     (fun (def, index, components) calls ->
-      if not (PosSet.mem def !ambiguousFunctorKeys) then
-        resolveArgumentItems ~visited:[] def index components
-        |> List.iter (fun (locTo : Location.t) ->
-               calls
-               |> List.iter
-                    (DeadOptionalArgs.addCallToImplementation
-                       ~posTo:locTo.loc_start)))
+      resolveArgumentItems ~visited:[] def index components
+      |> List.iter (fun (locTo : Location.t) ->
+             calls
+             |> List.iter
+                  (DeadOptionalArgs.addCallToImplementation
+                     ~posTo:locTo.loc_start)))
     parameterCalls;
   (* Reference the items a parameter's coercion uses, in the arguments of the
      enclosing functor's applications; the module type item is the fallback
@@ -1290,7 +1270,6 @@ let forceDelayedItems () =
   List.rev !parameterCoercions
   |> List.iter
        (fun {outerFunctor; outerIndex; itemPath; coercionFrom; coercionTo} ->
-         if not (PosSet.mem outerFunctor !ambiguousFunctorKeys) then
            let resolved =
              resolveArgumentItems ~visited:[] outerFunctor outerIndex itemPath
            in
@@ -1322,11 +1301,9 @@ let processStructure ~cmt_value_dependencies ~cmt_ident_resolutions ~doTypes
   recordedApplications := [];
   functorsByIdent := [];
   functorKeys := [];
-  Hashtbl.reset functorKeyOwners;
   structure |> traverseStructure.structure traverseStructure |> ignore;
   recordedApplications := [];
   functorKeys := [];
-  Hashtbl.reset functorKeyOwners;
   identResolutions := Compat.emptyIdentResolutions;
   let valueDependencies = cmt_value_dependencies |> List.rev in
   delayedValueDependencies :=
