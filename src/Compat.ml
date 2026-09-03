@@ -905,19 +905,33 @@ let rec makeResolver ~cmtFilePath
         | None -> None);
     moduleTypeOfPath = (fun path -> !moduleTypeOfPathRef path);
     shapeValueItems =
-      (fun shape ->
-        match (Reduce.reduce Env.empty shape).desc with
-        | Struct items ->
-          Shape.Item.Map.fold
-            (fun (name, kind) _ acc ->
-              match kind with
-              | Shape.Sig_component_kind.Value -> (
-                match projValueLoc shape name with
-                | Some loc -> (name, loc) :: acc
-                | None -> acc)
-              | _ -> acc)
-            items []
-        | _ -> []);
+      (* Values at any depth of submodules; [visited] guards recursive
+         shapes. Functor members have no values to reference. *)
+      (let rec items visited (shape : Shape.t) path =
+         let reduced = Reduce.reduce Env.empty shape in
+         if List.memq reduced visited then []
+         else
+           let visited = reduced :: visited in
+           match reduced.desc with
+           | Struct fields ->
+             Shape.Item.Map.fold
+               (fun (name, kind) _ acc ->
+                 match kind with
+                 | Shape.Sig_component_kind.Value -> (
+                   match projValueLoc shape name with
+                   | Some loc -> (String.concat "." (path @ [name]), loc) :: acc
+                   | None -> acc)
+                 | Shape.Sig_component_kind.Module ->
+                   items visited
+                     (Shape.proj shape (Shape.Item.make name Module))
+                     (path @ [name])
+                   @ acc
+                 | _ -> acc)
+               fields []
+           | Alias aliased -> items visited aliased path
+           | _ -> []
+       in
+       fun shape -> items [] shape []);
     bindingOfPath = (fun path -> bindingOfPath path);
     headKey =
       (let rec unwrap (e : Typedtree.module_expr) =
