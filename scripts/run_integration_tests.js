@@ -203,6 +203,14 @@ function runRegressionTests() {
     // A module type declared inside a module.
     assertIncludes(output, "Live Value +Nested_module_type.Outer.Used.+f");
     assertIncludes(output, "Dead Value +Nested_module_type.Outer.Unused.+f");
+    // let-module alias of a functor; module type aliases rooted at a local
+    // module and shadowing a same-named module type.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_letalias.+g is always supplied"
+    );
+    assertIncludes(output, "Live Value +Shared_signature_arg.Use_t.+h");
+    assertIncludes(output, "Live Value +Shared_signature_arg.Shadow.Use3.+k");
     assertIncludes(
       output,
       "optional argument x of function Opt_constrained.+g is always supplied"

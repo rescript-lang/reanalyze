@@ -230,3 +230,58 @@ let run_forwarded () =
   ignore
     (Applied_alias_mt.run () + Applied_outer.run () + Applied_outer_opt.run ()
    + Applied_incl.run () + Opt_incl_other.g ())
+
+(* [let module G = F in G (A)]: the alias stands for the functor. *)
+module Opt_letalias : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+let run_letalias () =
+  let module G = Apply_opt in
+  let module Applied = G (Opt_letalias) in
+  Applied.run ()
+
+(* Module type alias rooted at a module of this file, and a module type
+   shadowing a same-named one: resolution must follow identity, not names. *)
+module type T = sig
+  val f : unit -> int
+end
+
+module Inner = struct
+  module type T = sig
+    val h : unit -> int
+  end
+end
+
+module type T_alias = Inner.T
+
+module Use_t : Inner.T = struct
+  let h () = 3
+end
+
+module Apply_h (M : Inner.T) = struct
+  let run () = M.h ()
+end
+
+module Applied_h = Apply_h ((Use_t : T_alias))
+
+module Shadow = struct
+  module type T = sig
+    val k : unit -> int
+  end
+
+  module type T_alias3 = T
+
+  module Use3 : T = struct
+    let k () = 4
+  end
+
+  module Apply_k (M : T) = struct
+    let run () = M.k ()
+  end
+
+  module Applied3 = Apply_k ((Use3 : T_alias3))
+end
+
+let run_shadow () =
+  ignore (run_letalias () + Applied_h.run () + Shadow.Applied3.run ())

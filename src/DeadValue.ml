@@ -360,6 +360,46 @@ let addValueReferenceOrRedirect ~(locFrom : Location.t) ~(locTo : Location.t)
      nonForwardableReferences := PosPairSet.remove pair !nonForwardableReferences);
   addRedirect ~locFrom ~locTo ~locToImpl
 
+(* The key of the functor a module expression denotes, and the number of
+   arguments already consumed by partial applications it stands for, as in
+   [module G = F (A)] followed by [G (B)]. Aliases ([module G = F]) are
+   chased within the current file. *)
+let rec functorKeyOfHead ~fuel (e : Typedtree.module_expr) =
+  if fuel = 0 then None
+  else
+    match e.mod_desc with
+    | Tmod_apply (functorExpr, _, _) -> (
+      match functorKeyOfHead ~fuel functorExpr with
+      | Some (key, consumed) -> Some (key, consumed + 1)
+      | None -> None)
+    | Tmod_constraint (inner, _, _, _) -> functorKeyOfHead ~fuel inner
+    | Tmod_functor _ ->
+      (* Inline functor: keyed by its own position, see [functorKeys]. *)
+      Some (e.mod_loc.loc_start, 0)
+    | Tmod_ident (path, lid) -> (
+      let byIdent () =
+        match
+          List.find_opt
+            (fun (id, _) -> Ident.same id (Path.head path))
+            !functorsByIdent
+        with
+        | Some (_, pos) -> Some (pos, 0)
+        | None -> None
+        | exception _ -> None
+      in
+      match !identResolutions.moduleDefinition lid.loc (Path.last path) with
+      | Some (nameLoc, definition) -> (
+        match (moduleIdent definition, definition.mod_desc) with
+        | None, Tmod_apply _ -> functorKeyOfHead ~fuel:(fuel - 1) definition
+        | Some _, _ -> (
+          (* An alias: chase it, falling back to the alias's own binding. *)
+          match functorKeyOfHead ~fuel:(fuel - 1) definition with
+          | Some key -> Some key
+          | None -> Some (nameLoc.loc_start, 0))
+        | _ -> Some (nameLoc.loc_start, 0))
+      | None -> byIdent ())
+    | _ -> None
+
 let rec collectExpr super self (e : Typedtree.expression) =
   let locFrom = e.exp_loc in
   (* [let module F (M : S) = ... in]: key the functor by its binding. On
@@ -372,7 +412,17 @@ let rec collectExpr super self (e : Typedtree.expression) =
     claimFunctorKey moduleExpr name.loc.loc_start;
     registerParameterAlias id moduleExpr;
     (match id with
-    | Some id -> functorsByIdent := (id, name.loc.loc_start) :: !functorsByIdent
+    | Some id ->
+      (* [let module G = F in]: G stands for F's key. *)
+      let key =
+        match moduleIdent moduleExpr with
+        | Some _ -> (
+          match functorKeyOfHead ~fuel:8 moduleExpr with
+          | Some (key, 0) -> key
+          | _ -> name.loc.loc_start)
+        | None -> name.loc.loc_start
+      in
+      functorsByIdent := (id, key) :: !functorsByIdent
     | None -> ())
   | _ -> ());
   #endif
@@ -808,38 +858,8 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
       | Tmod_constraint (inner, _, _, _) -> flatten inner args
       | _ -> (e, args)
     in
-    (* The key of the functor a head denotes, and the number of arguments
-       already consumed by partial applications it stands for, as in
-       [module G = F (A)] followed by [G (B)]. *)
-    let rec headKey (e : Typedtree.module_expr) =
-      match e.mod_desc with
-      | Tmod_apply (functorExpr, _, _) -> (
-        match headKey functorExpr with
-        | Some (key, consumed) -> Some (key, consumed + 1)
-        | None -> None)
-      | Tmod_constraint (inner, _, _, _) -> headKey inner
-      | Tmod_functor _ ->
-        (* Inline functor: keyed by its own position, see [functorKeys]. *)
-        Some (e.mod_loc.loc_start, 0)
-      | Tmod_ident (path, lid) -> (
-        match !identResolutions.moduleDefinition lid.loc (Path.last path) with
-        | Some (nameLoc, definition) -> (
-          match (moduleIdent definition, definition.mod_desc) with
-          | None, Tmod_apply _ -> headKey definition
-          | _ -> Some (nameLoc.loc_start, 0))
-        | None -> (
-          match
-            List.find_opt
-              (fun (id, _) -> Ident.same id (Path.head path))
-              !functorsByIdent
-          with
-          | Some (_, pos) -> Some (pos, 0)
-          | None -> None
-          | exception _ -> None))
-      | _ -> None
-    in
     let head, args = flatten moduleExpr [] in
-    let key = headKey head in
+    let key = functorKeyOfHead ~fuel:8 head in
     if !Common.Cli.debug then
       Log_.item "functorApplication %s key:%s args:%d@."
         (moduleExpr.mod_loc.loc_start |> posToString)
