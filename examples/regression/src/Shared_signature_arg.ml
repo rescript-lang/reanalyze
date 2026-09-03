@@ -168,3 +168,9 @@ module Applied_rec = Apply_rec (Opt_rec)
 
 let run_alias () =
   ignore (Applied_alias.run () + Applied_rec.run () + Opt_alias_other.g ())
+
+(* An identifier through a functor application, [F(X).t]: must not crash the
+   occurrence resolver. *)
+module Set_of_ints = Set.Make (Int)
+
+let _apply_ident : Set.Make(Int).t = Set_of_ints.empty
