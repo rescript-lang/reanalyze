@@ -433,3 +433,21 @@ module Applied_recalias = Apply_recalias (Opt_recalias)
 
 let run_shadow_rec () =
   ignore (Applied_recalias.run () + Opt_recalias_other.g ())
+
+(* A nested functor obtained through [include] in the functor's body. *)
+module Opt_incl_f : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Outer_i (A : Shared_signature.S) = struct
+  include (struct
+    module Inner (B : Shared_signature.O) = struct
+      let run () = A.f () + B.g ~x:1 ()
+    end
+  end)
+end
+
+module Applied_outer_i = Outer_i (Chosen)
+module Applied_incl_f = Applied_outer_i.Inner (Opt_incl_f)
+
+let run_incl_f () = ignore (Applied_incl_f.run ())

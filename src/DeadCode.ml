@@ -32,11 +32,13 @@ let rec moduleTypeRangesOfStructure (structure : Typedtree.structure) =
 and moduleTypeRangesOfModuleExpr (moduleExpr : Typedtree.module_expr) =
   match moduleExpr.mod_desc with
   | Tmod_structure structure -> moduleTypeRangesOfStructure structure
+  | Tmod_constraint (inner, _, Tmodtype_explicit mty, _) ->
+    moduleTypeRangesOfModuleExpr inner @ moduleTypeRangesOfModuleType mty
   | Tmod_constraint (inner, _, _, _) -> moduleTypeRangesOfModuleExpr inner
   | Tmod_functor (_, body) -> moduleTypeRangesOfModuleExpr body
   | _ -> []
 
-let rec moduleTypeRangesOfSignature (signature : Typedtree.signature) =
+and moduleTypeRangesOfSignature (signature : Typedtree.signature) =
   signature.sig_items
   |> List.concat_map (fun (item : Typedtree.signature_item) ->
          match item.sig_desc with
@@ -63,6 +65,7 @@ and moduleTypeRangesOfModuleType (moduleType : Typedtree.module_type) =
              | Twith_modtype mty | Twith_modtypesubst mty ->
                mty.mty_loc :: moduleTypeRangesOfModuleType mty
              | _ -> []))
+  | Tmty_typeof moduleExpr -> moduleTypeRangesOfModuleExpr moduleExpr
   | _ -> []
 
 let processCmt ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =

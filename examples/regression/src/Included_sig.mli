@@ -25,3 +25,13 @@ end
 with module type S = sig
   val f : unit -> int
 end
+
+module W3 : module type of struct
+  module type S3 = sig
+    val f : unit -> int
+  end
+
+  module X : S3 = struct
+    let f () = 9
+  end
+end

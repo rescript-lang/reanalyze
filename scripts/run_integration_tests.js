@@ -266,6 +266,12 @@ function runRegressionTests() {
       "optional argument x of function Opt_recalias_other.+g is never used"
     );
     assertIncludes(output, "Live Value +Included_sig.W2.X.+f");
+    // module type of; a nested functor obtained through include.
+    assertIncludes(output, "Live Value +Included_sig.W3.X.+f");
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_incl_f.+g is always supplied"
+    );
     // Partial applications: held by a let module, and bound in another file.
     assertIncludes(
       output,

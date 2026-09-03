@@ -27,3 +27,13 @@ module W2 = struct
     let f () = 8
   end
 end
+
+module W3 = struct
+  module type S3 = sig
+    val f : unit -> int
+  end
+
+  module X : S3 = struct
+    let f () = 9
+  end
+end
