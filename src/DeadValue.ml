@@ -516,6 +516,7 @@ let processValueDependency
          module type used to constrain a module or functor result), so it can
          never be resolved as dead. Forward the references made to the
          signature item onto the implementation instead. *)
+      DeadOptionalArgs.forwardDelayedItems ~posFrom ~posTo;
       ValueReferences.find posFrom
       |> PosSet.iter (fun posRef ->
              if posRef <> posTo then
