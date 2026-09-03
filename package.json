@@ -2,7 +2,7 @@
   "name": "reanalyze",
   "version": "2.25.1",
   "private": true,
-  "description": "Analyzers for Dead Code/Types and termination",
+  "description": "Analyzers for Dead Code/Types and termination in OCaml",
   "license": "MIT",
   "scripts": {
     "build": "dune build",
@@ -21,7 +21,7 @@
   },
   "author": "Cristiano Calcagno",
   "keywords": [
-    "rescript",
+    "ocaml",
     "tooling"
   ],
   "bugs": {
