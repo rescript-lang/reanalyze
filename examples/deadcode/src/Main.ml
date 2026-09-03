@@ -8,6 +8,7 @@ let () =
   ignore TransitiveTypes.live_value;
   FirstClassModules.run ();
   FunctorSigUse.run ();
+  ignore (IncludeSigMli.equal (IncludeSigMli.create "a") (IncludeSigMli.create "b"));
   OptionalArgs.live_optional ~used:1 ();
   ignore (Externals.live_external "abc");
   Annotations.live_value ();

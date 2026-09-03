@@ -76,6 +76,18 @@
     let truly_dead k = k [@@dead "Make.+truly_dead"] 
 
   Warning Dead Value
+  File "IncludeSigMli.ml", line 3, characters 0-31
+  +equal is never used
+  <-- line 3
+  let equal a b = a.name = b.name [@@dead "+equal"] 
+
+  Warning Dead Value
+  File "IncludeSigMli.ml", line 4, characters 0-33
+  +hash is never used
+  <-- line 4
+  let hash a = String.length a.name [@@dead "+hash"] 
+
+  Warning Dead Value
   File "Includes.ml", line 4, characters 2-29
   +included_unused is never used
   <-- line 4
@@ -157,4 +169,4 @@
   <-- line 4
     | LiveA [@dead "live_variant.LiveA"] 
   
-  Analysis reported 28 issues (Warning Dead Exception:1, Warning Dead Module:2, Warning Dead Type:5, Warning Dead Value:17, Warning Redundant Optional Argument:2, Warning Unused Argument:1)
+  Analysis reported 30 issues (Warning Dead Exception:1, Warning Dead Module:2, Warning Dead Type:5, Warning Dead Value:19, Warning Redundant Optional Argument:2, Warning Unused Argument:1)

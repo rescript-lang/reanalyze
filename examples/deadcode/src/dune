@@ -10,6 +10,8 @@
   FunctorSigInline
   FunctorSigMli
   FunctorSigUse
+  IncludeSigGen
+  IncludeSigMli
   Includes
   Main
   ModuleAliases
