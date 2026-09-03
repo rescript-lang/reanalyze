@@ -845,6 +845,23 @@ let rec argumentModuleType (argumentExpr : Typedtree.module_expr) =
   | Tmod_constraint (inner, _, _, _), Mty_ident _ -> argumentModuleType inner
   | _ -> expand argumentExpr.mod_type
 
+(* When a constrained argument's module type cannot be expanded (its unit is
+   outside the analysis root), the type of the module under the constraints
+   is the fallback: it is concrete, so it exposes items. The coercion
+   computed against the constraint does not apply to it, so callers
+   reference all of its values. *)
+let concreteArgumentType (argumentExpr : Typedtree.module_expr) =
+  let rec innermost (e : Typedtree.module_expr) =
+    match e.mod_desc with
+    | Tmod_constraint (inner, _, _, _) -> innermost inner
+    | _ -> e
+  in
+  let inner = innermost argumentExpr in
+  if inner == argumentExpr then None
+  else
+    let moduleType = expandModuleType inner.mod_type in
+    match getSignature moduleType with [] -> None | _ -> Some moduleType
+
 (* Implementation of a value of an actual functor argument, by path. *)
 let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
   match moduleIdent argumentExpr with
@@ -888,7 +905,12 @@ let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
         | None -> None)
       | _ -> None)
   in
-  let moduleType = argumentModuleType argumentExpr in
+  let moduleType =
+    let declared = argumentModuleType argumentExpr in
+    match (expandedSignature declared, concreteArgumentType argumentExpr) with
+    | [], Some concrete -> concrete
+    | _ -> declared
+  in
   Direct
     (fun components ->
       match shape with
@@ -1008,7 +1030,13 @@ let traverseStructure ~doTypes ~doExternals =
         | _ when not argumentExpr.mod_loc.loc_ghost -> argumentExpr.mod_loc
         | _ -> moduleExpr.mod_loc
       in
-      let actualType = argumentModuleType argumentExpr in
+      let actualType, coercion =
+        let declared = argumentModuleType argumentExpr in
+        match (expandedSignature declared, concreteArgumentType argumentExpr) with
+        | [], Some concrete -> (concrete, Typedtree.Tcoerce_none)
+        | _ -> (declared, coercion)
+      in
+      let actualType = actualType in
       if !Common.Cli.debug then
         Log_.item "functorArgument %s coercion:%s type:%s items:%d@."
           (argumentExpr.mod_loc.loc_start |> posToString)

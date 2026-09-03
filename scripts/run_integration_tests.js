@@ -329,6 +329,10 @@ function runRegressionTests() {
       output,
       "optional argument x of function Opt_sw_other.+g is never used"
     );
+    // Arguments constrained by a module type from outside the analysis root
+    // (Set.OrderedType): inline and named.
+    assertIncludes(output, "Live Value +Shared_signature_arg.Applied_ord.+compare");
+    assertIncludes(output, "Live Value +Shared_signature_arg.Ord_named.+compare");
     // Partial applications: held by a let module, and bound in another file.
     assertIncludes(
       output,

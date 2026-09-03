@@ -750,3 +750,31 @@ let run_sweep () =
   ignore
     (Applied_sw1.run () + Applied_sw2.run () + Applied_sw3.run ()
    + Applied_sw4.run () + Opt_sw_other.g ())
+
+(* An inline argument constrained by a module type whose unit is outside
+   the analysis root (Set.OrderedType lives in the stdlib): the concrete
+   structure's type is the fallback. *)
+module Apply_ord (M : Set.OrderedType) = struct
+  let run () =
+    ignore M.compare;
+    0
+end
+
+module Applied_ord =
+  Apply_ord ((struct
+    type t = int
+
+    let compare (a : int) b = Stdlib.compare a b
+  end : Set.OrderedType))
+
+let run_ord () = ignore (Applied_ord.run ())
+
+module Ord_named = struct
+  type t = int
+
+  let compare (a : int) b = Stdlib.compare a b
+end
+
+module Applied_ord2 = Apply_ord ((Ord_named : Set.OrderedType))
+
+let run_ord2 () = ignore (Applied_ord2.run ())
