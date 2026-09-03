@@ -182,6 +182,24 @@ function runRegressionTests() {
       output,
       "optional argument x of function Opt_rec.+g is always supplied"
     );
+    // Argument constrained by an alias of the module type; a functor
+    // forwarding its parameter to another functor; include of the parameter.
+    assertIncludes(output, "Live Value +Shared_signature_arg.Chosen3.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Ignored3.+f");
+    assertIncludes(output, "Live Value +Shared_signature_arg.Chosen4.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Ignored4.+f");
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_outer.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_incl.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_incl_other.+g is never used"
+    );
     assertIncludes(
       output,
       "optional argument x of function Opt_constrained.+g is always supplied"

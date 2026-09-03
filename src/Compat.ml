@@ -534,6 +534,9 @@ type identResolutions = {
     Location.t -> string -> (Location.t * Typedtree.module_expr) option;
       (** occurrence location, last name -> the module binding's name location
           and expression *)
+  expandModuleType : Types.module_type -> Types.module_type;
+      (** follow module type aliases ([module type S = Base]) until a signature
+          or an unresolvable name is reached *)
 }
 
 let emptyIdentResolutions =
@@ -545,6 +548,7 @@ let emptyIdentResolutions =
     moduleDefLoc = (fun _ _ -> None);
     moduleTypeOf = (fun _ _ -> None);
     moduleDefinition = (fun _ _ -> None);
+    expandModuleType = (fun mt -> mt);
   }
 
 #if OCAML_VERSION >= (5, 3, 0)
@@ -726,6 +730,53 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
             | def -> def)
           | None -> None)
         | None -> None);
+    expandModuleType =
+      (let compUnitShape name =
+         {Shape.uid = None; desc = Comp_unit name; approximated = false}
+       in
+       (* Shape of a module path rooted at a compilation unit. *)
+       let rec moduleShapeOfPath (path : Path.t) =
+         match path with
+         | Pident id when Ident.global id -> Some (compUnitShape (Ident.name id))
+         | Pdot (p, name) -> (
+           match moduleShapeOfPath p with
+           | Some shape -> Some (Shape.proj shape (Shape.Item.make name Module))
+           | None -> None)
+         | _ -> None
+       in
+       let moduleTypeOfUid = moduleTypeOfUid ~currentCmtFile:cmtFilePath ~imports ~local in
+       let moduleTypeOfPath (path : Path.t) =
+         match path with
+         | Pdot (p, name) -> (
+           match moduleShapeOfPath p with
+           | Some shape -> (
+             let item = Shape.proj shape (Shape.Item.make name Module_type) in
+             match Reduce.reduce_for_uid Env.empty item |> uidOfResult with
+             | Some uid -> moduleTypeOfUid uid
+             | None -> None)
+           | None -> None)
+         | Pident id ->
+           (* A module type of the current unit: by name among its
+              declarations. *)
+           Shape.Uid.Tbl.fold
+             (fun _uid decl acc ->
+               match (acc, decl) with
+               | None, Typedtree.Module_type {mtd_name; mtd_type = Some {mty_type}}
+                 when mtd_name.txt = Ident.name id ->
+                 Some mty_type
+               | _ -> acc)
+             local None
+         | _ -> None
+       in
+       let rec expand fuel (moduleType : Types.module_type) =
+         match moduleType with
+         | Mty_ident path when fuel > 0 -> (
+           match moduleTypeOfPath path with
+           | Some expanded -> expand (fuel - 1) expanded
+           | None -> moduleType)
+         | _ -> moduleType
+       in
+       expand 8);
   }
 #else
   let _ = (cmtFilePath, cmt_infos) in

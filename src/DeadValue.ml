@@ -127,14 +127,49 @@ let parameterCalls :
     Hashtbl.t =
   Hashtbl.create 16
 
+type argumentResolver =
+  | Direct of (string list -> Location.t option)
+      (** implementation of a value of the actual argument, by path *)
+  | ViaParameter of Lexing.position * int * string list
+      (** the argument is (a submodule of) a parameter of the enclosing
+          functor: resolved through that functor's own applications *)
+
 type delayedApplication = {
   appliedFunctor : Lexing.position;
   argIndex : int;
-  resolveItem : string list -> Location.t option;
-      (** implementation of a value of the actual argument, by path *)
+  resolver : argumentResolver;
 }
 
 let delayedApplications : delayedApplication list ref = ref []
+
+(* Implementations of a value of the argument at [argIndex] of every
+   application of the functor keyed [functorDef]. *)
+let rec resolveArgumentItems ~depth functorDef argIndex components =
+  if depth > 8 then []
+  else
+    !delayedApplications
+    |> List.concat_map (fun {appliedFunctor; argIndex = index; resolver} ->
+           if appliedFunctor <> functorDef || index <> argIndex then []
+           else
+             match resolver with
+             | Direct resolve -> (
+               match resolve components with Some loc -> [loc] | None -> [])
+             | ViaParameter (outerDef, outerIndex, prefix) ->
+               resolveArgumentItems ~depth:(depth + 1) outerDef outerIndex
+                 (prefix @ components))
+
+(* Coercion references made through a functor parameter, as in
+   [module Outer (M : S) = Inner (M)]: credited to the arguments of the
+   enclosing functor's applications, once all files are scanned. *)
+type parameterCoercion = {
+  outerFunctor : Lexing.position;
+  outerIndex : int;
+  itemPath : string list;
+  coercionFrom : Location.t;
+  coercionTo : Location.t;  (** the module type item, as fallback *)
+}
+
+let parameterCoercions : parameterCoercion list ref = ref []
 
 (* The module path an argument or functor expression denotes, through any
    [( M : S )] constraints. *)
@@ -522,46 +557,24 @@ let findSignatureItem name signature =
          | Some itemName -> itemName = name
          | None -> false)
 
-(* [shape], when known, is the shape of the module the signature items belong
-   to; it is used to reference the implementation of an item rather than a
-   shared module type item. See [Compat.resolveIdentOccurrences]. *)
-let addValueReferenceFromSignatureItem ~locFrom ?shape signatureItem =
-  let id, locTo, _kind, _valType = signatureItem |> Compat.getSigValue in
-  if not locTo.loc_ghost then
-    let locToImpl =
-      match shape with
-      | Some shape -> !identResolutions.projValue shape (Ident.name id)
-      | None -> None
-    in
-    addRedirect ~locFrom ~locTo ~locToImpl
-
-let projModuleShape ?shape id =
-  match shape with
-  | Some shape -> !identResolutions.projModule shape (Ident.name id)
-  | None -> None
-
-let rec addAllModuleValueReferences ~locFrom ?shape
-    (moduleType : Types.module_type) =
+(* The value items a module coercion uses, with the path of submodules
+   leading to each. *)
+let rec iterAllModuleValues ~path (moduleType : Types.module_type) f =
   moduleType |> getSignature
   |> List.iter (fun (signatureItem : Types.signature_item) ->
          match signatureItem with
-         | Types.Sig_value _ ->
-           addValueReferenceFromSignatureItem ~locFrom ?shape signatureItem
+         | Types.Sig_value _ -> f ~path signatureItem
          | Types.Sig_module _ | Types.Sig_modtype _ -> (
            match signatureItem |> Compat.getSigModuleModtype with
            | Some (id, moduleType, _moduleLoc) ->
-             addAllModuleValueReferences ~locFrom
-               ?shape:(projModuleShape ?shape id)
-               moduleType
+             iterAllModuleValues ~path:(path @ [Ident.name id]) moduleType f
            | None -> ())
          | _ -> ())
 
-let rec addCoercedModuleValueReferences ~locFrom ~coercion ?shape ~actualType
-    () =
+let rec iterCoercedValues ~path ~coercion ~actualType f =
   let actualSignature = actualType |> getSignature in
   match coercion with
-  | Typedtree.Tcoerce_none ->
-    addAllModuleValueReferences ~locFrom ?shape actualType
+  | Typedtree.Tcoerce_none -> iterAllModuleValues ~path actualType f
   | Typedtree.Tcoerce_structure (values, modules) ->
     let actualFields =
       actualSignature
@@ -573,8 +586,7 @@ let rec addCoercedModuleValueReferences ~locFrom ~coercion ?shape ~actualType
     values
     |> List.iter (fun (index, _coercion) ->
            match nth_opt actualFields index with
-           | Some (Types.Sig_value _ as actualItem) ->
-             addValueReferenceFromSignatureItem ~locFrom ?shape actualItem
+           | Some (Types.Sig_value _ as actualItem) -> f ~path actualItem
            | Some _ -> ()
            | None -> ());
     let actualModules =
@@ -594,17 +606,87 @@ let rec addCoercedModuleValueReferences ~locFrom ~coercion ?shape ~actualType
            | Some actualItem -> (
              match actualItem |> Compat.getSigModuleModtype with
              | Some (actualId, actualType, _moduleLoc) ->
-               addCoercedModuleValueReferences ~locFrom ~coercion
-                 ?shape:(projModuleShape ?shape actualId)
-                 ~actualType ()
+               iterCoercedValues
+                 ~path:(path @ [Ident.name actualId])
+                 ~coercion ~actualType f
              | None -> ())
            | None -> ())
   | Typedtree.Tcoerce_alias (_env, _path, coercion) ->
-    addCoercedModuleValueReferences ~locFrom ~coercion ?shape ~actualType ()
+    iterCoercedValues ~path ~coercion ~actualType f
   | Typedtree.Tcoerce_functor (_argCoercion, resultCoercion) ->
-    addCoercedModuleValueReferences ~locFrom ~coercion:resultCoercion ?shape
-      ~actualType ()
+    iterCoercedValues ~path ~coercion:resultCoercion ~actualType f
   | Typedtree.Tcoerce_primitive _ -> ()
+
+(* Reference the values a functor argument's coercion uses. [shape], when
+   known, is the argument module's shape: items are then redirected to their
+   implementation rather than to a shared module type item. *)
+let addCoercedModuleValueReferences ~locFrom ~coercion ?shape ~actualType () =
+  iterCoercedValues ~path:[] ~coercion ~actualType (fun ~path signatureItem ->
+      let id, locTo, _kind, _valType = signatureItem |> Compat.getSigValue in
+      if not locTo.loc_ghost then
+        let resolutions = !identResolutions in
+        let itemShape =
+          path
+          |> List.fold_left
+               (fun shape name ->
+                 match shape with
+                 | Some shape -> resolutions.projModule shape name
+                 | None -> None)
+               shape
+        in
+        let locToImpl =
+          match itemShape with
+          | Some shape -> resolutions.projValue shape (Ident.name id)
+          | None -> None
+        in
+        addRedirect ~locFrom ~locTo ~locToImpl)
+
+(* Same, when the argument is a functor parameter: deferred to the arguments
+   of the enclosing functor's applications. *)
+let recordParameterCoercion ~locFrom ~coercion ~actualType
+    (parameter : functorParameter) components =
+  iterCoercedValues ~path:[] ~coercion ~actualType (fun ~path signatureItem ->
+      let id, locTo, _kind, _valType = signatureItem |> Compat.getSigValue in
+      if not locTo.loc_ghost then
+        parameterCoercions :=
+          {
+            outerFunctor = parameter.functorDef;
+            outerIndex = parameter.paramIndex;
+            itemPath = parameter.prefix @ components @ path @ [Ident.name id];
+            coercionFrom = locFrom;
+            coercionTo = locTo;
+          }
+          :: !parameterCoercions)
+
+(* Whether a value item of a file's signature is a definition of that file.
+   Items whose location lies in another file, or inside a [module type] of the
+   file, come from [include]s (e.g. [include T] of a functor parameter, whose
+   items point at the module type's [val]s): they are not declarations. *)
+let isSignatureValueDeclaration = ref (fun (_ : Location.t) -> true)
+
+let setSignatureValueFilter ~(fileName : string)
+    ~(moduleTypeRanges : Location.t list) =
+  (* By module name: a preprocessed source is recorded as [foo.pp.ml] while
+     its positions say [foo.ml]. *)
+  let moduleName path =
+    match String.index_opt (Filename.basename path) '.' with
+    | Some i -> String.sub (Filename.basename path) 0 i
+    | None -> Filename.basename path
+  in
+  let name = moduleName fileName in
+  isSignatureValueDeclaration :=
+    fun (loc : Location.t) ->
+      let sameFile = moduleName loc.loc_start.pos_fname = name in
+      if (not sameFile) && !Common.Cli.debug then
+        Log_.item "signatureValueSkipped %s (file %s)@."
+          (loc.loc_start |> posToString)
+          fileName;
+      sameFile
+      && not
+           (moduleTypeRanges
+           |> List.exists (fun (range : Location.t) ->
+                  range.loc_start.pos_cnum <= loc.loc_start.pos_cnum
+                  && loc.loc_start.pos_cnum < range.loc_end.pos_cnum))
 
 let rec processSignatureItem ~doTypes ~doValues ~moduleLoc ~path
     (si : Types.signature_item) =
@@ -615,7 +697,7 @@ let rec processSignatureItem ~doTypes ~doValues ~moduleLoc ~path
       DeadType.addDeclaration ~typeId:id ~typeKind:t.type_kind
   | Sig_value _ when doValues ->
     let id, loc, kind, valType = si |> Compat.getSigValue in
-    if not loc.Location.loc_ghost then
+    if (not loc.Location.loc_ghost) && !isSignatureValueDeclaration loc then
       let isPrimitive = match kind with Val_prim _ -> true | _ -> false in
       if (not isPrimitive) || !Config.analyzeExternals then
         let optionalArgs =
@@ -644,18 +726,27 @@ let rec processSignatureItem ~doTypes ~doValues ~moduleLoc ~path
    module type [(M : Other.S)] expanded to that module type's signature: the
    typed tree leaves it as [Mty_ident], which exposes no items. *)
 let rec argumentModuleType (argumentExpr : Typedtree.module_expr) =
+  let expand = !identResolutions.expandModuleType in
   match (argumentExpr.mod_desc, argumentExpr.mod_type) with
   | ( Tmod_constraint
         (_, _, Tmodtype_explicit {mty_desc = Tmty_ident (path, lid)}, _),
       Mty_ident _ ) -> (
     match !identResolutions.moduleTypeOf lid.loc (Path.last path) with
-    | Some moduleType -> moduleType
-    | None -> argumentExpr.mod_type)
+    | Some moduleType -> expand moduleType
+    | None -> expand argumentExpr.mod_type)
   | Tmod_constraint (inner, _, _, _), Mty_ident _ -> argumentModuleType inner
-  | _ -> argumentExpr.mod_type
+  | _ -> expand argumentExpr.mod_type
 
 (* Implementation of a value of an actual functor argument, by path. *)
 let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
+  match moduleIdent argumentExpr with
+  | Some (path, _)
+    when Compat.shapeResolutionAvailable && isFunctorParameterPath path -> (
+    match (findFunctorParameter path, pathComponents path) with
+    | Some p, Some components ->
+      ViaParameter (p.functorDef, p.paramIndex, p.prefix @ components)
+    | _ -> Direct (fun _ -> None))
+  | _ ->
   let shape =
     match moduleIdent argumentExpr with
     | Some (path, lid) -> !identResolutions.moduleShape lid.loc (Path.last path)
@@ -690,13 +781,14 @@ let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
       | None -> None)
   in
   let moduleType = argumentModuleType argumentExpr in
-  fun components ->
-    match shape with
-    | Some shape -> (
-      match viaShape shape components with
-      | Some loc -> Some loc
+  Direct
+    (fun components ->
+      match shape with
+      | Some shape -> (
+        match viaShape shape components with
+        | Some loc -> Some loc
+        | None -> viaSignature moduleType components)
       | None -> viaSignature moduleType components)
-    | None -> viaSignature moduleType components
 
 (* Applications already recorded as part of an outer curried application,
    by node identity (a ppx may emit distinct applications at one position). *)
@@ -764,7 +856,7 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
                {
                  appliedFunctor = key;
                  argIndex = consumed + i;
-                 resolveItem = argumentItemResolver argumentExpr;
+                 resolver = argumentItemResolver argumentExpr;
                }
                :: !delayedApplications)
     | None -> ()
@@ -828,8 +920,21 @@ let traverseStructure ~doTypes ~doExternals =
         | _ when not argumentExpr.mod_loc.loc_ghost -> argumentExpr.mod_loc
         | _ -> moduleExpr.mod_loc
       in
-      addCoercedModuleValueReferences ~locFrom ~coercion ?shape
-        ~actualType:(argumentModuleType argumentExpr) ();
+      let actualType = argumentModuleType argumentExpr in
+      let parameter =
+        match ident with
+        | Some (path, _) when Compat.shapeResolutionAvailable -> (
+          match (findFunctorParameter path, pathComponents path) with
+          | Some p, Some components -> Some (p, components)
+          | _ -> None)
+        | _ -> None
+      in
+      (match parameter with
+      | Some (p, components) ->
+        recordParameterCoercion ~locFrom ~coercion ~actualType p components
+      | None ->
+        addCoercedModuleValueReferences ~locFrom ~coercion ?shape ~actualType
+          ());
       recordFunctorApplication moduleExpr
     | _ -> ());
     let r = super.Tast_mapper.module_expr self moduleExpr in
@@ -902,6 +1007,38 @@ let traverseStructure ~doTypes ~doExternals =
                DeadType.addDeclaration ~typeId:typeDeclaration.typ_id
                  ~typeKind:typeDeclaration.typ_type.type_kind)
     | Tstr_include {incl_mod; incl_type} -> (
+      (* [include M] with [M] a functor parameter: the included identifiers
+         stand for the parameter's items. *)
+      (match moduleIdent incl_mod with
+      | Some (path, _) -> (
+        match (findFunctorParameter path, pathComponents path) with
+        | Some p, Some components ->
+          incl_type
+          |> List.iter (fun (item : Types.signature_item) ->
+                 match item with
+                 | Sig_value _ ->
+                   let id, _, _, _ = item |> Compat.getSigValue in
+                   functorParameters :=
+                     {
+                       p with
+                       paramId = id;
+                       prefix = p.prefix @ components @ [Ident.name id];
+                     }
+                     :: !functorParameters
+                 | Sig_module _ -> (
+                   match item |> Compat.getSigModuleModtype with
+                   | Some (id, _, _) ->
+                     functorParameters :=
+                       {
+                         p with
+                         paramId = id;
+                         prefix = p.prefix @ components @ [Ident.name id];
+                       }
+                       :: !functorParameters
+                   | None -> ())
+                 | _ -> ())
+        | _ -> ())
+      | None -> ());
       match incl_mod.mod_desc with
       | Tmod_ident (_path, _lid) ->
         let currentPath =
@@ -986,22 +1123,43 @@ let forceDelayedItems () =
          in
          addValueReference ~addFileReference:true ~locFrom ~locTo);
   (* Credit calls made through functor parameters to the actual arguments. *)
-  let applications = List.rev !delayedApplications in
+  delayedApplications := List.rev !delayedApplications;
+  Hashtbl.iter
+    (fun (def, index, components) calls ->
+      if not (PosSet.mem def !ambiguousFunctorKeys) then
+        resolveArgumentItems ~depth:0 def index components
+        |> List.iter (fun (locTo : Location.t) ->
+               calls
+               |> List.iter
+                    (DeadOptionalArgs.addCallToImplementation
+                       ~posTo:locTo.loc_start)))
+    parameterCalls;
+  (* Reference the items a parameter's coercion uses, in the arguments of the
+     enclosing functor's applications; the module type item is the fallback
+     when an argument cannot be resolved. *)
+  List.rev !parameterCoercions
+  |> List.iter
+       (fun {outerFunctor; outerIndex; itemPath; coercionFrom; coercionTo} ->
+         if not (PosSet.mem outerFunctor !ambiguousFunctorKeys) then
+           let resolved =
+             resolveArgumentItems ~depth:0 outerFunctor outerIndex itemPath
+           in
+           let applied =
+             !delayedApplications
+             |> List.exists (fun {appliedFunctor; argIndex} ->
+                    appliedFunctor = outerFunctor && argIndex = outerIndex)
+           in
+           match resolved with
+           | [] when applied ->
+             addValueReference ~addFileReference:true ~locFrom:coercionFrom
+               ~locTo:coercionTo
+           | _ ->
+             resolved
+             |> List.iter (fun locTo ->
+                    addValueReference ~addFileReference:true
+                      ~locFrom:coercionFrom ~locTo));
+  parameterCoercions := [];
   delayedApplications := [];
-  applications
-  |> List.iter (fun {appliedFunctor; argIndex; resolveItem} ->
-         if not (PosSet.mem appliedFunctor !ambiguousFunctorKeys) then
-         Hashtbl.iter
-           (fun (def, index, components) calls ->
-             if def = appliedFunctor && index = argIndex then
-               match resolveItem components with
-               | Some (locTo : Location.t) ->
-                 calls
-                 |> List.iter
-                      (DeadOptionalArgs.addCallToImplementation
-                         ~posTo:locTo.loc_start)
-               | None -> ())
-           parameterCalls);
   DeadOptionalArgs.settleDelayedItems ();
   let dependencies = List.rev !delayedValueDependencies in
   delayedValueDependencies := [];
