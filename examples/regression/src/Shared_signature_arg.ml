@@ -451,3 +451,19 @@ module Applied_outer_i = Outer_i (Chosen)
 module Applied_incl_f = Applied_outer_i.Inner (Opt_incl_f)
 
 let run_incl_f () = ignore (Applied_incl_f.run ())
+
+(* A forward alias inside a recursive group. *)
+module Opt_rec_chain : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module type Opt_functor = functor (M : Shared_signature.O) -> sig
+  val run : unit -> int
+end
+
+module rec Rec_g : Opt_functor = Rec_h
+and Rec_h : Opt_functor = Apply_opt
+
+module Applied_rec_chain = Rec_g (Opt_rec_chain)
+
+let run_rec_chain () = ignore (Applied_rec_chain.run ())
