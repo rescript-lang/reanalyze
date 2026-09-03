@@ -6,6 +6,10 @@
   Exceptions
   Externals
   FirstClassModules
+  FunctorSigGen
+  FunctorSigInline
+  FunctorSigMli
+  FunctorSigUse
   Includes
   Main
   ModuleAliases
