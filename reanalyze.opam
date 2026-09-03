@@ -6,8 +6,8 @@ Experimental analyses for ReScript/OCaml/Reason: for globally dead values/types,
 maintainer: ["Cristiano Calcagno"]
 authors: ["Cristiano Calcagno"]
 license: "MIT"
-homepage: "https://github.com/rescript-association/reanalyze"
-bug-reports: "https://github.com/rescript-association/reanalyze/issues"
+homepage: "https://github.com/rescript-lang/reanalyze"
+bug-reports: "https://github.com/rescript-lang/reanalyze/issues"
 depends: [
   "dune" {>= "2.0"}
   "ocaml" {>= "4.08.0" & < "5.6"}
@@ -27,4 +27,4 @@ build: [
     "@doc" {with-doc}
   ]
 ]
-dev-repo: "git+https://github.com/rescript-association/reanalyze.git"
+dev-repo: "git+https://github.com/rescript-lang/reanalyze.git"

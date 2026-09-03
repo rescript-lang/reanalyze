@@ -18,7 +18,7 @@ version [major|minor|patch|...]` command, npm will automatically tag the
 current commit, bump all the necessary version numbers (also the number in
 `src/Version.ml`) and push it to the current remote branch.
 
-Use the `...` menu next to the [tag](https://github.com/rescript-association/reanalyze/tags) to create a release manually. (To be automated later).
+Use the `...` menu next to the [tag](https://github.com/rescript-lang/reanalyze/tags) to create a release manually. (To be automated later).
 
 **Here are the concrete commands to run:**
 

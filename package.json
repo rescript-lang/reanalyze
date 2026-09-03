@@ -25,7 +25,7 @@
     "tooling"
   ],
   "bugs": {
-    "url": "https://github.com/cristianoc/reanalyze/issues"
+    "url": "https://github.com/rescript-lang/reanalyze/issues"
   },
-  "homepage": "https://github.com/cristianoc/reanalyze#readme"
+  "homepage": "https://github.com/rescript-lang/reanalyze#readme"
 }
