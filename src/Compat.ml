@@ -570,6 +570,11 @@ type identResolutions = {
   moduleTypeOf : Location.t -> string -> Types.module_type option;
       (** occurrence location, last name -> the module type a
           [module type X = ...] declaration denotes *)
+  bindingOfPath :
+    Path.t ->
+    (Location.t * Typedtree.module_expr * identResolutions option * int) option;
+      (** the binding a module path denotes, structurally, with the resolver
+          of its unit and the number of functor layers the path applied *)
   headKey :
     headVisited -> Typedtree.module_expr -> (Location.t * int) option;
       (** visited bindings (start with [noHeadVisited]), module expression ->
@@ -591,6 +596,7 @@ let emptyIdentResolutions =
     projModule = (fun _ _ -> None);
     moduleDefLoc = (fun _ _ -> None);
     moduleTypeOf = (fun _ _ -> None);
+    bindingOfPath = (fun _ -> None);
     headKey = (fun _ _ -> None);
     expandModuleType = (fun mt -> mt);
   }
@@ -739,7 +745,113 @@ let rec makeResolver ~cmtFilePath
   let nonGhost (loc : Location.t option) =
     match loc with Some l when not l.loc_ghost -> loc | _ -> None
   in
-  let rec self : identResolutions = {
+  let selfRef = ref emptyIdentResolutions in
+  let bindingOfUid =
+    moduleBindingOfUid ~currentCmtFile:cmtFilePath ~imports ~local
+  in
+  (* The resolver of the unit defining [uid]: this one, or that unit's own,
+     built from its occurrence data. *)
+  let resolverOfUid (uid : Shape.Uid.t) =
+    match uid with
+    | Shape.Uid.Item {comp_unit; _} when comp_unit = thisUnit -> Some !selfRef
+    | Shape.Uid.Item {comp_unit; _} ->
+      resolverForUnit ~currentCmtFile:cmtFilePath ~imports comp_unit
+    | _ -> None
+  in
+  (* The binding a module path denotes, structurally: through units,
+     local bindings, and the bodies of applied functors, as in
+     [Outer (A).Inner]. Returns the binding, the resolver of its unit,
+     and the number of functor layers the path applied. *)
+  let rec bindingOfPath (path : Path.t) :
+      (Location.t * Typedtree.module_expr * identResolutions option * int)
+      option =
+    match path with
+    | Pident id when Ident.global id -> None
+    | Pident id -> (
+      let uid =
+        localUid (function
+          | Typedtree.Module_binding {mb_id = Some mbId} ->
+            Ident.same mbId id
+          | _ -> false)
+      in
+      match uid with
+      | Some uid -> (
+        match bindingOfUid uid with
+        | Some (loc, definition) -> Some (loc, definition, Some !selfRef, 0)
+        | None -> None)
+      | None -> None)
+    | Pdot (Pident unit, name) when Ident.global unit -> (
+      let shape =
+        Shape.proj (compUnitShape (Ident.name unit))
+          (Shape.Item.make name Module)
+      in
+      match Reduce.reduce_for_uid Env.empty shape |> uidOfResult with
+      | Some uid -> (
+        match bindingOfUid uid with
+        | Some (loc, definition) ->
+          Some (loc, definition, resolverOfUid uid, 0)
+        | None -> None)
+      | None -> None)
+    | Pdot (parent, name) -> (
+      match bindingOfPath parent with
+      | Some (_, definition, resolver, applied) -> (
+        (* Peel the applied functor layers, then find the member, the
+           last binding of that name (also through [include]s). *)
+        let rec memberIn (e : Typedtree.module_expr) applied =
+          match e.mod_desc with
+          | Tmod_constraint (inner, _, _, _) -> memberIn inner applied
+          | Tmod_functor (_, inner) when applied > 0 ->
+            memberIn inner (applied - 1)
+          | Tmod_apply (functorExpr, _, _) ->
+            memberIn functorExpr (applied + 1)
+          | Tmod_ident (p, _) when applied = 0 -> (
+            (* [include Helpers] in a body: [Helpers] is local to the
+               unit defining the body, so its resolver must look it up. *)
+            let lookup =
+              match resolver with
+              | Some (r : identResolutions) -> r.bindingOfPath
+              | None -> bindingOfPath
+            in
+            match lookup (Pdot (p, name)) with
+            | Some (loc, expr, _, 0) -> Some (loc, expr)
+            | _ -> None)
+          | Tmod_structure structure when applied = 0 ->
+            structure.str_items
+            |> List.fold_left
+                 (fun acc (item : Typedtree.structure_item) ->
+                   match item.str_desc with
+                   | Tstr_module ({mb_name = {txt = Some n}} as mb)
+                     when n = name ->
+                     Some (mb.mb_name.loc, mb.mb_expr)
+                   | Tstr_recmodule mbs -> (
+                     match
+                       mbs
+                       |> List.find_opt
+                            (fun (mb : Typedtree.module_binding) ->
+                              mb.mb_name.txt = Some name)
+                     with
+                     | Some mb -> Some (mb.mb_name.loc, mb.mb_expr)
+                     | None -> acc)
+                   | Tstr_include {incl_mod} -> (
+                     match memberIn incl_mod 0 with
+                     | Some member -> Some member
+                     | None -> acc)
+                   | _ -> acc)
+                 None
+          | _ -> None
+        in
+        match memberIn definition applied with
+        | Some (loc, expr) -> Some (loc, expr, resolver, 0)
+        | None -> None)
+      | None -> None)
+    | Papply (functorPath, _) -> (
+      match bindingOfPath functorPath with
+      | Some (loc, definition, resolver, applied) ->
+        Some (loc, definition, resolver, applied + 1)
+      | None -> None)
+    | _ -> None
+  in
+  let self : identResolutions = {
     valueImpl =
       (fun loc name ->
         match Hashtbl.find_opt values (key loc name) with
@@ -779,23 +891,12 @@ let rec makeResolver ~cmtFilePath
             moduleTypeOfUid ~currentCmtFile:cmtFilePath ~imports ~local uid
           | None -> None)
         | None -> None);
+    bindingOfPath = (fun path -> bindingOfPath path);
     headKey =
-      (let bindingOfUid =
-         moduleBindingOfUid ~currentCmtFile:cmtFilePath ~imports ~local
-       in
-       let rec unwrap (e : Typedtree.module_expr) =
+      (let rec unwrap (e : Typedtree.module_expr) =
          match e.mod_desc with
          | Tmod_constraint (inner, _, _, _) -> unwrap inner
          | _ -> e
-       in
-       (* The resolver of the unit defining [uid]: this one, or that unit's
-          own, built from its occurrence data. *)
-       let resolverOfUid (uid : Shape.Uid.t) =
-         match uid with
-         | Shape.Uid.Item {comp_unit; _} when comp_unit = thisUnit -> Some self
-         | Shape.Uid.Item {comp_unit; _} ->
-           resolverForUnit ~currentCmtFile:cmtFilePath ~imports comp_unit
-         | _ -> None
        in
        (* The key of a binding found for a module expression: a functor is
           keyed by the binding; an alias or a partial application is chased
@@ -813,92 +914,6 @@ let rec makeResolver ~cmtFilePath
                | None -> Some (loc, 0))
              | None -> Some (loc, 0))
            | _ -> Some (loc, 0)
-       in
-       (* The binding a module path denotes, structurally: through units,
-          local bindings, and the bodies of applied functors, as in
-          [Outer (A).Inner]. Returns the binding, the resolver of its unit,
-          and the number of functor layers the path applied. *)
-       let rec bindingOfPath (path : Path.t) :
-           (Location.t * Typedtree.module_expr * identResolutions option * int)
-           option =
-         match path with
-         | Pident id when Ident.global id -> None
-         | Pident id -> (
-           let uid =
-             localUid (function
-               | Typedtree.Module_binding {mb_id = Some mbId} ->
-                 Ident.same mbId id
-               | _ -> false)
-           in
-           match uid with
-           | Some uid -> (
-             match bindingOfUid uid with
-             | Some (loc, definition) -> Some (loc, definition, Some self, 0)
-             | None -> None)
-           | None -> None)
-         | Pdot (Pident unit, name) when Ident.global unit -> (
-           let shape =
-             Shape.proj (compUnitShape (Ident.name unit))
-               (Shape.Item.make name Module)
-           in
-           match Reduce.reduce_for_uid Env.empty shape |> uidOfResult with
-           | Some uid -> (
-             match bindingOfUid uid with
-             | Some (loc, definition) ->
-               Some (loc, definition, resolverOfUid uid, 0)
-             | None -> None)
-           | None -> None)
-         | Pdot (parent, name) -> (
-           match bindingOfPath parent with
-           | Some (_, definition, resolver, applied) -> (
-             (* Peel the applied functor layers, then find the member, the
-                last binding of that name (also through [include]s). *)
-             let rec memberIn (e : Typedtree.module_expr) applied =
-               match e.mod_desc with
-               | Tmod_constraint (inner, _, _, _) -> memberIn inner applied
-               | Tmod_functor (_, inner) when applied > 0 ->
-                 memberIn inner (applied - 1)
-               | Tmod_apply (functorExpr, _, _) ->
-                 memberIn functorExpr (applied + 1)
-               | Tmod_ident (p, _) when applied = 0 -> (
-                 match bindingOfPath (Pdot (p, name)) with
-                 | Some (loc, expr, _, 0) -> Some (loc, expr)
-                 | _ -> None)
-               | Tmod_structure structure when applied = 0 ->
-                 structure.str_items
-                 |> List.fold_left
-                      (fun acc (item : Typedtree.structure_item) ->
-                        match item.str_desc with
-                        | Tstr_module ({mb_name = {txt = Some n}} as mb)
-                          when n = name ->
-                          Some (mb.mb_name.loc, mb.mb_expr)
-                        | Tstr_recmodule mbs -> (
-                          match
-                            mbs
-                            |> List.find_opt
-                                 (fun (mb : Typedtree.module_binding) ->
-                                   mb.mb_name.txt = Some name)
-                          with
-                          | Some mb -> Some (mb.mb_name.loc, mb.mb_expr)
-                          | None -> acc)
-                        | Tstr_include {incl_mod} -> (
-                          match memberIn incl_mod 0 with
-                          | Some member -> Some member
-                          | None -> acc)
-                        | _ -> acc)
-                      None
-               | _ -> None
-             in
-             match memberIn definition applied with
-             | Some (loc, expr) -> Some (loc, expr, resolver, 0)
-             | None -> None)
-           | None -> None)
-         | Papply (functorPath, _) -> (
-           match bindingOfPath functorPath with
-           | Some (loc, definition, resolver, applied) ->
-             Some (loc, definition, resolver, applied + 1)
-           | None -> None)
-         | _ -> None
        in
        let rec headKey (visited : headVisited) (e : Typedtree.module_expr) =
          match e.mod_desc with
@@ -1013,6 +1028,7 @@ let rec makeResolver ~cmtFilePath
        in
        expand []);
   } in
+  selfRef := self;
   self
 
 and resolverForUnit ~currentCmtFile ~imports comp_unit =
