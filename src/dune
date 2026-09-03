@@ -1,4 +1,3 @@
-(copy_files# ext/*.{ml,mli})
 (copy_files# vendor/*.{ml,mli})
 
 (executable

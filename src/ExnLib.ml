@@ -14,41 +14,6 @@ let raisesLibTable =
       ("map2", [invalidArgument]);
     ]
   in
-  let beltArray = [("getExn", [assertFailure]); ("setExn", [assertFailure])] in
-  let beltList =
-    [("getExn", [notFound]); ("headExn", [notFound]); ("tailExn", [notFound])]
-  in
-  let beltMap = [("getExn", [notFound])] in
-  let beltMutableMap = beltMap in
-  let beltMutableQueue = [("peekExn", [notFound]); ("popExn", [notFound])] in
-  let beltMutableSet = [("getExn", [notFound])] in
-  let beltOption = [("getExn", [notFound])] in
-  let beltResult = [("getExn", [notFound])] in
-  let beltSet = [("getExn", [notFound])] in
-  let bsJson =
-    (* bs-json *)
-    [
-      ("bool", [decodeError]);
-      ("float", [decodeError]);
-      ("int", [decodeError]);
-      ("string", [decodeError]);
-      ("char", [decodeError]);
-      ("date", [decodeError]);
-      ("nullable", [decodeError]);
-      ("nullAs", [decodeError]);
-      ("array", [decodeError]);
-      ("list", [decodeError]);
-      ("pair", [decodeError]);
-      ("tuple2", [decodeError]);
-      ("tuple3", [decodeError]);
-      ("tuple4", [decodeError]);
-      ("dict", [decodeError]);
-      ("field", [decodeError]);
-      ("at", [decodeError; invalidArgument]);
-      ("oneOf", [decodeError]);
-      ("either", [decodeError]);
-    ]
-  in
   let buffer =
     [
       ("sub", [invalidArgument]);
@@ -184,56 +149,11 @@ let raisesLibTable =
   in
   [
     ("Array", array);
-    ("Belt.Array", beltArray);
-    ("Belt_Array", beltArray);
-    ("Belt.List", beltList);
-    ("Belt_List", beltList);
-    ("Belt.Map", beltMap);
-    ("Belt.Map.Int", beltMap);
-    ("Belt.Map.String", beltMap);
-    ("Belt_Map", beltMap);
-    ("Belt_Map.Int", beltMap);
-    ("Belt_Map.String", beltMap);
-    ("Belt_MapInt", beltMap);
-    ("Belt_MapString", beltMap);
-    ("Belt.MutableMap", beltMutableMap);
-    ("Belt.MutableMap.Int", beltMutableMap);
-    ("Belt.MutableMap.String", beltMutableMap);
-    ("Belt_MutableMap", beltMutableMap);
-    ("Belt_MutableMap.Int", beltMutableMap);
-    ("Belt_MutableMap.String", beltMutableMap);
-    ("Belt_MutableMapInt", beltMutableMap);
-    ("Belt_MutableMapString", beltMutableMap);
-    ("Belt.MutableQueue", beltMutableQueue);
-    ("Belt_MutableQueue", beltMutableQueue);
-    ("Belt.Option", beltOption);
-    ("Belt_Option", beltOption);
-    ("Belt.Result", beltResult);
-    ("Belt_Result", beltResult);
-    ("Belt.Set", beltSet);
-    ("Belt.Set.Int", beltSet);
-    ("Belt.Set.String", beltSet);
-    ("Belt_Set", beltSet);
-    ("Belt_Set.Int", beltSet);
-    ("Belt_Set.String", beltSet);
-    ("Belt_SetInt", beltSet);
-    ("Belt_SetString", beltSet);
-    ("Belt.MutableSet", beltMutableSet);
-    ("Belt.MutableSet.Int", beltMutableSet);
-    ("Belt.MutableSet.String", beltMutableSet);
-    ("MutableSet", beltMutableSet);
-    ("MutableSet.Int", beltMutableSet);
-    ("MutableSet.String", beltMutableSet);
-    ("Belt_MutableSetInt", beltMutableSet);
-    ("Belt_MutableSetString", beltMutableSet);
     ("Buffer", buffer);
     ("Bytes", bytes);
     ("Char", [("chr", [invalidArgument])]);
     ("Filename", filename);
     ("Hashtbl", hashtbl);
-    ("Js.Json", [("parseExn", [jsExnError])]);
-    ("Json_decode", bsJson);
-    ("Json.Decode", bsJson);
     ("List", list);
     ("Pervasives", stdlib);
     ("Stdlib", stdlib);

@@ -1,11 +1,6 @@
 open Common
 
-let checkPrefix prefix_ =
-  let prefix =
-    match runConfig.projectRoot = "" with
-    | true -> prefix_
-    | false -> Filename.concat runConfig.projectRoot prefix_
-  in
+let checkPrefix prefix =
   let prefixLen = prefix |> String.length in
   fun sourceDir ->
     try String.sub sourceDir 0 prefixLen = prefix
