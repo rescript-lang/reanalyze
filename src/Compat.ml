@@ -332,16 +332,19 @@ type unitInfo = {
   uidToDecl : Typedtree.item_declaration Shape.Uid.Tbl.t;
 }
 
-let unitInfoCache : (string, unitInfo) Hashtbl.t = Hashtbl.create 64
+(* Keyed by the list of files a unit is loaded from, so that same-named units
+   in different build targets (e.g. two unwrapped libraries each defining
+   [Config]) do not share an entry. *)
+let unitInfoCache : (string list, unitInfo) Hashtbl.t = Hashtbl.create 64
 
 let candidateFilesForUnit ~currentCmtFile comp_unit =
+  let dir = Filename.dirname currentCmtFile in
   let indexed =
     match Hashtbl.find_opt cmtFilesByUnit comp_unit with
     | Some paths -> paths
     | None -> []
   in
   (* Fall back to sibling files, for callers that did not register. *)
-  let dir = Filename.dirname currentCmtFile in
   let siblings =
     [".cmt"; ".cmti"]
     |> List.concat_map (fun ext ->
@@ -350,13 +353,20 @@ let candidateFilesForUnit ~currentCmtFile comp_unit =
              Filename.concat dir (String.uncapitalize_ascii comp_unit ^ ext);
            ])
   in
-  (indexed @ siblings) |> List.filter Sys.file_exists |> List.sort_uniq compare
+  let candidates =
+    (indexed @ siblings) |> List.filter Sys.file_exists |> List.sort_uniq compare
+  in
+  (* Prefer the unit built alongside the current file when the same unit name
+     exists in several build targets. *)
+  match candidates |> List.filter (fun p -> Filename.dirname p = dir) with
+  | [] -> candidates
+  | sameDir -> sameDir
 
 let loadUnitInfo ~currentCmtFile comp_unit =
-  match Hashtbl.find_opt unitInfoCache comp_unit with
+  let files = candidateFilesForUnit ~currentCmtFile comp_unit in
+  match Hashtbl.find_opt unitInfoCache files with
   | Some info -> Some info
   | None -> (
-    let files = candidateFilesForUnit ~currentCmtFile comp_unit in
     match files with
     | [] -> None
     | _ ->
@@ -376,7 +386,7 @@ let loadUnitInfo ~currentCmtFile comp_unit =
                | _ -> ()
              with _ -> ());
       let info = {shape = !shape; uidToDecl} in
-      Hashtbl.replace unitInfoCache comp_unit info;
+      Hashtbl.replace unitInfoCache files info;
       Some info)
 
 let locOfItemDeclaration = function
@@ -384,20 +394,27 @@ let locOfItemDeclaration = function
   | Typedtree.Value_binding {vb_pat = {pat_loc; _}; _} -> Some pat_loc
   | _ -> None
 
-let locOfUid ~currentCmtFile ~(local : Typedtree.item_declaration Shape.Uid.Tbl.t)
-    uid =
+let declOfUid ~currentCmtFile
+    ~(local : Typedtree.item_declaration Shape.Uid.Tbl.t) uid =
   match Shape.Uid.Tbl.find_opt local uid with
-  | Some decl -> locOfItemDeclaration decl
+  | Some decl -> Some decl
   | None -> (
     match uid with
     | Shape.Uid.Item {comp_unit; _} -> (
       match loadUnitInfo ~currentCmtFile comp_unit with
-      | Some {uidToDecl} -> (
-        match Shape.Uid.Tbl.find_opt uidToDecl uid with
-        | Some decl -> locOfItemDeclaration decl
-        | None -> None)
+      | Some {uidToDecl} -> Shape.Uid.Tbl.find_opt uidToDecl uid
       | None -> None)
     | _ -> None)
+
+let locOfUid ~currentCmtFile ~local uid =
+  match declOfUid ~currentCmtFile ~local uid with
+  | Some decl -> locOfItemDeclaration decl
+  | None -> None
+
+let moduleBindingLocOfUid ~currentCmtFile ~local uid =
+  match declOfUid ~currentCmtFile ~local uid with
+  | Some (Typedtree.Module_binding {mb_name = {loc}}) -> Some loc
+  | _ -> None
 #endif
 
 let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
@@ -453,6 +470,9 @@ type identResolutions = {
       (** implementation of a value item of a module shape *)
   projModule : moduleShape -> string -> moduleShape option;
       (** shape of a module item of a module shape *)
+  moduleDefLoc : Location.t -> string -> Location.t option;
+      (** occurrence location, last name -> location of the module binding's
+          name, for a module (e.g. a functor) defined with [module X = ...] *)
 }
 
 let emptyIdentResolutions =
@@ -461,6 +481,7 @@ let emptyIdentResolutions =
     moduleShape = (fun _ _ -> None);
     projValue = (fun _ _ -> None);
     projModule = (fun _ _ -> None);
+    moduleDefLoc = (fun _ _ -> None);
   }
 
 #if OCAML_VERSION >= (5, 3, 0)
@@ -504,6 +525,7 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
   let key (loc : Location.t) name = (loc.loc_start, loc.loc_end, name) in
   let values = Hashtbl.create 64 in
   let modules = Hashtbl.create 16 in
+  let moduleUids = Hashtbl.create 16 in
   cmt_infos.cmt_ident_occurrences
   |> List.iter (fun ((lid : Longident.t Location.loc), result) ->
          if not lid.loc.loc_ghost then
@@ -513,11 +535,15 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
            | Shape_reduce.Unresolved shape ->
              (* Definition in another unit: reduce lazily, as a value and as a
                 module, depending on how the occurrence is used. *)
+             let uid =
+               lazy (Reduce.reduce_for_uid Env.empty shape |> uidOfResult)
+             in
              Hashtbl.replace values k (lazy (
-               match Reduce.reduce_for_uid Env.empty shape |> uidOfResult with
+               match Lazy.force uid with
                | Some uid -> locOfUid uid
                | None -> None));
-             Hashtbl.replace modules k (Some shape)
+             Hashtbl.replace modules k (Some shape);
+             Hashtbl.replace moduleUids k uid
            | _ -> (
              match uidOfResult result with
              | Some uid ->
@@ -525,7 +551,8 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
                Hashtbl.replace modules k
                  (match cmt_infos.cmt_impl_shape with
                  | Some impl -> findShapeByUid impl uid
-                 | None -> None)
+                 | None -> None);
+               Hashtbl.replace moduleUids k (lazy (Some uid))
              | None -> ()));
   let nonGhost (loc : Location.t option) =
     match loc with Some l when not l.loc_ghost -> loc | _ -> None
@@ -550,6 +577,16 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
     projModule =
       (fun shape name ->
         Some (Shape.proj shape (Shape.Item.make name Module)));
+    moduleDefLoc =
+      (fun loc name ->
+        match Hashtbl.find_opt moduleUids (key loc name) with
+        | Some uid -> (
+          match Lazy.force uid with
+          | Some uid ->
+            moduleBindingLocOfUid ~currentCmtFile:cmtFilePath ~local uid
+            |> nonGhost
+          | None -> None)
+        | None -> None);
   }
 #else
   let _ = (cmtFilePath, cmt_infos) in
