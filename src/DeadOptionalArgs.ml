@@ -5,6 +5,8 @@ let active () = true
 
 type item = {
   posTo : Lexing.position;
+  posToImpl : Lexing.position option;
+      (** Shape-resolved implementation, used when [posTo] is not a declaration. *)
   argNames : string list;
   argNamesMaybe : string list;
 }
@@ -46,12 +48,13 @@ let rec fromTypeExpr (texpr : Types.type_expr) =
   | Tsubst _ -> fromTypeExpr (Compat.getTSubst (Compat.get_desc texpr))
   | _ -> []
 
-let addReferences ~(locFrom : Location.t) ~(locTo : Location.t) ~path
-    (argNames, argNamesMaybe) =
+let addReferences ~(locFrom : Location.t) ~(locTo : Location.t)
+    ?(locToImpl : Location.t option) ~path (argNames, argNamesMaybe) =
   if active () then (
     let posTo = locTo.loc_start in
+    let posToImpl = Option.map (fun (l : Location.t) -> l.loc_start) locToImpl in
     let posFrom = locFrom.loc_start in
-    delayedItems := {posTo; argNames; argNamesMaybe} :: !delayedItems;
+    delayedItems := {posTo; posToImpl; argNames; argNamesMaybe} :: !delayedItems;
     if !Common.Cli.debug then
       Log_.item
         "DeadOptionalArgs.addReferences %s called with optional argNames:%s \
@@ -60,6 +63,17 @@ let addReferences ~(locFrom : Location.t) ~(locTo : Location.t) ~path
         (argNames |> String.concat ", ")
         (argNamesMaybe |> String.concat ", ")
         (posFrom |> posToString))
+
+(* Once all declarations are known, calls whose target is not a declaration
+   but have a shape-resolved implementation are attributed to it. Must run
+   before [forwardDelayedItems] and [forceDelayedItems]. *)
+let settleDelayedItems () =
+  delayedItems :=
+    !delayedItems
+    |> List.map (fun item ->
+           match (item.posToImpl, PosHash.find_opt decls item.posTo) with
+           | Some posToImpl, None -> {item with posTo = posToImpl; posToImpl = None}
+           | _ -> item)
 
 (* Calls recorded against a signature item that is not a declaration (e.g. a
    [val] inside a named module type) are re-attributed to the implementation.

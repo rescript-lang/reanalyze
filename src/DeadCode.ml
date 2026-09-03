@@ -28,8 +28,11 @@ let processCmt ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
     let cmt_value_dependencies =
       Compat.extractValueDependencies ~cmtFilePath cmt_infos
     in
+    let cmt_ident_resolutions =
+      Compat.resolveIdentOccurrences ~cmtFilePath cmt_infos
+    in
     DeadValue.processStructure ~doTypes:true ~doExternals
-      ~cmt_value_dependencies structure
+      ~cmt_value_dependencies ~cmt_ident_resolutions structure
   | _ -> ());
   DeadType.TypeDependencies.forceDelayedItems ();
   DeadType.TypeDependencies.clear ()
