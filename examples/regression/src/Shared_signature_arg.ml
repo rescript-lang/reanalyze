@@ -174,3 +174,59 @@ let run_alias () =
 module Set_of_ints = Set.Make (Int)
 
 let _apply_ident : Set.Make(Int).t = Set_of_ints.empty
+
+(* Argument constrained by an alias of the named module type. *)
+module type S_alias = Shared_signature.S
+
+module Chosen3 : Shared_signature.S = struct
+  let f () = 9
+end
+
+module Ignored3 : Shared_signature.S = struct
+  let f () = 10
+end
+
+module Applied_alias_mt = Apply ((Chosen3 : S_alias))
+
+(* A functor forwarding its parameter to another functor. *)
+module Outer (M : Shared_signature.S) = Apply (M)
+
+module Chosen4 : Shared_signature.S = struct
+  let f () = 11
+end
+
+module Ignored4 : Shared_signature.S = struct
+  let f () = 12
+end
+
+module Applied_outer = Outer (Chosen4)
+
+module Outer_opt (M : Shared_signature.O) = Apply_opt (M)
+
+module Opt_outer : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Applied_outer_opt = Outer_opt (Opt_outer)
+
+(* [include M] then an unqualified call to an included member. *)
+module Apply_incl (M : Shared_signature.O) = struct
+  include M
+
+  let run () = g ~x:1 ()
+end
+
+module Opt_incl : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_incl_other : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Applied_incl = Apply_incl (Opt_incl)
+
+let run_forwarded () =
+  ignore
+    (Applied_alias_mt.run () + Applied_outer.run () + Applied_outer_opt.run ()
+   + Applied_incl.run () + Opt_incl_other.g ())
