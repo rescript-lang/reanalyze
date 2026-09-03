@@ -403,6 +403,17 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
           | matching -> matching)
         | _ -> loaded
       in
+      (* Candidates still spanning several build directories (same name and
+         same interface) cannot be told apart: resolve nothing rather than
+         redirect into the wrong target. *)
+      let loaded =
+        match
+          loaded |> List.map (fun (p, _) -> Filename.dirname p)
+          |> List.sort_uniq compare
+        with
+        | _ :: _ :: _ -> []
+        | _ -> loaded
+      in
       let uidToDecl = Shape.Uid.Tbl.create 64 in
       let shape = ref None in
       loaded
@@ -603,18 +614,32 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
     | components -> Some (String.concat "." components)
     | exception Misc.Fatal_error -> None
   in
+  (* Two occurrences with one key are the same identifier only if they are
+     spelled the same and the compiler resolved them the same way (the same
+     spelling can resolve differently under distinct local opens). *)
+  let identity (lid : Longident.t) (result : Shape_reduce.result) =
+    match lidText lid with
+    | None -> None
+    | Some text ->
+      let resolution =
+        match result with
+        | Unresolved shape -> Format.asprintf "%a" Shape.print shape
+        | result -> Format.asprintf "%a" Shape_reduce.print_result result
+      in
+      Some (text ^ " " ^ resolution)
+  in
   let spelled = Hashtbl.create 64 in
   let ambiguous = Hashtbl.create 4 in
   cmt_infos.cmt_ident_occurrences
-  |> List.iter (fun ((lid : Longident.t Location.loc), _) ->
+  |> List.iter (fun ((lid : Longident.t Location.loc), result) ->
          if not lid.loc.loc_ghost then
-           match lidText lid.txt with
+           match identity lid.txt result with
            | None -> ()
-           | Some text -> (
+           | Some id -> (
              let k = key lid.loc (Longident.last lid.txt) in
              match Hashtbl.find_opt spelled k with
-             | Some other when other <> text -> Hashtbl.replace ambiguous k ()
-             | _ -> Hashtbl.replace spelled k text));
+             | Some other when other <> id -> Hashtbl.replace ambiguous k ()
+             | _ -> Hashtbl.replace spelled k id));
   cmt_infos.cmt_ident_occurrences
   |> List.iter (fun ((lid : Longident.t Location.loc), result) ->
          if (not lid.loc.loc_ghost) && lidText lid.txt <> None then
