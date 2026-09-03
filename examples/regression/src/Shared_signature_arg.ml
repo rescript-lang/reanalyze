@@ -131,3 +131,40 @@ let run_local () =
   Applied_local.run ()
 
 let run_partial () = ignore (Applied_partial.run () + run_local ())
+
+(* Alias of the parameter inside the body: [N.g] is a parameter call. *)
+module Opt_alias : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_alias_other : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Apply_alias (M : Shared_signature.O) = struct
+  module N = M
+
+  let run () = N.g ~x:1 ()
+end
+
+module Applied_alias = Apply_alias (Opt_alias)
+
+(* Recursive functor. *)
+module Opt_rec : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module rec Apply_rec : functor (M : Shared_signature.O) -> sig
+  val run : unit -> int
+end =
+functor
+  (M : Shared_signature.O)
+  ->
+  struct
+    let run () = M.g ~x:1 ()
+  end
+
+module Applied_rec = Apply_rec (Opt_rec)
+
+let run_alias () =
+  ignore (Applied_alias.run () + Applied_rec.run () + Opt_alias_other.g ())

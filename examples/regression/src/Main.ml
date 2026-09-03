@@ -11,4 +11,5 @@ let () =
   Shared_signature_arg.run_more ();
   Shared_signature_arg.run_even_more ();
   Shared_signature_arg.run_sig ();
-  Shared_signature_arg.run_partial ()
+  Shared_signature_arg.run_partial ();
+  Shared_signature_arg.run_alias ()

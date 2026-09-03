@@ -100,6 +100,9 @@ type functorParameter = {
   functorDef : Lexing.position;
       (** position of the name of the module binding defining the functor *)
   paramIndex : int;  (** position of the parameter, for curried functors *)
+  prefix : string list;
+      (** for an alias of (a submodule of) a parameter, [module N = M.Sub],
+          the path from the parameter: ["Sub"] *)
 }
 
 let functorParameters : functorParameter list ref = ref []
@@ -156,10 +159,10 @@ let findFunctorKey (moduleExpr : Typedtree.module_expr) =
   | Some (_, pos) -> Some pos
   | None -> None
 
-(* Functors bound with [let module], by identifier: such bindings are not
-   registered as declarations before OCaml 5.5, so applications cannot find
-   them by uid. *)
-let letModuleFunctors : (Ident.t * Lexing.position) list ref = ref []
+(* Functors that applications in the same file cannot find by uid, keyed by
+   identifier: [let module] bindings (not registered as declarations before
+   OCaml 5.5) and recursive modules (whose occurrences have no uid). *)
+let functorsByIdent : (Ident.t * Lexing.position) list ref = ref []
 
 let rec pathComponents (path : Path.t) =
   match path with
@@ -169,6 +172,26 @@ let rec pathComponents (path : Path.t) =
     | Some comps -> Some (comps @ [name])
     | None -> None)
   | _ -> None
+
+(* [module N = M] or [module N = M.Sub] inside a functor body, where [M] is a
+   parameter: [N] then stands for the parameter too. *)
+let registerParameterAlias (id : Ident.t option)
+    (moduleExpr : Typedtree.module_expr) =
+  let rec ident (e : Typedtree.module_expr) =
+    match e.mod_desc with
+    | Tmod_ident (path, _) -> Some path
+    | Tmod_constraint (inner, _, _, _) -> ident inner
+    | _ -> None
+  in
+  match (id, ident moduleExpr) with
+  | Some id, Some path -> (
+    match (findFunctorParameter path, pathComponents path) with
+    | Some p, Some components ->
+      functorParameters :=
+        {p with paramId = id; prefix = p.prefix @ components}
+        :: !functorParameters
+    | _ -> ())
+  | _ -> ()
 
 let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
     ~path args =
@@ -205,7 +228,8 @@ let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
     let call = (!supplied, !suppliedMaybe) in
     let parameter = findFunctorParameter path in
     (match (parameter, pathComponents path) with
-    | Some {functorDef; paramIndex}, Some components ->
+    | Some {functorDef; paramIndex; prefix}, Some components ->
+      let components = prefix @ components in
       let key = (functorDef, paramIndex, components) in
       if !Common.Cli.debug then
         Log_.item "parameterCall %s functor:%s index:%d@."
@@ -294,8 +318,9 @@ let rec collectExpr super self (e : Typedtree.expression) =
   (match e.exp_desc with
   | Texp_letmodule (id, name, _, moduleExpr, _) ->
     setFunctorKey moduleExpr name.loc.loc_start;
+    registerParameterAlias id moduleExpr;
     (match id with
-    | Some id -> letModuleFunctors := (id, name.loc.loc_start) :: !letModuleFunctors
+    | Some id -> functorsByIdent := (id, name.loc.loc_start) :: !functorsByIdent
     | None -> ())
   | _ -> ());
   #endif
@@ -697,7 +722,7 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
           match
             List.find_opt
               (fun (id, _) -> Ident.same id (Path.head path))
-              !letModuleFunctors
+              !functorsByIdent
           with
           | Some (_, pos) -> Some (pos, 0)
           | None -> None
@@ -755,11 +780,12 @@ let traverseStructure ~doTypes ~doExternals =
       (match param with
       | Named (Some id, _, _) ->
         functorParameters :=
-          {paramId = id; functorDef; paramIndex} :: !functorParameters
+          {paramId = id; functorDef; paramIndex; prefix = []}
+          :: !functorParameters
       | _ ->
         (* Unnamed or unit parameter: still occupies an index. *)
         functorParameters :=
-          {paramId = Ident.create_local "_"; functorDef; paramIndex}
+          {paramId = Ident.create_local "_"; functorDef; paramIndex; prefix = []}
           :: !functorParameters)
     | _ -> ());
     (match moduleExpr.mod_desc with
@@ -799,6 +825,7 @@ let traverseStructure ~doTypes ~doExternals =
     | Tstr_module {mb_expr; mb_id; mb_loc; mb_name} -> (
       currentModuleBindingPos := mb_name.loc.loc_start;
       setFunctorKey mb_expr mb_name.loc.loc_start;
+      registerParameterAlias mb_id mb_expr;
       let hasInterface =
         match mb_expr.mod_desc with Tmod_constraint _ -> true | _ -> false
       in
@@ -820,6 +847,15 @@ let traverseStructure ~doTypes ~doExternals =
                     ((ModulePath.getCurrent ()).path
                     @ [!Common.currentModuleName]))
         | _ -> ())
+    | Tstr_recmodule moduleBindings ->
+      moduleBindings
+      |> List.iter (fun (mb : Typedtree.module_binding) ->
+             setFunctorKey mb.mb_expr mb.mb_name.loc.loc_start;
+             match mb.mb_id with
+             | Some id ->
+               functorsByIdent :=
+                 (id, mb.mb_name.loc.loc_start) :: !functorsByIdent
+             | None -> ())
     | Tstr_primitive vd when doExternals && !Config.analyzeExternals ->
       let currentModulePath = ModulePath.getCurrent () in
       let path = currentModulePath.path @ [!Common.currentModuleName] in
@@ -954,7 +990,7 @@ let processStructure ~cmt_value_dependencies ~cmt_ident_resolutions ~doTypes
   let traverseStructure = traverseStructure ~doTypes ~doExternals in
   identResolutions := cmt_ident_resolutions;
   recordedApplications := [];
-  letModuleFunctors := [];
+  functorsByIdent := [];
   functorKeys := [];
   structure |> traverseStructure.structure traverseStructure |> ignore;
   recordedApplications := [];
