@@ -2,28 +2,27 @@
 
 If you never know when it's time to stop, don't worry. Computers don't either. The so called Halting Problem refers to the fact that a program cannot determine whether another arbitrary program terminates or not.
 
-```rescript
-let loop = n => {
-  while (n.contents > 0) {
-    n := n.contents - 1
-    print_int(n^)
-  }
-}
+```ocaml
+let loop n =
+  while !n > 0 do
+    n := !n - 1;
+    print_int !n
+  done
 ```
 
 Does this program terminate for all integers `n`? How do I make sure it does?
 
-The typical argument goes as follows. Consider a progress function on the state, and check that it's not possible to make progress infinitely often. In the example, the progress function is the distance from `n.contents ` to zero. At each iteration the number descreases, and it cannot decrease infinitely often. Therefore, the program terminates.
+The typical argument goes as follows. Consider a progress function on the state, and check that it's not possible to make progress infinitely often. In the example, the progress function is the distance from `!n` to zero. At each iteration the number descreases, and it cannot decrease infinitely often. Therefore, the program terminates.
 
 Consider now a recursive version of the program:
 
-```rescript
-let rec loop = n =>
-  if (n.contents > 0) {
-    n := n.contents - 1
-    print_int(n.contents)
-    loop(n)
-  };
+```ocaml
+let rec loop n =
+  if !n > 0 then begin
+    n := !n - 1;
+    print_int !n;
+    loop n
+  end
 ```
 
 A pattern begins to merge. There is a recursive function, and some progress happens in its body. And the argument becomes the following: every execution of the loop makes progress. So does the program terminate?
@@ -55,20 +54,19 @@ This proposed process is not just a hypothetical thought. We have several months
 
 Now back to the example:
 
-```rescript
-let progress = n =>
-  if (n.contents > 0) {
-    n := n.contents - 1
+```ocaml
+let progress n =
+  if !n > 0 then begin
+    n := !n - 1;
     true
-  } else {
-    false
-  }
+  end
+  else false
 
-let rec loop = n =>
-  if (progress(n)) {
-    print_int(n.contents)
-    loop(n)
-  }
+let[@progress progress] rec loop n =
+  if progress n then begin
+    print_int !n;
+    loop n
+  end
 ```
 
 It is not difficult to see, in isolation, that 1) the `progress` function makes progress.
@@ -80,18 +78,17 @@ The analysis **assumes** 1) and **checks** 2).
 
 If you don't opt in, nothing is checked, and no issues are reported on the following:
 
-```rescript
-let rec loop = () => loop()
+```ocaml
+let rec loop () = loop ()
 ```
 
 # Easy fail
 
-This time, opt into terminatioon checking with the `@progress` annotation. This time a potential infinite loop is reported.
+This time, opt into terminatioon checking with the `[@progress]` annotation. This time a potential infinite loop is reported.
 
 
-```rescript
-@progress
-let rec loop = () => loop()
+```ocaml
+let[@progress] rec loop () = loop ()
 ```
 
 # Progress function
@@ -100,28 +97,24 @@ This time, an actual progress function is defined, which initially does not do a
 No warnings are reported as every infinite loop makes infinite progress.
 
 
-```rescript
-let progress = () => ()
+```ocaml
+let progress () = ()
 
-@progress(progress)
-let rec loop = () => {
-  progress()
-  loop()
-}
+let[@progress progress] rec loop () =
+  progress ();
+  loop ()
 ```
 
 # A trivial mistake
 
 See what's wrong now? A possible infinite loop is reporteed.
 
-```rescript
-let progress = () => ()
+```ocaml
+let progress () = ()
 
-@progress(progress)
-let rec loop = () => {
-  loop()
-  progress()
-}
+let[@progress progress] rec loop () =
+  loop ();
+  progress ()
 ```
 
 # Let's get cheeky
@@ -129,14 +122,12 @@ let rec loop = () => {
 It's possible to play a trick, and use references to implement indirect recursion via the store,
 in the style of (Peter) Landin's knot:
 
-```rescript
-let cheekyRef = ref(() => ())
+```ocaml
+let cheekyRef = ref (fun () -> ())
 
-@progress
-let rec cheekyLoop = () => {
-  cheekyRef := cheekyLoop
-  cheekyRef.contents()
-}
+let[@progress] rec cheekyLoop () =
+  cheekyRef := cheekyLoop;
+  !cheekyRef ()
 ```
 
 This triggers a hygiene violation:
@@ -152,12 +143,10 @@ What's going on is that functions we opt into termination checking, such as `che
 Another restriction: you can't alias a function you opted into for termination checking:
 
 
-```rescript
-@progress
-let rec loop = () => {
-  let l = loop
-  l()
-}
+```ocaml
+let[@progress] rec loop () =
+  let l = loop in
+  l ()
 ```
 
 That also gives a hygiene violation error:
@@ -171,23 +160,21 @@ A progress annotation on mutually recursive functions opts them all into termina
 
 This reports an infinite loop
 
-```rescript
-@progress
-let rec foo = () => bar()
-and bar = () => foo()
+```ocaml
+let[@progress] rec foo () = bar ()
+and bar () = foo ()
 ```
 
 But this does not report:
 
-```rescript
-let progress = () => ()
+```ocaml
+let progress () = ()
 
-@progress(progress)
-let rec foo = () => bar()
-and bar = () => {
-  progress()
-  foo()
-}
+let[@progress progress] rec foo () = bar ()
+
+and bar () =
+  progress ();
+  foo ()
 ```
 
 That's becuse every infinite loop through either `foo`, or `bar`, makes progress infinitely often.
@@ -196,37 +183,32 @@ That's becuse every infinite loop through either `foo`, or `bar`, makes progress
 
 Does this always terminate?
 
-```rescript
-let next = _ => ()
+```ocaml
+let next _ = ()
 
 type token =
-  | Int(int)
-  | Float(float)
+  | Int of int
+  | Float of float
   | Eof
 
-type t = {token}
+type t = {token: token}
 
-@progress(next)
-let rec f = p =>
-  switch (p.token) {
-  | Int(i) => g(p) + i
-  | Eof => 0
-  | _ =>
-    next(p)
-    f(p)
-  }
+let[@progress next] rec f p =
+  match p.token with
+  | Int i -> g p + i
+  | Eof -> 0
+  | _ ->
+    next p;
+    f p
 
-and gParam = (p, ~g) => {
-  switch (p.token) {
-  | Int(i) => g(p) + i
-  | _ => f(p)
-  }
-}
+and gParam p ~g =
+  match p.token with
+  | Int i -> g p + i
+  | _ -> f p
 
-and g = p => {
-  next(p)
-  gParam(p, ~g)
-}
+and g p =
+  next p;
+  gParam p ~g
 ```
 
 According to the analysis, it does.
@@ -239,17 +221,15 @@ Another one is liveness.
 
 Here's an example of a server, which obviously never terminates, yet the analysis checks that it keeps on responding to requests:
 
-```rescript
+```ocaml
 type state
 type request
 
-let getRequest = (_: state): (request, state) => assert(false)
-let processRequest: request => unit = assert(false)
+let getRequest (_ : state) : request * state = assert false
+let processRequest : request -> unit = assert false
 
-@progress(getRequest)
-let rec server = state => {
-  let (request, state1) = getRequest(state)
-  processRequest(request)
-  server(state1)
-}
+let[@progress getRequest] rec server state =
+  let request, state1 = getRequest state in
+  processRequest request;
+  server state1
 ```
