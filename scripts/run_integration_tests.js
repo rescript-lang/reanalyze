@@ -221,6 +221,25 @@ function runRegressionTests() {
       output,
       "optional argument x of function Nested_other.N.+g is never used"
     );
+    // Ten forwarding functors; modules inside a functor body; an alias of a
+    // functor defined in another file; a module type in an included signature.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_chain.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "Dead Value +Shared_signature_arg.Apply_in_body.Ignored_in.+f"
+    );
+    assertIncludes(
+      output,
+      "Live Value +Shared_signature_arg.Apply_in_body.Chosen_in.+f"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_cross.+g is always supplied"
+    );
+    assertIncludes(output, "Live Value +Included_sig.M.+f");
     assertIncludes(
       output,
       "optional argument x of function Opt_constrained.+g is always supplied"

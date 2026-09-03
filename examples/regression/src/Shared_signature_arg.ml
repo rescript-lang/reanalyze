@@ -311,3 +311,45 @@ end
 module Applied_nested = Apply_nested (Nested_arg)
 
 let run_nested () = ignore (Applied_nested.run () + Nested_other.N.g ())
+
+
+(* A parameter forwarded through ten functors. *)
+module Opt_chain : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Chain0 (M : Shared_signature.O) = struct
+  let run () = M.g ~x:1 ()
+end
+
+module Chain1 (M : Shared_signature.O) = Chain0 (M)
+module Chain2 (M : Shared_signature.O) = Chain1 (M)
+module Chain3 (M : Shared_signature.O) = Chain2 (M)
+module Chain4 (M : Shared_signature.O) = Chain3 (M)
+module Chain5 (M : Shared_signature.O) = Chain4 (M)
+module Chain6 (M : Shared_signature.O) = Chain5 (M)
+module Chain7 (M : Shared_signature.O) = Chain6 (M)
+module Chain8 (M : Shared_signature.O) = Chain7 (M)
+module Chain9 (M : Shared_signature.O) = Chain8 (M)
+module Chain10 (M : Shared_signature.O) = Chain9 (M)
+
+module Applied_chain = Chain10 (Opt_chain)
+
+(* Modules defined inside a functor body, one applied, one not. *)
+module Apply_in_body (X : sig end) = struct
+  module Chosen_in : Shared_signature.S = struct
+    let f () = 20
+  end
+
+  module Ignored_in : Shared_signature.S = struct
+    let f () = 21
+  end
+
+  module Applied_in = Apply (Chosen_in)
+
+  let run () = Applied_in.run ()
+end
+
+module Applied_body = Apply_in_body (struct end)
+
+let run_chain () = ignore (Applied_chain.run () + Applied_body.run ())
