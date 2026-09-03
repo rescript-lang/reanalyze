@@ -37,8 +37,24 @@ and moduleTypeRangesOfModuleExpr (moduleExpr : Typedtree.module_expr) =
   | Tmod_constraint (inner, _, Tmodtype_explicit mty, _) ->
     moduleTypeRangesOfModuleExpr inner @ moduleTypeRangesOfModuleType mty
   | Tmod_constraint (inner, _, _, _) -> moduleTypeRangesOfModuleExpr inner
-  | Tmod_functor (_, body) -> moduleTypeRangesOfModuleExpr body
+  | Tmod_functor (param, body) ->
+    (* A parameter's module type, whose items the result may expose. *)
+    moduleTypeRangesOfFunctorParameter param
+    @ moduleTypeRangesOfModuleExpr body
+  | Tmod_apply (functorExpr, argumentExpr, _) ->
+    (* An inline functor's body, and an argument's members that flow into
+       the result. *)
+    moduleTypeRangesOfModuleExpr functorExpr
+    @ moduleTypeRangesOfModuleExpr argumentExpr
+#if OCAML_VERSION >= (5, 1, 0)
+  | Tmod_apply_unit functorExpr -> moduleTypeRangesOfModuleExpr functorExpr
+#endif
   | _ -> []
+
+and moduleTypeRangesOfFunctorParameter (param : Typedtree.functor_parameter) =
+  match param with
+  | Named (_, _, mty) -> moduleTypeRangesOfModuleType mty
+  | Unit -> []
 
 and moduleTypeRangesOfSignature (signature : Typedtree.signature) =
   signature.sig_items
@@ -56,7 +72,8 @@ and moduleTypeRangesOfSignature (signature : Typedtree.signature) =
 and moduleTypeRangesOfModuleType (moduleType : Typedtree.module_type) =
   match moduleType.mty_desc with
   | Tmty_signature signature -> moduleTypeRangesOfSignature signature
-  | Tmty_functor (_, body) -> moduleTypeRangesOfModuleType body
+  | Tmty_functor (param, body) ->
+    moduleTypeRangesOfFunctorParameter param @ moduleTypeRangesOfModuleType body
   | Tmty_with (base, constraints) ->
     (* A [with module type S = sig ... end] constraint carries a module type
        whose items must not count as declarations either. *)

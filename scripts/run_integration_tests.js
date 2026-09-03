@@ -333,6 +333,13 @@ function runRegressionTests() {
     // (Set.OrderedType): inline and named.
     assertIncludes(output, "Live Value +Shared_signature_arg.Applied_ord.+compare");
     assertIncludes(output, "Live Value +Shared_signature_arg.Ord_named.+compare");
+    // Module types inside an applied inline functor and inside a functor
+    // parameter's type: their items are never declarations.
+    assertIncludes(output, "Live Value +Shared_signature_arg.M_app.X.+f");
+    assertIncludes(output, "Live Value +Shared_signature_arg.Arg_p.X.+f");
+    // (Arg_p2.X.f is live: an argument's coerced items count as used.)
+    assertNotIncludes(output, "Value +Shared_signature_arg.Applied_fp2.X.+f");
+    assertNotIncludes(output, "Value +Shared_signature_arg.F_param.X.+f");
     // Partial applications: held by a let module, and bound in another file.
     assertIncludes(
       output,
