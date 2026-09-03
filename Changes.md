@@ -1,3 +1,7 @@
+# Unreleased
+
+- Fix false positives for values in functor bodies (and modules) constrained by a module type defined in another file, e.g. `module Make (K) : Gen.S with type key = K.t`. On OCaml 5.3+ declaration dependencies pointing at other compilation units are now resolved, and references to `val` items of a named module type are forwarded to the implementations satisfying it.
+
 # 2.26.0
 
 - Support OCaml 5.3, 5.4, and 5.5.

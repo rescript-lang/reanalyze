@@ -509,14 +509,42 @@ let processValueDependency
     ({loc_start = {pos_fname = fnFrom} as posFrom; loc_ghost = ghost2} as
           locFrom :
       Location.t) ) =
-  if (not ghost1) && (not ghost2) && posTo <> posFrom then (
-    let addFileReference = fileIsImplementationOf fnTo fnFrom in
-    addValueReference ~addFileReference ~locFrom ~locTo;
-    DeadOptionalArgs.addFunctionReference ~locFrom ~locTo)
+  if (not ghost1) && (not ghost2) && posTo <> posFrom then
+    match PosHash.find_opt decls posFrom with
+    | None ->
+      (* The signature item is not a declaration (e.g. a [val] inside a named
+         module type used to constrain a module or functor result), so it can
+         never be resolved as dead. Forward the references made to the
+         signature item onto the implementation instead. *)
+      ValueReferences.find posFrom
+      |> PosSet.iter (fun posRef ->
+             if posRef <> posTo then
+               let locRef =
+                 {
+                   Location.loc_start = posRef;
+                   loc_end = posRef;
+                   loc_ghost = false;
+                 }
+               in
+               addValueReference ~addFileReference:true ~locFrom:locRef ~locTo)
+    | Some _ ->
+      let addFileReference = fileIsImplementationOf fnTo fnFrom in
+      addValueReference ~addFileReference ~locFrom ~locTo;
+      DeadOptionalArgs.addFunctionReference ~locFrom ~locTo
+
+(* Value dependencies are processed once all files have been scanned, so that
+   declarations and references from every file are known. *)
+let delayedValueDependencies = ref []
+
+let forceDelayedItems () =
+  let dependencies = List.rev !delayedValueDependencies in
+  delayedValueDependencies := [];
+  dependencies |> List.iter processValueDependency
 
 let processStructure ~cmt_value_dependencies ~doTypes ~doExternals
     (structure : Typedtree.structure) =
   let traverseStructure = traverseStructure ~doTypes ~doExternals in
   structure |> traverseStructure.structure traverseStructure |> ignore;
   let valueDependencies = cmt_value_dependencies |> List.rev in
-  valueDependencies |> List.iter processValueDependency
+  delayedValueDependencies :=
+    List.rev_append valueDependencies !delayedValueDependencies
