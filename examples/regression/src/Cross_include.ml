@@ -10,3 +10,9 @@ module Outer_x (A : Shared_signature.S) = struct
   let _ = A.f
   include Helpers
 end
+
+module Local_f = Cross_c.F
+
+module Helpers2 = struct
+  module Inner2 = Local_f
+end

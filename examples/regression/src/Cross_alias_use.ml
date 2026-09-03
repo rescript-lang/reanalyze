@@ -22,3 +22,12 @@ module Applied_outer_x = Cross_include.Outer_x (Shared_signature_arg.Chosen)
 module Applied_cross_incl = Applied_outer_x.Inner (Opt_cross_incl)
 
 let run_incl () = ignore (Applied_cross_incl.run ())
+
+module Opt_y : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Applied_outer_y = Cross_alias.Outer_y (Shared_signature_arg.Chosen)
+module Applied_y = Applied_outer_y.Inner2 (Opt_y)
+
+let run_y () = ignore (Applied_y.run ())

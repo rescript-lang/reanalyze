@@ -280,6 +280,10 @@ function runRegressionTests() {
       output,
       "optional argument x of function Opt_rec_chain.+g is always supplied"
     );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_y.+g is always supplied"
+    );
     // Partial applications: held by a let module, and bound in another file.
     assertIncludes(
       output,

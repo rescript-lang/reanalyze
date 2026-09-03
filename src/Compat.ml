@@ -813,7 +813,8 @@ let rec makeResolver ~cmtFilePath
               | None -> bindingOfPath
             in
             match lookup (Pdot (p, name)) with
-            | Some (loc, expr, _, 0) -> Some (loc, expr)
+            | Some (loc, expr, memberResolver, 0) ->
+              Some (loc, expr, memberResolver)
             | _ -> None)
           | Tmod_structure structure when applied = 0 ->
             structure.str_items
@@ -822,7 +823,7 @@ let rec makeResolver ~cmtFilePath
                    match item.str_desc with
                    | Tstr_module ({mb_name = {txt = Some n}} as mb)
                      when n = name ->
-                     Some (mb.mb_name.loc, mb.mb_expr)
+                     Some (mb.mb_name.loc, mb.mb_expr, resolver)
                    | Tstr_recmodule mbs -> (
                      match
                        mbs
@@ -830,7 +831,8 @@ let rec makeResolver ~cmtFilePath
                             (fun (mb : Typedtree.module_binding) ->
                               mb.mb_name.txt = Some name)
                      with
-                     | Some mb -> Some (mb.mb_name.loc, mb.mb_expr)
+                     | Some mb ->
+                       Some (mb.mb_name.loc, mb.mb_expr, resolver)
                      | None -> acc)
                    | Tstr_include {incl_mod} -> (
                      match memberIn incl_mod 0 with
@@ -841,7 +843,8 @@ let rec makeResolver ~cmtFilePath
           | _ -> None
         in
         match memberIn definition applied with
-        | Some (loc, expr) -> Some (loc, expr, resolver, 0)
+        | Some (loc, expr, memberResolver) ->
+          Some (loc, expr, memberResolver, 0)
         | None -> None)
       | None -> None)
     | Papply (functorPath, _) -> (
