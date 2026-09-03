@@ -46,6 +46,7 @@ let rec moduleTypeRangesOfSignature (signature : Typedtree.signature) =
            mds
            |> List.concat_map (fun (md : Typedtree.module_declaration) ->
                   moduleTypeRangesOfModuleType md.md_type)
+         | Tsig_include {incl_mod} -> moduleTypeRangesOfModuleType incl_mod
          | _ -> [])
 
 and moduleTypeRangesOfModuleType (moduleType : Typedtree.module_type) =

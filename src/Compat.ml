@@ -580,6 +580,7 @@ let rec findShapeByUid (shape : Shape.t) uid : Shape.t option =
           | None -> findShapeByUid itemShape uid)
         items None
     | Alias s -> findShapeByUid s uid
+    | Abs (_, body) -> findShapeByUid body uid
     | _ -> None
 #endif
 
@@ -731,18 +732,56 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
           | None -> None)
         | None -> None);
     moduleDefinition =
-      (fun loc name ->
-        match Hashtbl.find_opt moduleUids (key loc name) with
-        | Some uid -> (
-          match Lazy.force uid with
-          | Some uid -> (
-            match
-              moduleBindingOfUid ~currentCmtFile:cmtFilePath ~imports ~local uid
-            with
-            | Some (loc, _) when loc.loc_ghost -> None
-            | def -> def)
-          | None -> None)
-        | None -> None);
+      (let bindingOfUid =
+         moduleBindingOfUid ~currentCmtFile:cmtFilePath ~imports ~local
+       in
+       (* The shape of the module defined with [uid], in its own unit. *)
+       let shapeOfDefinition (uid : Shape.Uid.t) =
+         let impl =
+           match uid with
+           | Shape.Uid.Item {comp_unit; _} -> (
+             match
+               loadUnitInfo ~currentCmtFile:cmtFilePath ~imports comp_unit
+             with
+             | Some {shape} -> shape
+             | None -> None)
+           | _ -> None
+         in
+         match impl with
+         | Some impl -> findShapeByUid impl uid
+         | None -> None
+       in
+       let isAlias (definition : Typedtree.module_expr) =
+         let rec go (e : Typedtree.module_expr) =
+           match e.mod_desc with
+           | Tmod_ident _ -> true
+           | Tmod_constraint (inner, _, _, _) -> go inner
+           | _ -> false
+         in
+         go definition
+       in
+       (* [module G = A.F], possibly in another unit: chase the alias through
+          its shape, which needs no occurrence data of that unit. *)
+       let rec chase visited uid =
+         match bindingOfUid uid with
+         | Some (loc, _) when loc.loc_ghost -> None
+         | Some (_, definition) as def when isAlias definition -> (
+           match shapeOfDefinition uid with
+           | Some shape when not (List.mem uid visited) -> (
+             match Reduce.reduce_for_uid Env.empty shape |> uidOfResult with
+             | Some target when target <> uid -> (
+               match chase (uid :: visited) target with
+               | Some def -> Some def
+               | None -> def)
+             | _ -> def)
+           | _ -> def)
+         | def -> def
+       in
+       fun loc name ->
+         match Hashtbl.find_opt moduleUids (key loc name) with
+         | Some uid -> (
+           match Lazy.force uid with Some uid -> chase [] uid | None -> None)
+         | None -> None);
     expandModuleType =
       (let compUnitShape name =
          {Shape.uid = None; desc = Comp_unit name; approximated = false}

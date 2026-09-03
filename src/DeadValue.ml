@@ -144,9 +144,10 @@ let delayedApplications : delayedApplication list ref = ref []
 
 (* Implementations of a value of the argument at [argIndex] of every
    application of the functor keyed [functorDef]. *)
-let rec resolveArgumentItems ~depth functorDef argIndex components =
-  if depth > 8 then []
+let rec resolveArgumentItems ~visited functorDef argIndex components =
+  if List.mem (functorDef, argIndex) visited then []
   else
+    let visited = (functorDef, argIndex) :: visited in
     !delayedApplications
     |> List.concat_map (fun {appliedFunctor; argIndex = index; resolver} ->
            if appliedFunctor <> functorDef || index <> argIndex then []
@@ -155,7 +156,7 @@ let rec resolveArgumentItems ~depth functorDef argIndex components =
              | Direct resolve -> (
                match resolve components with Some loc -> [loc] | None -> [])
              | ViaParameter (outerDef, outerIndex, prefix) ->
-               resolveArgumentItems ~depth:(depth + 1) outerDef outerIndex
+               resolveArgumentItems ~visited outerDef outerIndex
                  (prefix @ components))
 
 (* Coercion references made through a functor parameter, as in
@@ -1153,7 +1154,7 @@ let forceDelayedItems () =
   Hashtbl.iter
     (fun (def, index, components) calls ->
       if not (PosSet.mem def !ambiguousFunctorKeys) then
-        resolveArgumentItems ~depth:0 def index components
+        resolveArgumentItems ~visited:[] def index components
         |> List.iter (fun (locTo : Location.t) ->
                calls
                |> List.iter
@@ -1168,7 +1169,7 @@ let forceDelayedItems () =
        (fun {outerFunctor; outerIndex; itemPath; coercionFrom; coercionTo} ->
          if not (PosSet.mem outerFunctor !ambiguousFunctorKeys) then
            let resolved =
-             resolveArgumentItems ~depth:0 outerFunctor outerIndex itemPath
+             resolveArgumentItems ~visited:[] outerFunctor outerIndex itemPath
            in
            let applied =
              !delayedApplications
