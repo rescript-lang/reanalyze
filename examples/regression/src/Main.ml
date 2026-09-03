@@ -8,4 +8,5 @@ let () =
   Ocaml_compiler_compat.run ();
   Shared_signature_use.run ();
   Shared_signature_arg.run ();
-  Shared_signature_arg.run_more ()
+  Shared_signature_arg.run_more ();
+  Shared_signature_arg.run_even_more ()

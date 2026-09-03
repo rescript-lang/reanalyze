@@ -51,3 +51,37 @@ module Applied_opt = Apply_opt (Opt_chosen)
 
 let run_more () =
   ignore (Applied_mixed.run () + Applied_opt.run () + Opt_direct.g ())
+
+(* Argument wrapped in a constraint: [(Opt_constrained : O)]. *)
+module Opt_constrained : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Applied_constrained = Apply_opt ((Opt_constrained : Shared_signature.O))
+
+(* Inline functor applied directly. *)
+module Opt_inline : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Applied_inline =
+  (functor (M : Shared_signature.O) -> struct
+    let run () = M.g ~x:1 ()
+  end)
+    (Opt_inline)
+
+(* Constrained argument for liveness: [Ignored2] must stay dead. *)
+module Chosen2 : Shared_signature.S = struct
+  let f () = 7
+end
+
+module Ignored2 : Shared_signature.S = struct
+  let f () = 8
+end
+
+module Applied_constrained_value = Apply ((Chosen2 : Shared_signature.S))
+
+let run_even_more () =
+  ignore
+    (Applied_constrained.run () + Applied_inline.run ()
+   + Applied_constrained_value.run ())

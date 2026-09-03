@@ -362,7 +362,11 @@ let candidateFilesForUnit ~currentCmtFile comp_unit =
   | [] -> candidates
   | sameDir -> sameDir
 
-let loadUnitInfo ~currentCmtFile comp_unit =
+(* [imports] are the consumer's recorded imports: when the same unit name
+   exists in several build directories, the candidate whose interface digest
+   matches the one the consumer was compiled against is the actual
+   dependency. *)
+let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
   let files = candidateFilesForUnit ~currentCmtFile comp_unit in
   match Hashtbl.find_opt unitInfoCache files with
   | Some info -> Some info
@@ -370,21 +374,38 @@ let loadUnitInfo ~currentCmtFile comp_unit =
     match files with
     | [] -> None
     | _ ->
+      let read path =
+        try Some (path, Cmt_format.read_cmt path) with _ -> None
+      in
+      let loaded = files |> List.filter_map read in
+      let dirs =
+        loaded |> List.map (fun (p, _) -> Filename.dirname p)
+        |> List.sort_uniq compare
+      in
+      let loaded =
+        match (dirs, List.assoc_opt comp_unit imports) with
+        | _ :: _ :: _, Some (Some digest) -> (
+          match
+            loaded
+            |> List.filter (fun (_, (cmt_infos : Cmt_format.cmt_infos)) ->
+                   cmt_infos.cmt_interface_digest = Some digest)
+          with
+          | [] -> loaded
+          | matching -> matching)
+        | _ -> loaded
+      in
       let uidToDecl = Shape.Uid.Tbl.create 64 in
       let shape = ref None in
-      files
-      |> List.iter (fun path ->
-             try
-               let cmt_infos = Cmt_format.read_cmt path in
-               Shape.Uid.Tbl.iter
-                 (fun uid decl ->
-                   if not (Shape.Uid.Tbl.mem uidToDecl uid) then
-                     Shape.Uid.Tbl.replace uidToDecl uid decl)
-                 cmt_infos.cmt_uid_to_decl;
-               match (!shape, cmt_infos.cmt_impl_shape) with
-               | None, Some _ -> shape := cmt_infos.cmt_impl_shape
-               | _ -> ()
-             with _ -> ());
+      loaded
+      |> List.iter (fun (_, (cmt_infos : Cmt_format.cmt_infos)) ->
+             Shape.Uid.Tbl.iter
+               (fun uid decl ->
+                 if not (Shape.Uid.Tbl.mem uidToDecl uid) then
+                   Shape.Uid.Tbl.replace uidToDecl uid decl)
+               cmt_infos.cmt_uid_to_decl;
+             match (!shape, cmt_infos.cmt_impl_shape) with
+             | None, Some _ -> shape := cmt_infos.cmt_impl_shape
+             | _ -> ());
       let info = {shape = !shape; uidToDecl} in
       Hashtbl.replace unitInfoCache files info;
       Some info)
@@ -394,26 +415,31 @@ let locOfItemDeclaration = function
   | Typedtree.Value_binding {vb_pat = {pat_loc; _}; _} -> Some pat_loc
   | _ -> None
 
-let declOfUid ~currentCmtFile
+let declOfUid ~currentCmtFile ~imports
     ~(local : Typedtree.item_declaration Shape.Uid.Tbl.t) uid =
   match Shape.Uid.Tbl.find_opt local uid with
   | Some decl -> Some decl
   | None -> (
     match uid with
     | Shape.Uid.Item {comp_unit; _} -> (
-      match loadUnitInfo ~currentCmtFile comp_unit with
+      match loadUnitInfo ~currentCmtFile ~imports comp_unit with
       | Some {uidToDecl} -> Shape.Uid.Tbl.find_opt uidToDecl uid
       | None -> None)
     | _ -> None)
 
-let locOfUid ~currentCmtFile ~local uid =
-  match declOfUid ~currentCmtFile ~local uid with
+let locOfUid ~currentCmtFile ~imports ~local uid =
+  match declOfUid ~currentCmtFile ~imports ~local uid with
   | Some decl -> locOfItemDeclaration decl
   | None -> None
 
-let moduleBindingLocOfUid ~currentCmtFile ~local uid =
-  match declOfUid ~currentCmtFile ~local uid with
+let moduleBindingLocOfUid ~currentCmtFile ~imports ~local uid =
+  match declOfUid ~currentCmtFile ~imports ~local uid with
   | Some (Typedtree.Module_binding {mb_name = {loc}}) -> Some loc
+  | _ -> None
+
+let moduleTypeOfUid ~currentCmtFile ~imports ~local uid =
+  match declOfUid ~currentCmtFile ~imports ~local uid with
+  | Some (Typedtree.Module_type {mtd_type = Some {mty_type}}) -> Some mty_type
   | _ -> None
 #endif
 
@@ -431,7 +457,9 @@ let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
              Shape.Uid.Tbl.replace local uid decl)
          cmti_infos.cmt_uid_to_decl
      with _ -> ());
-  let loc_of_uid = locOfUid ~currentCmtFile:cmtFilePath ~local in
+  let loc_of_uid =
+    locOfUid ~currentCmtFile:cmtFilePath ~imports:cmt_infos.cmt_imports ~local
+  in
   cmt_infos.cmt_declaration_dependencies
   |> filter_map (fun (_, uid_def, uid_decl) ->
          match (loc_of_uid uid_def, loc_of_uid uid_decl) with
@@ -473,6 +501,9 @@ type identResolutions = {
   moduleDefLoc : Location.t -> string -> Location.t option;
       (** occurrence location, last name -> location of the module binding's
           name, for a module (e.g. a functor) defined with [module X = ...] *)
+  moduleTypeOf : Location.t -> string -> Types.module_type option;
+      (** occurrence location, last name -> the module type a
+          [module type X = ...] declaration denotes *)
 }
 
 let emptyIdentResolutions =
@@ -482,6 +513,7 @@ let emptyIdentResolutions =
     projValue = (fun _ _ -> None);
     projModule = (fun _ _ -> None);
     moduleDefLoc = (fun _ _ -> None);
+    moduleTypeOf = (fun _ _ -> None);
   }
 
 #if OCAML_VERSION >= (5, 3, 0)
@@ -510,12 +542,16 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
     let fuel = 10
 
     let read_unit_shape ~unit_name =
-      match loadUnitInfo ~currentCmtFile:cmtFilePath unit_name with
+      match
+        loadUnitInfo ~currentCmtFile:cmtFilePath ~imports:cmt_infos.cmt_imports
+          unit_name
+      with
       | Some {shape} -> shape
       | None -> None
   end) in
   let local = cmt_infos.cmt_uid_to_decl in
-  let locOfUid = locOfUid ~currentCmtFile:cmtFilePath ~local in
+  let imports = cmt_infos.cmt_imports in
+  let locOfUid = locOfUid ~currentCmtFile:cmtFilePath ~imports ~local in
   let rec uidOfResult (result : Shape_reduce.result) =
     match result with
     | Resolved uid -> Some uid
@@ -583,8 +619,18 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
         | Some uid -> (
           match Lazy.force uid with
           | Some uid ->
-            moduleBindingLocOfUid ~currentCmtFile:cmtFilePath ~local uid
+            moduleBindingLocOfUid ~currentCmtFile:cmtFilePath ~imports ~local
+              uid
             |> nonGhost
+          | None -> None)
+        | None -> None);
+    moduleTypeOf =
+      (fun loc name ->
+        match Hashtbl.find_opt moduleUids (key loc name) with
+        | Some uid -> (
+          match Lazy.force uid with
+          | Some uid ->
+            moduleTypeOfUid ~currentCmtFile:cmtFilePath ~imports ~local uid
           | None -> None)
         | None -> None);
   }
