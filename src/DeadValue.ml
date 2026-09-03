@@ -1388,8 +1388,9 @@ let rec collectExpr super self (e : Typedtree.expression) =
       DefinitionSet.add (!identResolutions.valueKey vd) !usedOutsideUnpack
   | _ -> ());
   (match e.exp_desc with
-  | Texp_ident (_path, _, {Types.val_loc = {loc_ghost = false; _} as locTo})
+  | Texp_ident (_path, _, ({Types.val_loc = {loc_ghost = false; _}} as vd))
     ->
+    let locTo = !identResolutions.valueLoc vd in
     (* if Path.name _path = "rc" then assert false; *)
     if locFrom = locTo && _path |> Path.name = "emptyArray" then (
       (* Work around lowercase jsx with no children producing an artifact `emptyArray`
@@ -1404,11 +1405,12 @@ let rec collectExpr super self (e : Typedtree.expression) =
       ( {
           exp_desc =
             Texp_ident
-              (path, _, {Types.val_loc = {loc_ghost = false; _} as locTo});
+              (path, _, ({Types.val_loc = {loc_ghost = false; _}} as vd));
           exp_type;
           exp_loc = identLoc;
         },
         args ) ->
+    let locTo = !identResolutions.valueLoc vd in
     let locToImpl = findResolution ~identLoc ~path in
     args
     |> processOptionalArgs ~expType:exp_type
@@ -1430,7 +1432,7 @@ let rec collectExpr super self (e : Typedtree.expression) =
                   Texp_ident
                     ( path,
                       _,
-                      {Types.val_loc = {loc_ghost = false; _} as locTo} );
+                      ({Types.val_loc = {loc_ghost = false; _}} as vd) );
                 exp_type;
               };
           };
@@ -1474,6 +1476,7 @@ let rec collectExpr super self (e : Typedtree.expression) =
     when Ident.name idArg = "arg"
          && Ident.name etaArg = "eta"
          && Path.name idArg2 = "arg" ->
+    let locTo = !identResolutions.valueLoc vd in
     args
     |> processOptionalArgs ~expType:exp_type
          ~locFrom:(locFrom : Location.t)
@@ -1697,9 +1700,10 @@ let addCoercedModuleValueReferences ~locFrom ~coercion ?shape ?concrete
            addValueReference ~addFileReference:true ~locFrom ~locTo)
   | _ -> ());
   iterCoercedValues ~path:[] ~coercion ~actualType (fun ~path signatureItem ->
-      let id, locTo, _kind, _valType = signatureItem |> Compat.getSigValue in
-      if not locTo.loc_ghost then
+      let id, vd = signatureItem |> Compat.getSigValueDescription in
+      if not vd.val_loc.loc_ghost then
         let resolutions = !identResolutions in
+        let locTo = resolutions.valueLoc vd in
         let itemShape =
           path
           |> List.fold_left
@@ -1727,8 +1731,9 @@ let addCoercedModuleValueReferences ~locFrom ~coercion ?shape ?concrete
 let recordParameterCoercion ~locFrom ~coercion ~actualType
     (parameter : functorParameter) components =
   iterCoercedValues ~path:[] ~coercion ~actualType (fun ~path signatureItem ->
-      let id, locTo, _kind, _valType = signatureItem |> Compat.getSigValue in
-      if not locTo.loc_ghost then
+      let id, vd = signatureItem |> Compat.getSigValueDescription in
+      if not vd.val_loc.loc_ghost then
+        let locTo = !identResolutions.valueLoc vd in
         parameterCoercions :=
           {
             outerFunctor = parameter.functorDef;
@@ -1803,7 +1808,12 @@ let rec processSignatureItem ~doTypes ~doValues ~moduleLoc ~path
       DeadType.addDeclaration ~typeId:id ~typeKind:t.type_kind
   | Sig_value _ when doValues ->
     let id, loc, kind, valType = si |> Compat.getSigValue in
-    if (not loc.Location.loc_ghost) && !isSignatureValueDeclaration loc then
+    let _, vd = si |> Compat.getSigValueDescription in
+    (* Included values share the include's location. Their declarations
+       live where their uids point, so do not register colliding copies. *)
+    let isIncluded = (!identResolutions.valueLoc vd).loc_start <> loc.loc_start in
+    if (not loc.Location.loc_ghost) && not isIncluded
+       && !isSignatureValueDeclaration loc then
       let isPrimitive = match kind with Val_prim _ -> true | _ -> false in
       if (not isPrimitive) || !Config.analyzeExternals then
         let optionalArgs =

@@ -20,6 +20,8 @@
   Higher_order
   Higher_order_fixpoint
   Higher_order_more
+  IncludeSigGen
+  IncludeSigMli
   Included_sig
   Live_ancestors
   Local_side_effects
