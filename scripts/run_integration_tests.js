@@ -122,11 +122,12 @@ function runRegressionTests() {
   assertNotIncludes(output, "Dead Value +Shared_signature_arg.Chosen.+f");
   assertIncludes(output, "Live Value +Shared_signature_arg.Local_used.+f");
   assertNotIncludes(output, "Dead Value +Shared_signature_arg.Local_used.+f");
-  // A call through a functor parameter supplying ?x must not be attributed to
-  // other implementations of the module type item.
-  assertIncludes(
+  // A call through a functor parameter is credited to the actual argument
+  // (conservatively, to every implementation of the item, before OCaml 5.3):
+  // x must never be reported unused.
+  assertNotIncludes(
     output,
-    "optional argument x of function Opt_direct.+g is never used"
+    "optional argument x of function Opt_chosen.+g is never used"
   );
   // Arguments wrapped in a constraint by a named module type are still used.
   assertIncludes(output, "Live Value +Shared_signature_arg.Chosen2.+f");
@@ -142,11 +143,21 @@ function runRegressionTests() {
     assertNotIncludes(output, "Live Value +Shared_signature_arg.Ignored.+f");
     assertIncludes(output, "Dead Value +Shared_signature_arg.Local_unused.+f");
     assertNotIncludes(output, "Live Value +Shared_signature_arg.Local_unused.+f");
-    // A call through a functor parameter is credited to the actual argument,
-    // including through a constraint and for an inline functor.
+    // A call through a functor parameter supplying ?x must not be attributed
+    // to other implementations of the module type item.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_direct.+g is never used"
+    );
+    // ... and is credited precisely, including through a constraint, for an
+    // inline functor, and for a functor with a whole-functor signature.
     assertIncludes(
       output,
       "optional argument x of function Opt_chosen.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_sigfun.+g is always supplied"
     );
     assertIncludes(
       output,

@@ -335,7 +335,8 @@ type unitInfo = {
 (* Keyed by the list of files a unit is loaded from, so that same-named units
    in different build targets (e.g. two unwrapped libraries each defining
    [Config]) do not share an entry. *)
-let unitInfoCache : (string list, unitInfo) Hashtbl.t = Hashtbl.create 64
+let unitInfoCache : (string list * string option, unitInfo) Hashtbl.t =
+  Hashtbl.create 64
 
 let candidateFilesForUnit ~currentCmtFile comp_unit =
   let dir = Filename.dirname currentCmtFile in
@@ -368,7 +369,15 @@ let candidateFilesForUnit ~currentCmtFile comp_unit =
    dependency. *)
 let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
   let files = candidateFilesForUnit ~currentCmtFile comp_unit in
-  match Hashtbl.find_opt unitInfoCache files with
+  let digest =
+    match List.assoc_opt comp_unit imports with
+    | Some (Some digest) -> Some digest
+    | _ -> None
+  in
+  (* The digest takes part in the key: two consumers compiled against
+     different same-named units must not share an entry. *)
+  let cacheKey = (files, Option.map Digest.to_hex digest) in
+  match Hashtbl.find_opt unitInfoCache cacheKey with
   | Some info -> Some info
   | None -> (
     match files with
@@ -383,8 +392,8 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
         |> List.sort_uniq compare
       in
       let loaded =
-        match (dirs, List.assoc_opt comp_unit imports) with
-        | _ :: _ :: _, Some (Some digest) -> (
+        match (dirs, digest) with
+        | _ :: _ :: _, Some digest -> (
           match
             loaded
             |> List.filter (fun (_, (cmt_infos : Cmt_format.cmt_infos)) ->
@@ -407,7 +416,7 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
              | None, Some _ -> shape := cmt_infos.cmt_impl_shape
              | _ -> ());
       let info = {shape = !shape; uidToDecl} in
-      Hashtbl.replace unitInfoCache files info;
+      Hashtbl.replace unitInfoCache cacheKey info;
       Some info)
 
 let locOfItemDeclaration = function
@@ -533,6 +542,16 @@ let rec findShapeByUid (shape : Shape.t) uid : Shape.t option =
         items None
     | Alias s -> findShapeByUid s uid
     | _ -> None
+#endif
+
+(* Whether occurrences can be resolved through shapes at all. Without it,
+   references through a functor parameter can only be credited conservatively,
+   to every implementation of the module type item. *)
+let shapeResolutionAvailable =
+#if OCAML_VERSION >= (5, 3, 0)
+  true
+#else
+  false
 #endif
 
 let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
