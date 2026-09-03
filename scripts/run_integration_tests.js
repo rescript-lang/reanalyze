@@ -118,12 +118,20 @@ function runRegressionTests() {
   // implementation dead.
   assertIncludes(output, "Live Value +Shared_signature_used.Make.+f");
   assertNotIncludes(output, "Dead Value +Shared_signature_used.Make.+f");
+  assertIncludes(output, "Live Value +Shared_signature_arg.Chosen.+f");
+  assertNotIncludes(output, "Dead Value +Shared_signature_arg.Chosen.+f");
+  assertIncludes(output, "Live Value +Shared_signature_arg.Local_used.+f");
+  assertNotIncludes(output, "Dead Value +Shared_signature_arg.Local_used.+f");
   // Precise attribution through a shared named module type relies on shape
   // reduction of identifier occurrences, available from OCaml 5.3. Earlier
   // versions conservatively keep every implementation of the item live.
   if (ocamlVersionAtLeast(5, 3)) {
     assertIncludes(output, "Dead Value +Shared_signature_unused.Make.+f");
     assertNotIncludes(output, "Live Value +Shared_signature_unused.Make.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Ignored.+f");
+    assertNotIncludes(output, "Live Value +Shared_signature_arg.Ignored.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Local_unused.+f");
+    assertNotIncludes(output, "Live Value +Shared_signature_arg.Local_unused.+f");
   }
 
   assertNotIncludes(output, "Parent is a dead module");

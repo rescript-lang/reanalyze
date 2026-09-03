@@ -8,6 +8,7 @@
   Main
   Ocaml_compiler_compat
   Shared_signature
+  Shared_signature_arg
   Shared_signature_unused
   Shared_signature_use
   Shared_signature_used)
