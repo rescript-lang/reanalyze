@@ -242,6 +242,10 @@ let registerParameterAlias (id : Ident.t option)
   | Some id, Some path -> (
     match (findFunctorParameter path, pathComponents path) with
     | Some p, Some components ->
+      if !Common.Cli.debug then
+        Log_.item "parameterAlias %s = %s (prefix %s)@." (Ident.unique_name id)
+          (Path.name path)
+          (String.concat "." (p.prefix @ components));
       functorParameters :=
         {p with paramId = id; prefix = p.prefix @ components}
         :: !functorParameters
@@ -399,7 +403,15 @@ let rec collectExpr super self (e : Typedtree.expression) =
   (* [let module F (M : S) = ... in]: key the functor by its binding. On
      OCaml >= 5.5 this is a [Texp_struct_item] holding a [Tstr_module], which
      the structure item handler covers. *)
-  #if OCAML_VERSION < (5, 5, 0)
+  #if OCAML_VERSION >= (5, 5, 0)
+  (* The mapper visits the body of a [let module] before the binding, so an
+     alias of a parameter must be registered here for uses in the body. The
+     structure item handler registers it again, harmlessly. *)
+  (match e.exp_desc with
+  | Texp_struct_item ({str_desc = Tstr_module {mb_id; mb_expr}}, _) ->
+    registerParameterAlias mb_id mb_expr
+  | _ -> ());
+  #else
   (match e.exp_desc with
   | Texp_letmodule (id, name, _, moduleExpr, _) ->
     setFunctorKey moduleExpr name.loc.loc_start;

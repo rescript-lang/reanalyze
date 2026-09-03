@@ -315,6 +315,20 @@ function runRegressionTests() {
       output,
       "optional argument x of function Opt_recfwd_other.+g is never used"
     );
+    // Sweep of parameter-alias forms: recursive alias of a parameter's
+    // submodule, let-module alias chain, recursive alias of an outer alias,
+    // alias passed as a functor argument. Each credited exactly once and
+    // never leaked to an unrelated implementation.
+    for (const m of ["Opt_sw1", "Opt_sw2", "Opt_sw3", "Opt_sw4"]) {
+      assertIncludes(
+        output,
+        `optional argument x of function ${m}.+g is always supplied (1 calls)`
+      );
+    }
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_sw_other.+g is never used"
+    );
     // Partial applications: held by a let module, and bound in another file.
     assertIncludes(
       output,
