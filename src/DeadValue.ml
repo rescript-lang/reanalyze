@@ -95,6 +95,53 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
   Current.lastBinding := oldLastBinding;
   r
 
+type functorParameter = {
+  paramId : Ident.t;
+  functorDef : Lexing.position;
+      (** position of the name of the module binding defining the functor *)
+  paramIndex : int;  (** position of the parameter, for curried functors *)
+}
+
+let functorParameters : functorParameter list ref = ref []
+
+(* Name position of the module binding being traversed, see [Tstr_module]. *)
+let currentModuleBindingPos = ref Lexing.dummy_pos
+
+let findFunctorParameter (path : Path.t) =
+  match Path.head path with
+  | head -> List.find_opt (fun p -> Ident.same p.paramId head) !functorParameters
+  | exception _ -> None
+
+let isFunctorParameterPath path = findFunctorParameter path <> None
+
+(* Calls with optional arguments made through a functor parameter, keyed by
+   the functor definition, parameter index, and path of the value within the
+   parameter (e.g. ["g"] for [M.g], ["Sub"; "g"] for [M.Sub.g]). They are
+   credited to the actual arguments at application sites, once all files are
+   scanned. *)
+let parameterCalls :
+    (Lexing.position * int * string list, (string list * string list) list)
+    Hashtbl.t =
+  Hashtbl.create 16
+
+type delayedApplication = {
+  appliedFunctor : Lexing.position;
+  argIndex : int;
+  resolveItem : string list -> Location.t option;
+      (** implementation of a value of the actual argument, by path *)
+}
+
+let delayedApplications : delayedApplication list ref = ref []
+
+let rec pathComponents (path : Path.t) =
+  match path with
+  | Pident _ -> Some []
+  | Pdot (p, name) -> (
+    match pathComponents p with
+    | Some comps -> Some (comps @ [name])
+    | None -> None)
+  | _ -> None
+
 let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
     ~path args =
   let args =
@@ -127,8 +174,21 @@ let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
              if argIsSupplied <> Some false then supplied := s :: !supplied;
              if argIsSupplied = None then suppliedMaybe := s :: !suppliedMaybe
            | _ -> ());
-    (!supplied, !suppliedMaybe)
-    |> DeadOptionalArgs.addReferences ~locFrom ~locTo ?locToImpl ~path)
+    let call = (!supplied, !suppliedMaybe) in
+    let parameter = findFunctorParameter path in
+    (match (parameter, pathComponents path) with
+    | Some {functorDef; paramIndex}, Some components ->
+      let key = (functorDef, paramIndex, components) in
+      let calls =
+        match Hashtbl.find_opt parameterCalls key with
+        | Some calls -> calls
+        | None -> []
+      in
+      Hashtbl.replace parameterCalls key (call :: calls)
+    | _ -> ());
+    call
+    |> DeadOptionalArgs.addReferences ~locFrom ~locTo ?locToImpl
+         ~forwardable:(parameter = None) ~path)
 
 (* Implementation locations of identifier occurrences resolved through
    shapes. See [Compat.resolveIdentOccurrences]. *)
@@ -153,13 +213,6 @@ let findResolution ~(identLoc : Location.t) ~(path : Path.t) =
    parameter (e.g. [M.f] in [functor (M : S) -> ...]) is credited to the actual
    arguments at application sites, via the coercion in [Tmod_apply]; it must
    not be forwarded to every implementation of the module type item. *)
-let functorParameters : Ident.t list ref = ref []
-
-let isFunctorParameterPath (path : Path.t) =
-  match Path.head path with
-  | head -> List.exists (Ident.same head) !functorParameters
-  | exception _ -> false
-
 (* (module type item position, referencing position) pairs that must not be
    forwarded to implementations. *)
 module PosPairSet = Set.Make (struct
@@ -187,13 +240,16 @@ let addRedirect ~(locFrom : Location.t) ~(locTo : Location.t) ~locToImpl =
 let addValueReferenceOrRedirect ~(locFrom : Location.t) ~(locTo : Location.t)
     ~path =
   let pair = (locTo.loc_start, (effectiveLocFrom locFrom).loc_start) in
+  let locToImpl = findResolution ~identLoc:locFrom ~path in
   (if isFunctorParameterPath path then
      nonForwardableReferences := PosPairSet.add pair !nonForwardableReferences
-   else if PosPairSet.mem pair !nonForwardableReferences then
-     (* A non-parameter reference from the same position keeps it
-        forwardable. *)
+   else if locToImpl = None && PosPairSet.mem pair !nonForwardableReferences
+   then
+     (* A non-parameter reference from the same position that stays targeted
+        at the module type item keeps the pair forwardable. A redirected one
+        does not: it never lands on the item. *)
      nonForwardableReferences := PosPairSet.remove pair !nonForwardableReferences);
-  addRedirect ~locFrom ~locTo ~locToImpl:(findResolution ~identLoc:locFrom ~path)
+  addRedirect ~locFrom ~locTo ~locToImpl
 
 let rec collectExpr super self (e : Typedtree.expression) =
   let locFrom = e.exp_loc in
@@ -496,6 +552,83 @@ let rec processSignatureItem ~doTypes ~doValues ~moduleLoc ~path
     | None -> ())
   | _ -> ()
 
+(* Implementation of a value of an actual functor argument, by path. *)
+let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
+  let shape =
+    match argumentExpr.mod_desc with
+    | Tmod_ident (path, lid) ->
+      !identResolutions.moduleShape lid.loc (Path.last path)
+    | _ -> None
+  in
+  let resolutions = !identResolutions in
+  let rec viaShape shape components =
+    match components with
+    | [] -> None
+    | [name] -> resolutions.projValue shape name
+    | m :: rest -> (
+      match resolutions.projModule shape m with
+      | Some shape -> viaShape shape rest
+      | None -> None)
+  in
+  let rec viaSignature (moduleType : Types.module_type) components =
+    let signature = moduleType |> getSignature in
+    match components with
+    | [] -> None
+    | [name] -> (
+      match signature |> findSignatureItem name with
+      | Some (Types.Sig_value _ as item) ->
+        let _id, loc, _kind, _valType = item |> Compat.getSigValue in
+        if loc.loc_ghost then None else Some loc
+      | _ -> None)
+    | m :: rest -> (
+      match signature |> findSignatureItem m with
+      | Some item -> (
+        match item |> Compat.getSigModuleModtype with
+        | Some (_id, moduleType, _loc) -> viaSignature moduleType rest
+        | None -> None)
+      | None -> None)
+  in
+  fun components ->
+    match shape with
+    | Some shape -> (
+      match viaShape shape components with
+      | Some loc -> Some loc
+      | None -> viaSignature argumentExpr.mod_type components)
+    | None -> viaSignature argumentExpr.mod_type components
+
+(* Applications already recorded as part of an outer curried application. *)
+let recordedApplications = ref PosSet.empty
+
+(* [F (A) (B)] is [Tmod_apply (Tmod_apply (F, A), B)]: collect the functor and
+   the arguments in order, and defer crediting the calls made through each
+   parameter to the corresponding argument. *)
+let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
+  if not (PosSet.mem moduleExpr.mod_loc.loc_start !recordedApplications) then
+    let rec flatten (e : Typedtree.module_expr) args =
+      match e.mod_desc with
+      | Tmod_apply (functorExpr, argumentExpr, _) ->
+        recordedApplications :=
+          PosSet.add e.mod_loc.loc_start !recordedApplications;
+        flatten functorExpr (argumentExpr :: args)
+      | Tmod_ident (path, lid) -> Some (path, lid, args)
+      | _ -> None
+    in
+    match flatten moduleExpr [] with
+    | Some (path, lid, args) -> (
+      match !identResolutions.moduleDefLoc lid.loc (Path.last path) with
+      | Some defLoc ->
+        args
+        |> List.iteri (fun argIndex argumentExpr ->
+               delayedApplications :=
+                 {
+                   appliedFunctor = defLoc.loc_start;
+                   argIndex;
+                   resolveItem = argumentItemResolver argumentExpr;
+                 }
+                 :: !delayedApplications)
+      | None -> ())
+    | None -> ()
+
 (* Traverse the AST *)
 let traverseStructure ~doTypes ~doExternals =
   let super = Tast_mapper.default in
@@ -505,7 +638,14 @@ let traverseStructure ~doTypes ~doExternals =
     let oldFunctorParameters = !functorParameters in
     (match moduleExpr.mod_desc with
     | Tmod_functor (Named (Some id, _, _), _) ->
-      functorParameters := id :: !functorParameters
+      let functorDef = !currentModuleBindingPos in
+      let paramIndex =
+        !functorParameters
+        |> List.filter (fun p -> p.functorDef = functorDef)
+        |> List.length
+      in
+      functorParameters :=
+        {paramId = id; functorDef; paramIndex} :: !functorParameters
     | _ -> ());
     (match moduleExpr.mod_desc with
     | Tmod_apply (_functorExpr, argumentExpr, coercion) ->
@@ -520,7 +660,8 @@ let traverseStructure ~doTypes ~doExternals =
         | _ -> None
       in
       addCoercedModuleValueReferences ~locFrom:argumentExpr.mod_loc ~coercion
-        ?shape ~actualType:argumentExpr.mod_type ()
+        ?shape ~actualType:argumentExpr.mod_type ();
+      recordFunctorApplication moduleExpr
     | _ -> ());
     let r = super.Tast_mapper.module_expr self moduleExpr in
     functorParameters := oldFunctorParameters;
@@ -529,8 +670,10 @@ let traverseStructure ~doTypes ~doExternals =
   let value_binding self vb = vb |> collectValueBinding super self in
   let structure_item self (structureItem : Typedtree.structure_item) =
     let oldModulePath = ModulePath.getCurrent () in
+    let oldModuleBindingPos = !currentModuleBindingPos in
     (match structureItem.str_desc with
-    | Tstr_module {mb_expr; mb_id; mb_loc} -> (
+    | Tstr_module {mb_expr; mb_id; mb_loc; mb_name} -> (
+      currentModuleBindingPos := mb_name.loc.loc_start;
       let hasInterface =
         match mb_expr.mod_desc with Tmod_constraint _ -> true | _ -> false
       in
@@ -600,6 +743,7 @@ let traverseStructure ~doTypes ~doExternals =
     | _ -> ());
     let result = super.structure_item self structureItem in
     ModulePath.setCurrent oldModulePath;
+    currentModuleBindingPos := oldModuleBindingPos;
     result
   in
   {super with expr; module_expr; pat; structure_item; value_binding}
@@ -659,6 +803,22 @@ let forceDelayedItems () =
            | None -> locToImpl
          in
          addValueReference ~addFileReference:true ~locFrom ~locTo);
+  (* Credit calls made through functor parameters to the actual arguments. *)
+  let applications = List.rev !delayedApplications in
+  delayedApplications := [];
+  applications
+  |> List.iter (fun {appliedFunctor; argIndex; resolveItem} ->
+         Hashtbl.iter
+           (fun (def, index, components) calls ->
+             if def = appliedFunctor && index = argIndex then
+               match resolveItem components with
+               | Some (locTo : Location.t) ->
+                 calls
+                 |> List.iter
+                      (DeadOptionalArgs.addCallToImplementation
+                         ~posTo:locTo.loc_start)
+               | None -> ())
+           parameterCalls);
   DeadOptionalArgs.settleDelayedItems ();
   let dependencies = List.rev !delayedValueDependencies in
   delayedValueDependencies := [];

@@ -4,3 +4,7 @@
 module type S = sig
   val f : unit -> int
 end
+
+module type O = sig
+  val g : ?x:int -> unit -> int
+end
