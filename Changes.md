@@ -1,4 +1,4 @@
-# Next
+# 2.26.0
 
 - Support OCaml 5.3, 5.4, and 5.5.
 
