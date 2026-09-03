@@ -998,18 +998,32 @@ let traverseStructure ~doTypes ~doExternals =
              registerParameterAlias mb.mb_id mb.mb_expr;
              match mb.mb_id with
              | Some id ->
-               (* [module rec G : T = F], or a partial application: G stands
-                  for F's key. *)
-               let key =
-                 match (moduleIdent mb.mb_expr, mb.mb_expr.mod_desc) with
-                 | None, Tmod_functor _ -> (mb.mb_name.loc.loc_start, 0)
-                 | _ -> (
-                   match functorKeyOfHead mb.mb_expr with
-                   | Some key -> key
-                   | None -> (mb.mb_name.loc.loc_start, 0))
-               in
-               functorsByIdent := (id, key) :: !functorsByIdent
-             | None -> ())
+               functorsByIdent :=
+                 (id, (mb.mb_name.loc.loc_start, 0)) :: !functorsByIdent
+             | None -> ());
+      (* [module rec G : T = H and H : T = F]: an alias or partial
+         application stands for the functor's key; a forward alias resolves
+         once the later binding has, so iterate to a fixed point. *)
+      let resolveKeys () =
+        moduleBindings
+        |> List.fold_left
+             (fun changed (mb : Typedtree.module_binding) ->
+               match (mb.mb_id, moduleIdent mb.mb_expr, mb.mb_expr.mod_desc) with
+               | Some id, _, Tmod_apply _ | Some id, Some _, _ -> (
+                 match functorKeyOfHead mb.mb_expr with
+                 | Some key when List.assq_opt id !functorsByIdent <> Some key ->
+                   functorsByIdent :=
+                     (id, key)
+                     :: List.filter
+                          (fun (id', _) -> not (Ident.same id id'))
+                          !functorsByIdent;
+                   true
+                 | _ -> changed)
+               | _ -> changed)
+             false
+      in
+      let rec fixpoint n = if n > 0 && resolveKeys () then fixpoint (n - 1) in
+      fixpoint (List.length moduleBindings)
     | Tstr_primitive vd when doExternals && !Config.analyzeExternals ->
       let currentModulePath = ModulePath.getCurrent () in
       let path = currentModulePath.path @ [!Common.currentModuleName] in
