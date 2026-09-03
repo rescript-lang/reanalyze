@@ -778,3 +778,58 @@ end
 module Applied_ord2 = Apply_ord ((Ord_named : Set.OrderedType))
 
 let run_ord2 () = ignore (Applied_ord2.run ())
+
+(* Module types declared inside an inline applied functor's body, and inside
+   a functor parameter's module type whose result exposes the parameter. *)
+module M_app =
+  (functor (A : Shared_signature.S) -> struct
+    let _ = A.f
+
+    module type T = sig
+      val f : unit -> int
+    end
+
+    module X : T = struct
+      let f () = 50
+    end
+  end)
+    (Chosen)
+
+module F_param (M : sig
+  module type T = sig
+    val f : unit -> int
+  end
+
+  module X : T
+end) =
+struct
+  include M
+end
+
+module Arg_p = struct
+  module type T = sig
+    val f : unit -> int
+  end
+
+  module X : T = struct
+    let f () = 51
+  end
+end
+
+module Applied_fp = F_param (Arg_p)
+
+let run_ranges () = ignore (M_app.X.f () + Applied_fp.X.f ())
+
+(* An unused application of F_param: nothing may be reported at the
+   parameter's module type items. *)
+module Arg_p2 = struct
+  module type T = sig
+    val f : unit -> int
+  end
+
+  module X : T = struct
+    let f () = 52
+  end
+end
+
+module Applied_fp2 = F_param (Arg_p2)
