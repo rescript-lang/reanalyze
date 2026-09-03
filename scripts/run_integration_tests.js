@@ -159,6 +159,15 @@ function runRegressionTests() {
       output,
       "optional argument x of function Opt_sigfun.+g is always supplied"
     );
+    // ... through a named partial application, and for a let-module functor.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_partial.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_letmodule.+g is always supplied"
+    );
     assertIncludes(
       output,
       "optional argument x of function Opt_constrained.+g is always supplied"

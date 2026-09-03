@@ -105,3 +105,29 @@ functor
 module Applied_sig = Apply_sig (Opt_sigfun)
 
 let run_sig () = ignore (Applied_sig.run ())
+
+(* Curried functor, partially applied and named before the second argument. *)
+module Opt_partial : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Apply2 (A : Shared_signature.S) (B : Shared_signature.O) = struct
+  let run () = A.f () + B.g ~x:1 ()
+end
+
+module Apply2_partial = Apply2 (Chosen)
+module Applied_partial = Apply2_partial (Opt_partial)
+
+(* Functor bound with [let module]. *)
+module Opt_letmodule : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+let run_local () =
+  let module Apply_local (M : Shared_signature.O) = struct
+    let run () = M.g ~x:1 ()
+  end in
+  let module Applied_local = Apply_local (Opt_letmodule) in
+  Applied_local.run ()
+
+let run_partial () = ignore (Applied_partial.run () + run_local ())

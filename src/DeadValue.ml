@@ -269,6 +269,15 @@ let addValueReferenceOrRedirect ~(locFrom : Location.t) ~(locTo : Location.t)
 
 let rec collectExpr super self (e : Typedtree.expression) =
   let locFrom = e.exp_loc in
+  (* [let module F (M : S) = ... in]: key the functor by its binding. On
+     OCaml >= 5.5 this is a [Texp_struct_item] holding a [Tstr_module], which
+     the structure item handler covers. *)
+  #if OCAML_VERSION < (5, 5, 0)
+  (match e.exp_desc with
+  | Texp_letmodule (_, name, _, moduleExpr, _) ->
+    functorChainNext := Some (moduleExpr, name.loc.loc_start)
+  | _ -> ());
+  #endif
   (match e.exp_desc with
   | Texp_ident (_path, _, {Types.val_loc = {loc_ghost = false; _} as locTo})
     ->
@@ -635,31 +644,50 @@ let recordedApplications : Typedtree.module_expr list ref = ref []
    parameter to the corresponding argument. *)
 let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
   if not (List.memq moduleExpr !recordedApplications) then
+    (* The arguments of this application chain, and its head. *)
     let rec flatten (e : Typedtree.module_expr) args =
       match e.mod_desc with
       | Tmod_apply (functorExpr, argumentExpr, _) ->
         recordedApplications := e :: !recordedApplications;
         flatten functorExpr (argumentExpr :: args)
       | Tmod_constraint (inner, _, _, _) -> flatten inner args
-      | Tmod_ident (path, lid) ->
-        Some (!identResolutions.moduleDefLoc lid.loc (Path.last path), args)
+      | _ -> (e, args)
+    in
+    (* The key of the functor a head denotes, and the number of arguments
+       already consumed by partial applications it stands for, as in
+       [module G = F (A)] followed by [G (B)]. *)
+    let rec headKey (e : Typedtree.module_expr) =
+      match e.mod_desc with
+      | Tmod_apply (functorExpr, _, _) -> (
+        match headKey functorExpr with
+        | Some (key, consumed) -> Some (key, consumed + 1)
+        | None -> None)
+      | Tmod_constraint (inner, _, _, _) -> headKey inner
       | Tmod_functor _ ->
         (* Inline functor: keyed by its own position, see [functorChainNext]. *)
-        Some (Some e.mod_loc, args)
+        Some (e.mod_loc.loc_start, 0)
+      | Tmod_ident (path, lid) -> (
+        match !identResolutions.moduleDefinition lid.loc (Path.last path) with
+        | Some (nameLoc, definition) -> (
+          match (moduleIdent definition, definition.mod_desc) with
+          | None, Tmod_apply _ -> headKey definition
+          | _ -> Some (nameLoc.loc_start, 0))
+        | None -> None)
       | _ -> None
     in
-    match flatten moduleExpr [] with
-    | Some (Some defLoc, args) ->
+    let head, args = flatten moduleExpr [] in
+    match headKey head with
+    | Some (key, consumed) ->
       args
-      |> List.iteri (fun argIndex argumentExpr ->
+      |> List.iteri (fun i argumentExpr ->
              delayedApplications :=
                {
-                 appliedFunctor = defLoc.loc_start;
-                 argIndex;
+                 appliedFunctor = key;
+                 argIndex = consumed + i;
                  resolveItem = argumentItemResolver argumentExpr;
                }
                :: !delayedApplications)
-    | _ -> ()
+    | None -> ()
 
 (* Traverse the AST *)
 let traverseStructure ~doTypes ~doExternals =
