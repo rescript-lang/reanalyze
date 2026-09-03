@@ -619,3 +619,49 @@ module Applied_pt2 = Apply_pt2 (struct
 end)
 
 let run_param_mt2 () = ignore (Applied_pt2.run ())
+
+(* Module types through an aliased or applied member of an applied functor's
+   result: [Outer_h (Chosen).Alias.T] and [Outer_h (Chosen).Applied_inner.T]. *)
+module Outer_h (A : Shared_signature.S) = struct
+  let _ = A.f
+
+  module Holder = struct
+    module type T = sig
+      val f : unit -> int
+    end
+  end
+
+  module Alias = Holder
+
+  module Inner_f (X : Shared_signature.S) = struct
+    module type T = sig
+      val k : unit -> int
+    end
+  end
+
+  module Applied_inner = Inner_f (A)
+end
+
+module type U_alias = Outer_h(Chosen).Alias.T
+module type U_applied = Outer_h(Chosen).Applied_inner.T
+
+module Use_u : U_alias = struct
+  let f () = 47
+end
+
+module Use_u2 : U_applied = struct
+  let k () = 48
+end
+
+module Apply_u (X : U_alias) = struct
+  let run () = X.f ()
+end
+
+module Apply_u2 (X : U_applied) = struct
+  let run () = X.k ()
+end
+
+module Applied_u = Apply_u ((Use_u : U_alias))
+module Applied_u2 = Apply_u2 ((Use_u2 : U_applied))
+
+let run_u () = ignore (Applied_u.run () + Applied_u2.run ())

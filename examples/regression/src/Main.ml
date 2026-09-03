@@ -34,4 +34,5 @@ let () =
   Shared_signature_arg.run_rec_chain ();
   Shared_signature_arg.run_mt ();
   Shared_signature_arg.run_param_mt ();
-  Shared_signature_arg.run_param_mt2 ()
+  Shared_signature_arg.run_param_mt2 ();
+  Shared_signature_arg.run_u ()

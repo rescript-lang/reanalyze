@@ -570,6 +570,8 @@ type identResolutions = {
   moduleTypeOf : Location.t -> string -> Types.module_type option;
       (** occurrence location, last name -> the module type a
           [module type X = ...] declaration denotes *)
+  moduleTypeOfPath : Path.t -> Types.module_type option;
+      (** the module type a path denotes, in this unit's scope *)
   shapeValueItems : moduleShape -> (string * Location.t) list;
       (** the values a module shape exports, with their implementations; a
           fallback when the module's signature cannot be expanded *)
@@ -599,6 +601,7 @@ let emptyIdentResolutions =
     projModule = (fun _ _ -> None);
     moduleDefLoc = (fun _ _ -> None);
     moduleTypeOf = (fun _ _ -> None);
+    moduleTypeOfPath = (fun _ -> None);
     shapeValueItems = (fun _ -> []);
     bindingOfPath = (fun _ -> None);
     headKey = (fun _ _ -> None);
@@ -756,6 +759,7 @@ let rec makeResolver ~cmtFilePath
     | None -> None
   in
   let selfRef = ref emptyIdentResolutions in
+  let moduleTypeOfPathRef = ref (fun (_ : Path.t) -> (None : Types.module_type option)) in
   let bindingOfUid =
     moduleBindingOfUid ~currentCmtFile:cmtFilePath ~imports ~local
   in
@@ -899,6 +903,7 @@ let rec makeResolver ~cmtFilePath
             moduleTypeOfUid ~currentCmtFile:cmtFilePath ~imports ~local uid
           | None -> None)
         | None -> None);
+    moduleTypeOfPath = (fun path -> !moduleTypeOfPathRef path);
     shapeValueItems =
       (fun shape ->
         match (Reduce.reduce Env.empty shape).desc with
@@ -1012,13 +1017,27 @@ let rec makeResolver ~cmtFilePath
        in
        (* [module type S] in the body of a functor the path applies, as in
           [Outer (A).S]: found structurally, whatever the argument. *)
-       let rec moduleTypeInBody (e : Typedtree.module_expr) applied name =
+       let rec moduleTypeInBody ~resolver (e : Typedtree.module_expr) applied
+           name =
          match e.mod_desc with
-         | Tmod_constraint (inner, _, _, _) -> moduleTypeInBody inner applied name
+         | Tmod_constraint (inner, _, _, _) ->
+           moduleTypeInBody ~resolver inner applied name
          | Tmod_functor (_, inner) when applied > 0 ->
-           moduleTypeInBody inner (applied - 1) name
+           moduleTypeInBody ~resolver inner (applied - 1) name
          | Tmod_apply (functorExpr, _, _) ->
-           moduleTypeInBody functorExpr (applied + 1) name
+           moduleTypeInBody ~resolver functorExpr (applied + 1) name
+         | Tmod_ident (p, _) -> (
+           (* An aliased member ([module Alias = Holder]) or an applied one:
+              follow it in the unit defining the body. *)
+           let r : identResolutions =
+             match resolver with Some r -> r | None -> !selfRef
+           in
+           if applied = 0 then r.moduleTypeOfPath (Pdot (p, name))
+           else
+             match r.bindingOfPath p with
+             | Some (_, definition, resolver, applied') ->
+               moduleTypeInBody ~resolver definition (applied + applied') name
+             | None -> None)
          | Tmod_structure structure when applied = 0 ->
            structure.str_items
            |> List.fold_left
@@ -1028,19 +1047,18 @@ let rec makeResolver ~cmtFilePath
                     when mtd_name.txt = name ->
                     Some mty_type
                   | Tstr_include {incl_mod} -> (
-                    match moduleTypeInBody incl_mod 0 name with
+                    match moduleTypeInBody ~resolver incl_mod 0 name with
                     | Some mt -> Some mt
                     | None -> acc)
                   | _ -> acc)
                 None
          | _ -> None
-       in
-       let moduleTypeOfPath (path : Path.t) =
+       and moduleTypeOfPath (path : Path.t) =
          match path with
          | Pdot (p, name) when hasApply p -> (
            match bindingOfPath p with
-           | Some (_, definition, _, applied) ->
-             moduleTypeInBody definition applied name
+           | Some (_, definition, resolver, applied) ->
+             moduleTypeInBody ~resolver definition applied name
            | None -> None)
          | Pdot (p, name) -> (
            match moduleShapeOfPath p with
@@ -1080,6 +1098,7 @@ let rec makeResolver ~cmtFilePath
        in
        (* Aliases are followed until a signature is reached; the visited
           paths break cycles. *)
+       moduleTypeOfPathRef := moduleTypeOfPath;
        let rec expand visited (moduleType : Types.module_type) =
          match moduleType with
          | Mty_ident path when not (List.exists (Path.same path) visited) -> (
