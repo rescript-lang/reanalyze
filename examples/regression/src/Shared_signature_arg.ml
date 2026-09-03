@@ -685,3 +685,68 @@ end
 module Applied_recfwd = Apply_recfwd (Opt_recfwd)
 
 let run_recfwd () = ignore (Applied_recfwd.run () + Opt_recfwd_other.g ())
+
+(* Sweep of parameter-alias forms: a recursive alias of a parameter's
+   submodule, a let-module alias chain, a recursive alias of an outer alias,
+   and an alias passed as a functor argument. *)
+module Opt_sw1 : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_sw2 : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_sw3 : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_sw4 : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_sw_other : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Nested_sw1 : With_nested = struct
+  module N = Opt_sw1
+end
+
+module Apply_sw1 (M : With_nested) = struct
+  module rec G : Shared_signature.O = H
+  and H : Shared_signature.O = M.N
+
+  let run () = G.g ~x:1 ()
+end
+
+module Apply_sw2 (M : Shared_signature.O) = struct
+  let run () =
+    let module G = M in
+    let module H = G in
+    H.g ~x:1 ()
+end
+
+module Apply_sw3 (M : Shared_signature.O) = struct
+  module N = M
+  module rec G : Shared_signature.O = N
+
+  let run () = G.g ~x:1 ()
+end
+
+module Apply_sw4 (M : Shared_signature.O) = struct
+  module N = M
+  module App = Apply_opt (N)
+
+  let run () = App.run ()
+end
+
+module Applied_sw1 = Apply_sw1 (Nested_sw1)
+module Applied_sw2 = Apply_sw2 (Opt_sw2)
+module Applied_sw3 = Apply_sw3 (Opt_sw3)
+module Applied_sw4 = Apply_sw4 (Opt_sw4)
+
+let run_sweep () =
+  ignore
+    (Applied_sw1.run () + Applied_sw2.run () + Applied_sw3.run ()
+   + Applied_sw4.run () + Opt_sw_other.g ())

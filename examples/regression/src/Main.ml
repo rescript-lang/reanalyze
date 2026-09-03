@@ -36,4 +36,5 @@ let () =
   Shared_signature_arg.run_param_mt ();
   Shared_signature_arg.run_param_mt2 ();
   Shared_signature_arg.run_u ();
-  Shared_signature_arg.run_recfwd ()
+  Shared_signature_arg.run_recfwd ();
+  Shared_signature_arg.run_sweep ()
