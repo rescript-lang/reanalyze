@@ -441,10 +441,16 @@ let locOfUid ~currentCmtFile ~imports ~local uid =
   | Some decl -> locOfItemDeclaration decl
   | None -> None
 
-let moduleBindingLocOfUid ~currentCmtFile ~imports ~local uid =
+let moduleBindingOfUid ~currentCmtFile ~imports ~local uid =
   match declOfUid ~currentCmtFile ~imports ~local uid with
-  | Some (Typedtree.Module_binding {mb_name = {loc}}) -> Some loc
+  | Some (Typedtree.Module_binding {mb_name = {loc}; mb_expr}) ->
+    Some (loc, mb_expr)
   | _ -> None
+
+let moduleBindingLocOfUid ~currentCmtFile ~imports ~local uid =
+  match moduleBindingOfUid ~currentCmtFile ~imports ~local uid with
+  | Some (loc, _) -> Some loc
+  | None -> None
 
 let moduleTypeOfUid ~currentCmtFile ~imports ~local uid =
   match declOfUid ~currentCmtFile ~imports ~local uid with
@@ -513,6 +519,10 @@ type identResolutions = {
   moduleTypeOf : Location.t -> string -> Types.module_type option;
       (** occurrence location, last name -> the module type a
           [module type X = ...] declaration denotes *)
+  moduleDefinition :
+    Location.t -> string -> (Location.t * Typedtree.module_expr) option;
+      (** occurrence location, last name -> the module binding's name location
+          and expression *)
 }
 
 let emptyIdentResolutions =
@@ -523,6 +533,7 @@ let emptyIdentResolutions =
     projModule = (fun _ _ -> None);
     moduleDefLoc = (fun _ _ -> None);
     moduleTypeOf = (fun _ _ -> None);
+    moduleDefinition = (fun _ _ -> None);
   }
 
 #if OCAML_VERSION >= (5, 3, 0)
@@ -650,6 +661,19 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
           match Lazy.force uid with
           | Some uid ->
             moduleTypeOfUid ~currentCmtFile:cmtFilePath ~imports ~local uid
+          | None -> None)
+        | None -> None);
+    moduleDefinition =
+      (fun loc name ->
+        match Hashtbl.find_opt moduleUids (key loc name) with
+        | Some uid -> (
+          match Lazy.force uid with
+          | Some uid -> (
+            match
+              moduleBindingOfUid ~currentCmtFile:cmtFilePath ~imports ~local uid
+            with
+            | Some (loc, _) when loc.loc_ghost -> None
+            | def -> def)
           | None -> None)
         | None -> None);
   }
