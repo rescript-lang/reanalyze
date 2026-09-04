@@ -655,6 +655,37 @@ let shapeResolutionAvailable =
   false
 #endif
 
+(* The shape of a functor application, as the compiler computes it for
+   [Tmod_apply]: reducing a projection of it lands in the functor's body, or
+   in the argument for items the body re-exports. *)
+let applyShape (functorShape : moduleShape) (argumentShape : moduleShape) :
+    moduleShape =
+#if OCAML_VERSION >= (5, 3, 0)
+  Shape.app functorShape ~arg:argumentShape
+#else
+  ignore functorShape;
+  argumentShape
+#endif
+
+(* The shape standing for a functor parameter inside an application
+   ([Use (Make (P))] in the body of [functor (P : S) -> ...]): an empty
+   structure, so that a projection lands in [Make]'s body for the items it
+   defines and stays unresolved for those it takes from [P]. *)
+let parameterShape : moduleShape =
+#if OCAML_VERSION >= (5, 3, 0)
+  Shape.dummy_mod
+#else
+  ()
+#endif
+
+(* The shape of a generative application [F ()] ([Tmod_apply_unit]). *)
+let applyUnitShape (functorShape : moduleShape) : moduleShape =
+#if OCAML_VERSION >= (5, 3, 0)
+  Shape.app functorShape ~arg:Shape.dummy_mod
+#else
+  functorShape
+#endif
+
 #if OCAML_VERSION >= (5, 3, 0)
 (* Resolvers of other units, by .cmt path, for chasing definitions bound
    there (aliases and partial applications of functors). *)
@@ -828,25 +859,39 @@ let rec makeResolver ~cmtFilePath
       | Some (_, definition, resolver, applied) -> (
         (* Peel the applied functor layers, then find the member, the
            last binding of that name (also through [include]s). *)
-        let rec memberIn (e : Typedtree.module_expr) applied =
+        let rec memberIn ~visited ~resolver (e : Typedtree.module_expr)
+            applied =
+          if List.memq e visited then None
+          else
+          let visited = e :: visited in
+          let lookup =
+            match resolver with
+            | Some (r : identResolutions) -> r.bindingOfPath
+            | None -> bindingOfPath
+          in
           match e.mod_desc with
-          | Tmod_constraint (inner, _, _, _) -> memberIn inner applied
+          | Tmod_constraint (inner, _, _, _) ->
+            memberIn ~visited ~resolver inner applied
           | Tmod_functor (_, inner) when applied > 0 ->
-            memberIn inner (applied - 1)
+            memberIn ~visited ~resolver inner (applied - 1)
           | Tmod_apply (functorExpr, _, _) ->
-            memberIn functorExpr (applied + 1)
+            memberIn ~visited ~resolver functorExpr (applied + 1)
+          | Tmod_apply_unit functorExpr ->
+            memberIn ~visited ~resolver functorExpr (applied + 1)
           | Tmod_ident (p, _) when applied = 0 -> (
             (* [include Helpers] in a body: [Helpers] is local to the
                unit defining the body, so its resolver must look it up. *)
-            let lookup =
-              match resolver with
-              | Some (r : identResolutions) -> r.bindingOfPath
-              | None -> bindingOfPath
-            in
             match lookup (Pdot (p, name)) with
             | Some (loc, expr, memberResolver, 0) ->
               Some (loc, expr, memberResolver)
             | _ -> None)
+          | Tmod_ident (p, _) -> (
+            (* An applied functor named by a path ([include Mid (A)] in a
+               body): its own definition, with the layers it consumed. *)
+            match lookup p with
+            | Some (_, definition, resolver, applied') ->
+              memberIn ~visited ~resolver definition (applied + applied')
+            | None -> None)
           | Tmod_structure structure when applied = 0 ->
             structure.str_items
             |> List.fold_left
@@ -866,14 +911,14 @@ let rec makeResolver ~cmtFilePath
                        Some (mb.mb_name.loc, mb.mb_expr, resolver)
                      | None -> acc)
                    | Tstr_include {incl_mod} -> (
-                     match memberIn incl_mod 0 with
+                     match memberIn ~visited ~resolver incl_mod 0 with
                      | Some member -> Some member
                      | None -> acc)
                    | _ -> acc)
                  None
           | _ -> None
         in
-        match memberIn definition applied with
+        match memberIn ~visited:[] ~resolver definition applied with
         | Some (loc, expr, memberResolver) ->
           Some (loc, expr, memberResolver, 0)
         | None -> None)
@@ -964,7 +1009,7 @@ let rec makeResolver ~cmtFilePath
          if loc.loc_ghost then None
          else
            match (unwrap definition).mod_desc with
-           | Tmod_apply _ | Tmod_ident _ -> (
+           | Tmod_apply _ | Tmod_apply_unit _ | Tmod_ident _ -> (
              match resolver with
              | Some (resolver : identResolutions) -> (
                match resolver.headKey visited definition with
@@ -975,7 +1020,7 @@ let rec makeResolver ~cmtFilePath
        in
        let rec headKey (visited : headVisited) (e : Typedtree.module_expr) =
          match e.mod_desc with
-         | Tmod_apply (functorExpr, _, _) -> (
+         | Tmod_apply (functorExpr, _, _) | Tmod_apply_unit functorExpr -> (
            match headKey visited functorExpr with
            | Some (loc, consumed) -> Some (loc, consumed + 1)
            | None -> None)
@@ -1048,15 +1093,18 @@ let rec makeResolver ~cmtFilePath
        in
        (* [module type S] in the body of a functor the path applies, as in
           [Outer (A).S]: found structurally, whatever the argument. *)
-       let rec moduleTypeInBody ~resolver (e : Typedtree.module_expr) applied
-           name =
+       let rec moduleTypeInBody ~visited ~resolver
+           (e : Typedtree.module_expr) applied name =
+         if List.memq e visited then None
+         else
+         let visited = e :: visited in
          match e.mod_desc with
          | Tmod_constraint (inner, _, _, _) ->
-           moduleTypeInBody ~resolver inner applied name
+           moduleTypeInBody ~visited ~resolver inner applied name
          | Tmod_functor (_, inner) when applied > 0 ->
-           moduleTypeInBody ~resolver inner (applied - 1) name
-         | Tmod_apply (functorExpr, _, _) ->
-           moduleTypeInBody ~resolver functorExpr (applied + 1) name
+           moduleTypeInBody ~visited ~resolver inner (applied - 1) name
+         | Tmod_apply (functorExpr, _, _) | Tmod_apply_unit functorExpr ->
+           moduleTypeInBody ~visited ~resolver functorExpr (applied + 1) name
          | Tmod_ident (p, _) -> (
            (* An aliased member ([module Alias = Holder]) or an applied one:
               follow it in the unit defining the body. *)
@@ -1067,7 +1115,8 @@ let rec makeResolver ~cmtFilePath
            else
              match r.bindingOfPath p with
              | Some (_, definition, resolver, applied') ->
-               moduleTypeInBody ~resolver definition (applied + applied') name
+               moduleTypeInBody ~visited ~resolver definition
+                 (applied + applied') name
              | None -> None)
          | Tmod_structure structure when applied = 0 ->
            structure.str_items
@@ -1078,7 +1127,9 @@ let rec makeResolver ~cmtFilePath
                     when mtd_name.txt = name ->
                     Some mty_type
                   | Tstr_include {incl_mod} -> (
-                    match moduleTypeInBody ~resolver incl_mod 0 name with
+                    match
+                      moduleTypeInBody ~visited ~resolver incl_mod 0 name
+                    with
                     | Some mt -> Some mt
                     | None -> acc)
                   | _ -> acc)
@@ -1089,7 +1140,7 @@ let rec makeResolver ~cmtFilePath
          | Pdot (p, name) when hasApply p -> (
            match bindingOfPath p with
            | Some (_, definition, resolver, applied) ->
-             moduleTypeInBody ~resolver definition applied name
+             moduleTypeInBody ~visited:[] ~resolver definition applied name
            | None -> None)
          | Pdot (p, name) -> (
            match moduleShapeOfPath p with

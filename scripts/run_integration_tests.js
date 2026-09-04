@@ -131,6 +131,12 @@ function runRegressionTests() {
   );
   // Arguments wrapped in a constraint by a named module type are still used.
   assertIncludes(output, "Live Value +Shared_signature_arg.Chosen2.+f");
+  // Arguments of generative functors and applied arguments are used.
+  assertIncludes(output, "Live Value +Shared_signature_arg.Opt_unit_first.+g");
+  assertIncludes(output, "Live Value +Shared_signature_arg.Opt_unit_last.+g");
+  assertIncludes(output, "Live Value +Shared_signature_arg.Mk_o.+g");
+  assertIncludes(output, "Live Value +Shared_signature_arg.Fwd_used.+f");
+  assertIncludes(output, "Live Value +Shared_signature_arg.Applied_struct.+g");
   assertNotIncludes(output, "Dead Value +Shared_signature_arg.Chosen2.+f");
   assertNotIncludes(output, "Dead Value +Shared_signature_arg.Opt_constrained.+g");
   // Precise attribution through a shared named module type relies on shape
@@ -368,6 +374,62 @@ function runRegressionTests() {
       "optional argument x of function Opt_inline.+g is always supplied"
     );
     assertIncludes(output, "Dead Value +Shared_signature_arg.Ignored2.+f");
+    // Generative functors: a unit application first, in the middle, last, in
+    // a partial application, a recursive binding, a let module, and bound in
+    // another file. An implementation never applied keeps its unused argument.
+    for (const name of [
+      "Opt_unit_first",
+      "Opt_unit_mid",
+      "Opt_unit_last",
+      "Opt_unit_partial",
+      "Opt_unit_end",
+      "Opt_unit_rec",
+      "Opt_unit_let",
+      "Opt_cross_unit",
+      "Opt_cross_unit2",
+    ]) {
+      assertIncludes(
+        output,
+        `optional argument x of function ${name}.+g is always supplied (1 calls)`
+      );
+    }
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_unit_none.+g is never used"
+    );
+    // Arguments that are themselves applications: directly, constrained,
+    // curried, nested, generative, through an alias of the functor, with a
+    // parameter as the inner argument, of an inline functor, bound in another
+    // file, and a constrained inline structure. The calls are credited to the
+    // applied functor's body only.
+    for (const name of [
+      "Mk_o",
+      "Mk_o_c",
+      "Mk_o2",
+      "Mk_o_n",
+      "Mk_o_unit",
+      "Mk_o_a",
+      "Mk_o_p",
+      "Applied_app_inline",
+      "Applied_struct",
+    ]) {
+      assertIncludes(
+        output,
+        `optional argument x of function ${name}.+g is always supplied (1 calls)`
+      );
+    }
+    assertIncludes(
+      output,
+      "optional argument x of function Mk_cross.+g is always supplied (2 calls)"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Mk_o_none.+g is never used"
+    );
+    // An applied functor re-exporting its argument: the argument's value is
+    // used, another implementation of the module type stays dead.
+    assertIncludes(output, "Live Value +Shared_signature_arg.Fwd_used.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Fwd_unused.+f");
   }
 
   assertNotIncludes(output, "Parent is a dead module");

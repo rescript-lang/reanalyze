@@ -41,4 +41,9 @@ let () =
   Shared_signature_arg.run_ord ();
   Shared_signature_arg.run_ord2 ();
   Shared_signature_arg.run_ranges ();
-  Shared_signature_arg.run_constrained ()
+  Shared_signature_arg.run_constrained ();
+  Shared_signature_arg.run_unit ();
+  Shared_signature_arg.run_app ();
+  Cross_alias_use.run_unit ();
+  Shared_signature_arg.run_app2 ();
+  Cross_alias_use.run_alias_app ()
