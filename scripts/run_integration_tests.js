@@ -70,6 +70,16 @@ function assertNotIncludes(output, unexpected) {
   }
 }
 
+function ocamlVersionAtLeast(major, minor) {
+  const version = child_process
+    .execFileSync("ocamlc", ["-version"], { encoding: "utf8" })
+    .trim();
+  const [actualMajor, actualMinor] = version.split(".").map(Number);
+  return (
+    actualMajor > major || (actualMajor === major && actualMinor >= minor)
+  );
+}
+
 function runRegressionTests() {
   const cwd = path.join(__dirname, "..", "examples", "regression");
   const cmtDir = "_build/default/src/.regression_fixture.objs/byte";
@@ -91,6 +101,9 @@ function runRegressionTests() {
     {
       cwd,
       encoding: "utf8",
+      // The debug output lists every reference; before OCaml 5.3 references
+      // through module type items fan out to every implementation.
+      maxBuffer: 256 * 1024 * 1024,
     }
   );
 
@@ -104,6 +117,375 @@ function runRegressionTests() {
   assertIncludes(output, "Live Value +Local_side_effects.+process");
   assertIncludes(output, "Live Value +Local_side_effects.+register");
 
+  // A call through one functor instance must never mark the used
+  // implementation dead.
+  assertIncludes(output, "Live Value +Shared_signature_used.Make.+f");
+  assertNotIncludes(output, "Dead Value +Shared_signature_used.Make.+f");
+  assertIncludes(output, "Live Value +Shared_signature_arg.Chosen.+f");
+  assertNotIncludes(output, "Dead Value +Shared_signature_arg.Chosen.+f");
+  assertIncludes(output, "Live Value +Shared_signature_arg.Local_used.+f");
+  assertNotIncludes(output, "Dead Value +Shared_signature_arg.Local_used.+f");
+  // A call through a functor parameter is credited to the actual argument
+  // (conservatively, to every implementation of the item, before OCaml 5.3):
+  // x must never be reported unused.
+  assertNotIncludes(
+    output,
+    "optional argument x of function Opt_chosen.+g is never used"
+  );
+  // Arguments wrapped in a constraint by a named module type are still used.
+  assertIncludes(output, "Live Value +Shared_signature_arg.Chosen2.+f");
+  // Arguments of generative functors and applied arguments are used.
+  assertIncludes(output, "Live Value +Shared_signature_arg.Opt_unit_first.+g");
+  assertIncludes(output, "Live Value +Shared_signature_arg.Opt_unit_last.+g");
+  assertIncludes(output, "Live Value +Shared_signature_arg.Mk_o.+g");
+  assertIncludes(output, "Live Value +Shared_signature_arg.Fwd_used.+f");
+  assertIncludes(output, "Live Value +Shared_signature_arg.Applied_struct.+g");
+  assertIncludes(output, "Live Value +Higher_order.Opt_ho.+g");
+  assertIncludes(output, "Live Value +Higher_order.Opt_fc.+g");
+  assertIncludes(output, "Live Value +Higher_order.P_esc.+h");
+  assertIncludes(output, "Live Value +Higher_order.Id_used.+f");
+  assertNotIncludes(output, "Dead Value +Shared_signature_arg.Chosen2.+f");
+  assertNotIncludes(output, "Dead Value +Shared_signature_arg.Opt_constrained.+g");
+  // Precise attribution through a shared named module type relies on shape
+  // reduction of identifier occurrences, available from OCaml 5.3. Earlier
+  // versions conservatively keep every implementation of the item live.
+  if (ocamlVersionAtLeast(5, 3)) {
+    assertIncludes(output, "Dead Value +Shared_signature_unused.Make.+f");
+    assertNotIncludes(output, "Live Value +Shared_signature_unused.Make.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Ignored.+f");
+    assertNotIncludes(output, "Live Value +Shared_signature_arg.Ignored.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Local_unused.+f");
+    assertNotIncludes(output, "Live Value +Shared_signature_arg.Local_unused.+f");
+    // A call through a functor parameter supplying ?x must not be attributed
+    // to other implementations of the module type item.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_direct.+g is never used"
+    );
+    // ... and is credited precisely, including through a constraint, for an
+    // inline functor, and for a functor with a whole-functor signature.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_chosen.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_sigfun.+g is always supplied"
+    );
+    // ... through a named partial application, and for a let-module functor.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_partial.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_letmodule.+g is always supplied"
+    );
+    // ... through an alias of the parameter, and for a recursive functor. The
+    // aliased call must not leak to another implementation.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_alias.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_alias_other.+g is never used"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_rec.+g is always supplied"
+    );
+    // Argument constrained by an alias of the module type; a functor
+    // forwarding its parameter to another functor; include of the parameter.
+    assertIncludes(output, "Live Value +Shared_signature_arg.Chosen3.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Ignored3.+f");
+    assertIncludes(output, "Live Value +Shared_signature_arg.Chosen4.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Ignored4.+f");
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_outer.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_incl.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_incl_other.+g is never used"
+    );
+    // A module type declared inside a module.
+    assertIncludes(output, "Live Value +Nested_module_type.Outer.Used.+f");
+    assertIncludes(output, "Dead Value +Nested_module_type.Outer.Unused.+f");
+    // let-module alias of a functor; module type aliases rooted at a local
+    // module and shadowing a same-named module type.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_letalias.+g is always supplied"
+    );
+    assertIncludes(output, "Live Value +Shared_signature_arg.Use_t.+h");
+    assertIncludes(output, "Live Value +Shared_signature_arg.Shadow.Use3.+k");
+    // A nested module of the parameter constrained by a named module type.
+    assertIncludes(output, "Live Value +Shared_signature_arg.Nested_arg.N.+g");
+    assertIncludes(
+      output,
+      "optional argument x of function Nested_arg.N.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Nested_other.N.+g is never used"
+    );
+    // Ten forwarding functors; modules inside a functor body; an alias of a
+    // functor defined in another file; a module type in an included signature.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_chain.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "Dead Value +Shared_signature_arg.Apply_in_body.Ignored_in.+f"
+    );
+    assertIncludes(
+      output,
+      "Live Value +Shared_signature_arg.Apply_in_body.Chosen_in.+f"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_cross.+g is always supplied"
+    );
+    assertIncludes(output, "Live Value +Included_sig.M.+f");
+    // A module type nested in a with-constrained signature; nine aliases.
+    assertIncludes(output, "Live Value +Included_sig.W.X.+f");
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_alias9.+g is always supplied"
+    );
+    // A nested functor applied through Outer (A).Inner; a recursive alias.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_ext.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_rec_alias.+g is always supplied"
+    );
+    // A recursive alias of the parameter; a module type introduced by a
+    // with-constraint.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_recalias.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_recalias_other.+g is never used"
+    );
+    assertIncludes(output, "Live Value +Included_sig.W2.X.+f");
+    // module type of; a nested functor obtained through include.
+    assertIncludes(output, "Live Value +Included_sig.W3.X.+f");
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_incl_f.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_cross_incl.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_rec_chain.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_y.+g is always supplied"
+    );
+    // A module type rooted at a functor application.
+    assertIncludes(output, "Live Value +Shared_signature_arg.Used_mt.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Unused_mt.+f");
+    // Module types rooted at a functor parameter: M.T, M.Sub.T2,
+    // Outer (M).SM, through a parameter alias, and through include.
+    assertIncludes(output, "Live Value +Shared_signature_arg.Apply_pt.Use_p.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Apply_pt.Unused_p.+f");
+    assertIncludes(output, "Live Value +Shared_signature_arg.Apply_pt.Use_p2.+h");
+    assertIncludes(output, "Live Value +Shared_signature_arg.Apply_app.Use_a.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Apply_app.Unused_a.+f");
+    assertIncludes(
+      output,
+      "Live Value +Shared_signature_arg.Apply_pt2.Use_alias_mt.+f"
+    );
+    assertIncludes(
+      output,
+      "Live Value +Shared_signature_arg.Apply_pt2.Use_include_mt.+f"
+    );
+    // Module types through an aliased or applied member of an applied
+    // functor's result.
+    assertIncludes(output, "Live Value +Shared_signature_arg.Use_u.+f");
+    assertIncludes(output, "Live Value +Shared_signature_arg.Use_u2.+k");
+    // A forward alias of the parameter in a recursive group.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_recfwd.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_recfwd_other.+g is never used"
+    );
+    // Sweep of parameter-alias forms: recursive alias of a parameter's
+    // submodule, let-module alias chain, recursive alias of an outer alias,
+    // alias passed as a functor argument. Each credited exactly once and
+    // never leaked to an unrelated implementation.
+    for (const m of ["Opt_sw1", "Opt_sw2", "Opt_sw3", "Opt_sw4"]) {
+      assertIncludes(
+        output,
+        `optional argument x of function ${m}.+g is always supplied (1 calls)`
+      );
+    }
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_sw_other.+g is never used"
+    );
+    // Arguments constrained by a module type from outside the analysis root
+    // (Set.OrderedType): inline and named.
+    assertIncludes(output, "Live Value +Shared_signature_arg.Applied_ord.+compare");
+    assertIncludes(output, "Live Value +Shared_signature_arg.Ord_named.+compare");
+    // Module types inside an applied inline functor and inside a functor
+    // parameter's type: their items are never declarations.
+    assertIncludes(output, "Live Value +Shared_signature_arg.M_app.X.+f");
+    assertIncludes(output, "Live Value +Shared_signature_arg.Arg_p.X.+f");
+    // (Arg_p2.X.f is live: an argument's coerced items count as used.)
+    assertNotIncludes(output, "Value +Shared_signature_arg.Applied_fp2.X.+f");
+    assertNotIncludes(output, "Value +Shared_signature_arg.F_param.X.+f");
+    // Constraint-wrapped right-hand sides: a recursive constrained partial
+    // application, and a let-module constrained functor.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_recc.+g is always supplied (1 calls)"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_letc.+g is always supplied (1 calls)"
+    );
+    // Partial applications: held by a let module, and bound in another file.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_letpartial.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_cross_partial.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_constrained.+g is always supplied"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_inline.+g is always supplied"
+    );
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Ignored2.+f");
+    // Generative functors: a unit application first, in the middle, last, in
+    // a partial application, a recursive binding, a let module, and bound in
+    // another file. An implementation never applied keeps its unused argument.
+    for (const name of [
+      "Opt_unit_first",
+      "Opt_unit_mid",
+      "Opt_unit_last",
+      "Opt_unit_partial",
+      "Opt_unit_end",
+      "Opt_unit_rec",
+      "Opt_unit_let",
+      "Opt_cross_unit",
+      "Opt_cross_unit2",
+    ]) {
+      assertIncludes(
+        output,
+        `optional argument x of function ${name}.+g is always supplied (1 calls)`
+      );
+    }
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_unit_none.+g is never used"
+    );
+    // Arguments that are themselves applications: directly, constrained,
+    // curried, nested, generative, through an alias of the functor, with a
+    // parameter as the inner argument, of an inline functor, bound in another
+    // file, and a constrained inline structure. The calls are credited to the
+    // applied functor's body only.
+    for (const name of [
+      "Mk_o",
+      "Mk_o_c",
+      "Mk_o2",
+      "Mk_o_n",
+      "Mk_o_unit",
+      "Mk_o_a",
+      "Mk_o_p",
+      "Applied_app_inline",
+      "Applied_struct",
+    ]) {
+      assertIncludes(
+        output,
+        `optional argument x of function ${name}.+g is always supplied (1 calls)`
+      );
+    }
+    assertIncludes(
+      output,
+      "optional argument x of function Mk_cross.+g is always supplied (2 calls)"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Mk_o_none.+g is never used"
+    );
+    // An applied functor re-exporting its argument: the argument's value is
+    // used, another implementation of the module type stays dead.
+    assertIncludes(output, "Live Value +Shared_signature_arg.Fwd_used.+f");
+    assertIncludes(output, "Dead Value +Shared_signature_arg.Fwd_unused.+f");
+    // Higher-order functors: a functor passed as an argument and applied in
+    // the body, to a parameter, a fixed module, a submodule of a parameter,
+    // through an alias of the functor parameter, in an include, partially
+    // applied beforehand, through two levels; and first-class modules as
+    // head and as argument, in the same file and from another file. Each
+    // call is credited to the argument of the same application only.
+    for (const name of [
+      "Opt_ho",
+      "Opt_fixed",
+      "Opt_sub_holder.Sub",
+      "Opt_alias_ho",
+      "Opt_incl_ho",
+      "Opt_partial_ho",
+      "Opt_2",
+      "Opt_fc",
+      "Opt_fca",
+      "Opt_cross_fc",
+      "Opt_id",
+    ]) {
+      assertIncludes(
+        output,
+        `optional argument x of function ${name}.+g is always supplied (1 calls)`
+      );
+    }
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_twice.+g is always supplied (2 calls)"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_none_ho.+g is never used"
+    );
+    // Inline functors returning (a submodule of) their parameter, or a
+    // functor applied to it: the argument flows on; an unrelated
+    // implementation stays dead.
+    assertIncludes(output, "Live Value +Higher_order.Id_used.+f");
+    assertIncludes(output, "Live Value +Higher_order.Id_sub_holder.Sub.+f");
+    assertIncludes(output, "Live Value +Higher_order.Id_app.+f");
+    assertIncludes(output, "Live Value +Higher_order.Id_curried.+f");
+    assertIncludes(output, "Dead Value +Higher_order.Id_unused.+f");
+    // A functor escaping as a first-class module passed to a function: its
+    // calls are forwarded conservatively, never dropped.
+    assertIncludes(
+      output,
+      "optional argument y of function P_esc.+h is always supplied"
+    );
+    assertNotIncludes(output, "P_esc.+h is never used");
+  }
+
   assertNotIncludes(output, "Parent is a dead module");
   assertNotIncludes(output, "Dead Value +Functor_argument.Ordered.+compare");
   assertNotIncludes(output, "Live Value +Functor_argument.Ordered.+unused");
@@ -112,6 +494,51 @@ function runRegressionTests() {
   assertNotIncludes(output, "Dead Value +Local_side_effects.+_info");
   assertNotIncludes(output, "Dead Value +Local_side_effects.+process");
   assertNotIncludes(output, "Dead Value +Local_side_effects.+register");
+}
+
+// A broad root may hold copies of the same compiled unit (a library's
+// objects and its _build/install copy, byte and native objects). Scanning
+// such a root must give exactly the single-directory result: copies are
+// neither scanned twice nor mistaken for distinct units.
+function runDuplicateLayoutTest() {
+  const fs = require("fs");
+  const os = require("os");
+  const cwd = path.join(__dirname, "..", "examples", "regression");
+  const cmtDir = path.join(
+    cwd,
+    "_build/default/src/.regression_fixture.objs/byte"
+  );
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "reanalyze-dup-"));
+  for (const dir of ["a", "b", "c"]) fs.mkdirSync(path.join(root, dir));
+  for (const file of fs.readdirSync(cmtDir)) {
+    if (!/\.cmti?$/.test(file)) continue;
+    // Dependencies duplicated in a and b, consumers in c.
+    const dirs = /Shared_signature|Cross_/.test(file) ? ["a", "b"] : ["c"];
+    for (const dir of dirs)
+      fs.copyFileSync(path.join(cmtDir, file), path.join(root, dir, file));
+  }
+  const filter = (output) =>
+    output
+      .split("\n")
+      .filter((line) => /never used|always supplied|dead module/.test(line))
+      .sort()
+      .join("\n");
+  const run = (dir) =>
+    child_process.execFileSync(
+      reanalyzeFile,
+      ["-ci", "-native-build-target", ".", "-dce-cmt", dir],
+      { cwd, encoding: "utf8" }
+    );
+  console.log(`${cwd}: reanalyze duplicate-layout comparison`);
+  const single = filter(run(cmtDir));
+  const duplicated = filter(run(root));
+  fs.rmSync(root, { recursive: true, force: true });
+  if (single !== duplicated) {
+    throw new Error(
+      "Scanning a root with duplicated compiled units changed the result:\n" +
+        duplicated
+    );
+  }
 }
 
 function checkSetup() {
@@ -146,6 +573,7 @@ function main() {
     checkSetup();
     cleanBuildExamples();
     runRegressionTests();
+    runDuplicateLayoutTest();
     checkDiff();
 
     console.log("Test successful!");

@@ -7,6 +7,10 @@
   File "OptionalArgs.ml", line 1, characters 0-86
   optional argument used of function +live_optional is always supplied (1 calls)
 
+  Warning Redundant Optional Argument
+  File "FunctorSigMli.ml", line 11, characters 2-30
+  optional argument x of function Make.+with_opt is always supplied (1 calls)
+
   Warning Dead Value
   File "Annotations.ml", line 5, characters 0-33
   +stale_dead_annotation is never used
@@ -40,6 +44,30 @@
   DeadRunner.+run is never used
   <-- line 10
     let run () = () [@@dead "DeadRunner.+run"] 
+
+  Warning Dead Value
+  File "FunctorSigInline.ml", line 6, characters 2-32
+  Make.+unused_in_inline_sig is never used
+  <-- line 6
+    let unused_in_inline_sig k = k [@@dead "Make.+unused_in_inline_sig"] 
+
+  Warning Dead Value
+  File "FunctorSigInline.ml", line 8, characters 2-29
+  Make.+truly_dead_inline is never used
+  <-- line 8
+    let truly_dead_inline k = k [@@dead "Make.+truly_dead_inline"] 
+
+  Warning Dead Value
+  File "FunctorSigMli.ml", line 7, characters 2-25
+  Make.+unused_in_sig is never used
+  <-- line 7
+    let unused_in_sig k = k [@@dead "Make.+unused_in_sig"] 
+
+  Warning Dead Value
+  File "FunctorSigMli.ml", line 9, characters 2-22
+  Make.+truly_dead is never used
+  <-- line 9
+    let truly_dead k = k [@@dead "Make.+truly_dead"] 
 
   Warning Dead Value
   File "Includes.ml", line 4, characters 2-29
@@ -123,4 +151,4 @@
   <-- line 4
     | LiveA [@dead "live_variant.LiveA"] 
   
-  Analysis reported 22 issues (Warning Dead Module:2, Warning Dead Type:5, Warning Dead Value:13, Warning Redundant Optional Argument:1, Warning Unused Argument:1)
+  Analysis reported 27 issues (Warning Dead Module:2, Warning Dead Type:5, Warning Dead Value:17, Warning Redundant Optional Argument:2, Warning Unused Argument:1)

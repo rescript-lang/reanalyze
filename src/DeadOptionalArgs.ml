@@ -5,6 +5,12 @@ let active () = true
 
 type item = {
   posTo : Lexing.position;
+  posToImpl : Lexing.position option;
+      (** Shape-resolved implementation, used when [posTo] is not a declaration. *)
+  forwardable : bool;
+      (** Whether the call may be attributed to the implementations of a module
+          type item. False for calls through a functor parameter, which are
+          credited at application sites. *)
   argNames : string list;
   argNamesMaybe : string list;
 }
@@ -46,12 +52,15 @@ let rec fromTypeExpr (texpr : Types.type_expr) =
   | Tsubst _ -> fromTypeExpr (Compat.getTSubst (Compat.get_desc texpr))
   | _ -> []
 
-let addReferences ~(locFrom : Location.t) ~(locTo : Location.t) ~path
+let addReferences ~(locFrom : Location.t) ~(locTo : Location.t)
+    ?(locToImpl : Location.t option) ?(forwardable = true) ~path
     (argNames, argNamesMaybe) =
   if active () then (
     let posTo = locTo.loc_start in
+    let posToImpl = Option.map (fun (l : Location.t) -> l.loc_start) locToImpl in
     let posFrom = locFrom.loc_start in
-    delayedItems := {posTo; argNames; argNamesMaybe} :: !delayedItems;
+    delayedItems :=
+      {posTo; posToImpl; forwardable; argNames; argNamesMaybe} :: !delayedItems;
     if !Common.Cli.debug then
       Log_.item
         "DeadOptionalArgs.addReferences %s called with optional argNames:%s \
@@ -60,6 +69,43 @@ let addReferences ~(locFrom : Location.t) ~(locTo : Location.t) ~path
         (argNames |> String.concat ", ")
         (argNamesMaybe |> String.concat ", ")
         (posFrom |> posToString))
+
+(* A call through a functor parameter, credited to the implementation the
+   functor was applied to. When [posTo] could only be resolved to a module
+   type item rather than a declaration (no shapes, e.g. before OCaml 5.3, or
+   an argument without a resolvable shape), the call is forwarded to the
+   implementations of that item, conservatively. *)
+let addCallToImplementation ~(posTo : Lexing.position) (argNames, argNamesMaybe)
+    =
+  if active () then
+    delayedItems :=
+      {posTo; posToImpl = None; forwardable = true; argNames; argNamesMaybe}
+      :: !delayedItems
+
+(* Once all declarations are known, calls whose target is not a declaration
+   but have a shape-resolved implementation are attributed to it. Must run
+   before [forwardDelayedItems] and [forceDelayedItems]. *)
+let settleDelayedItems () =
+  delayedItems :=
+    !delayedItems
+    |> List.map (fun item ->
+           match (item.posToImpl, PosHash.find_opt decls item.posTo) with
+           | Some posToImpl, None -> {item with posTo = posToImpl; posToImpl = None}
+           | _ -> item)
+
+(* Calls recorded against a signature item that is not a declaration (e.g. a
+   [val] inside a named module type) are re-attributed to the implementation.
+   Must run before [forceDelayedItems]. *)
+let forwardDelayedItems ~(posFrom : Lexing.position) ~(posTo : Lexing.position)
+    =
+  let forwarded =
+    !delayedItems
+    |> List.filter_map (fun item ->
+           if item.forwardable && item.posTo = posFrom then
+             Some {item with posTo}
+           else None)
+  in
+  delayedItems := forwarded @ !delayedItems
 
 let forceDelayedItems () =
   let items = !delayedItems |> List.rev in

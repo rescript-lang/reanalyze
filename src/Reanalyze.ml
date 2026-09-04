@@ -1,7 +1,21 @@
 open Common
 
+(* Compiled units already scanned, by source: a broad root may hold copies
+   of the same artifact (a library's objects and its _build/install copy,
+   byte and native objects), which must not be scanned twice. *)
+let scannedUnits = Hashtbl.create 256
+
 let loadCmtFile ~cmtRoot cmtFilePath =
   let cmt_infos = Cmt_format.read_cmt cmtFilePath in
+  let unitKey =
+    ( cmt_infos.cmt_sourcefile,
+      cmt_infos.cmt_builddir,
+      cmt_infos.cmt_interface_digest,
+      Filename.check_suffix cmtFilePath ".cmti" )
+  in
+  if Hashtbl.mem scannedUnits unitKey then ()
+  else
+  let () = Hashtbl.replace scannedUnits unitKey () in
   let excludePath sourceFile =
     !Cli.excludePaths
     |> List.exists (fun prefix_ ->
@@ -43,6 +57,7 @@ let processCmtFiles ~cmtRoot =
     Filename.check_suffix path ".cmt" || Filename.check_suffix path ".cmti"
   in
   let processCmtFilePaths cmtFilePaths =
+    cmtFilePaths |> List.iter Compat.registerCmtFile;
     cmtFilePaths |> List.iter (loadCmtFile ~cmtRoot)
   in
   match cmtRoot with
@@ -69,8 +84,10 @@ let processCmtFiles ~cmtRoot =
     let sourceDirs =
       Paths.readSourceDirs ~configSources:None |> List.sort String.compare
     in
+    (* Collect the cmt files of every source directory before processing any,
+       so cross-directory declaration dependencies can be resolved. *)
     sourceDirs
-    |> List.iter (fun sourceDir ->
+    |> List.concat_map (fun sourceDir ->
            let libBsSourceDir = Filename.concat lib_bs sourceDir in
            let files =
              match Sys.readdir libBsSourceDir |> Array.to_list with
@@ -79,8 +96,8 @@ let processCmtFiles ~cmtRoot =
            in
            let cmtFiles = files |> List.filter isCmtFile in
            cmtFiles |> List.sort String.compare
-           |> List.map (Filename.concat libBsSourceDir)
-           |> processCmtFilePaths)
+           |> List.map (Filename.concat libBsSourceDir))
+    |> processCmtFilePaths
 
 let runAnalysis ~cmtRoot ~ppf =
   Log_.Color.setup ();
@@ -88,6 +105,7 @@ let runAnalysis ~cmtRoot ~ppf =
 
   processCmtFiles ~cmtRoot;
   if runConfig.dce then (
+    DeadValue.forceDelayedItems ();
     DeadException.forceDelayedItems ();
     DeadOptionalArgs.forceDelayedItems ();
     DeadCommon.reportDead ~checkOptionalArg:DeadOptionalArgs.check ppf;

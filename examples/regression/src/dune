@@ -1,10 +1,22 @@
 (library
  (name regression_fixture)
  (modules
+  Cross_alias
+  Cross_alias_use
+  Cross_c
+  Cross_include
   Functor_argument
   Generated_source
+  Higher_order
+  Included_sig
   Live_ancestors
   Local_side_effects
   Main
-  Ocaml_compiler_compat)
+  Nested_module_type
+  Ocaml_compiler_compat
+  Shared_signature
+  Shared_signature_arg
+  Shared_signature_unused
+  Shared_signature_use
+  Shared_signature_used)
  (flags :standard -w -27-32-34-37-39 -bin-annot))
