@@ -18,3 +18,11 @@ module Mk_cross (A : Shared_signature.S) : Shared_signature.O = struct
 end
 
 module Mk_cross_alias = Mk_cross
+
+(* A functor packed as a first-class module, unpacked and applied from
+   another file. *)
+module Impl_cross_fc (M : Shared_signature.O) = struct
+  let run () = M.g ~x:1 ()
+end
+
+let packed_cross = (module Impl_cross_fc : Higher_order.Opt_functor)

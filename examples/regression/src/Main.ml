@@ -46,4 +46,8 @@ let () =
   Shared_signature_arg.run_app ();
   Cross_alias_use.run_unit ();
   Shared_signature_arg.run_app2 ();
-  Cross_alias_use.run_alias_app ()
+  Cross_alias_use.run_alias_app ();
+  Higher_order.run ();
+  Higher_order.run_id ();
+  Higher_order.run_esc ();
+  Cross_alias_use.run_fc ()
