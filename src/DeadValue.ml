@@ -365,6 +365,30 @@ let addValueReferenceOrRedirect ~(locFrom : Location.t) ~(locTo : Location.t)
      nonForwardableReferences := PosPairSet.remove pair !nonForwardableReferences);
   addRedirect ~locFrom ~locTo ~locToImpl
 
+(* The shape of a module expression used as a functor argument: a module
+   path's, or that of an application ([Use (Make (A))]), built from the
+   functor's and the argument's as the compiler does. *)
+let rec moduleShapeOfExpr (moduleExpr : Typedtree.module_expr) =
+  match moduleExpr.mod_desc with
+  | Tmod_ident (path, _)
+    when Compat.shapeResolutionAvailable && isFunctorParameterPath path ->
+    Some Compat.parameterShape
+  | Tmod_ident (path, lid) ->
+    !identResolutions.moduleShape lid.loc (Path.last path)
+  | Tmod_constraint (inner, _, _, _) -> moduleShapeOfExpr inner
+  | Tmod_apply (functorExpr, argumentExpr, _) -> (
+    match (moduleShapeOfExpr functorExpr, moduleShapeOfExpr argumentExpr) with
+    | Some functorShape, Some argumentShape ->
+      Some (Compat.applyShape functorShape argumentShape)
+    | _ -> None)
+#if OCAML_VERSION >= (5, 1, 0)
+  | Tmod_apply_unit functorExpr -> (
+    match moduleShapeOfExpr functorExpr with
+    | Some functorShape -> Some (Compat.applyUnitShape functorShape)
+    | None -> None)
+#endif
+  | _ -> None
+
 (* The key of the functor a module expression denotes, and the number of
    arguments already consumed by partial applications it stands for, as in
    [module G = F (A)] followed by [G (B)]. Aliases ([module G = F]) are
@@ -375,6 +399,13 @@ let rec functorKeyOfHead (e : Typedtree.module_expr) =
       match functorKeyOfHead functorExpr with
       | Some (key, consumed) -> Some (key, consumed + 1)
       | None -> None)
+#if OCAML_VERSION >= (5, 1, 0)
+    | Tmod_apply_unit functorExpr -> (
+      (* [F ()]: the unit parameter occupies an index. *)
+      match functorKeyOfHead functorExpr with
+      | Some (key, consumed) -> Some (key, consumed + 1)
+      | None -> None)
+#endif
     | Tmod_constraint (inner, _, _, _) -> functorKeyOfHead inner
     | Tmod_functor _ ->
       (* Inline functor: keyed by its own position, see [functorKeys]. *)
@@ -657,6 +688,25 @@ and moduleTypeViaParameter ~visited (path : Path.t) =
 let expandedSignature (moduleType : Types.module_type) =
   moduleType |> expandModuleType |> getSignature
 
+(* The location of a value in a module type, by path of names. *)
+let rec findValueInModuleType (moduleType : Types.module_type) components =
+  let signature = moduleType |> expandedSignature in
+  match components with
+  | [] -> None
+  | [name] -> (
+    match signature |> findSignatureItem name with
+    | Some (Types.Sig_value _ as item) ->
+      let _id, loc, _kind, _valType = item |> Compat.getSigValue in
+      if loc.loc_ghost then None else Some loc
+    | _ -> None)
+  | m :: rest -> (
+    match signature |> findSignatureItem m with
+    | Some (Types.Sig_module _ as item) -> (
+      match item |> Compat.getSigModuleModtype with
+      | Some (_id, moduleType, _loc) -> findValueInModuleType moduleType rest
+      | None -> None)
+    | _ -> None)
+
 let rec iterAllModuleValues ~path (moduleType : Types.module_type) f =
   moduleType |> expandedSignature
   |> List.iter (fun (signatureItem : Types.signature_item) ->
@@ -700,7 +750,8 @@ let rec iterCoercedValues ~path ~coercion ~actualType f =
 (* Reference the values a functor argument's coercion uses. [shape], when
    known, is the argument module's shape: items are then redirected to their
    implementation rather than to a shared module type item. *)
-let addCoercedModuleValueReferences ~locFrom ~coercion ?shape ~actualType () =
+let addCoercedModuleValueReferences ~locFrom ~coercion ?shape ?concrete
+    ~actualType () =
   (match (expandedSignature actualType, shape) with
   | [], Some shape ->
     (* The argument's signature could not be expanded (a module type this
@@ -727,6 +778,12 @@ let addCoercedModuleValueReferences ~locFrom ~coercion ?shape ~actualType () =
           match itemShape with
           | Some shape -> resolutions.projValue shape (Ident.name id)
           | None -> None
+        in
+        let locToImpl =
+          match (locToImpl, concrete) with
+          | None, Some concrete ->
+            findValueInModuleType concrete (path @ [Ident.name id])
+          | _ -> locToImpl
         in
         addRedirect ~locFrom ~locTo ~locToImpl)
 
@@ -851,22 +908,45 @@ let rec argumentModuleType (argumentExpr : Typedtree.module_expr) =
   | Tmod_constraint (inner, _, _, _), Mty_ident _ -> argumentModuleType inner
   | _ -> expand argumentExpr.mod_type
 
-(* When a constrained argument's module type cannot be expanded (its unit is
-   outside the analysis root), the type of the module under the constraints
-   is the fallback: it is concrete, so it exposes items. The coercion
-   computed against the constraint does not apply to it, so callers
-   reference all of its values. *)
-let concreteArgumentType (argumentExpr : Typedtree.module_expr) =
-  let rec innermost (e : Typedtree.module_expr) =
+(* A more concrete type of an argument than its own, when the expression
+   shows one: the type of the module under [( _ : S )] constraints, and for an
+   application of an inline functor, the type of the functor's body. Its
+   items are the same runtime fields as the argument's, so a value the
+   argument's signature only names (a shared module type item) is found there
+   by name; when the argument's own type cannot be expanded at all (a module
+   type outside the analysis root), callers reference all of its values. *)
+let rec concreteArgumentType (argumentExpr : Typedtree.module_expr) =
+  (* The body of an inline functor at the head of an application chain. *)
+  let rec appliedBody (e : Typedtree.module_expr) applied =
     match e.mod_desc with
-    | Tmod_constraint (inner, _, _, _) -> innermost inner
-    | _ -> e
+    | Tmod_constraint (inner, _, _, _) -> appliedBody inner applied
+    | Tmod_apply (functorExpr, _, _) -> appliedBody functorExpr (applied + 1)
+#if OCAML_VERSION >= (5, 1, 0)
+    | Tmod_apply_unit functorExpr -> appliedBody functorExpr (applied + 1)
+#endif
+    | Tmod_functor (_, body) when applied > 0 -> appliedBody body (applied - 1)
+    | Tmod_functor _ | Tmod_ident _ -> None
+    | _ when applied = 0 -> Some e
+    | _ -> None
   in
-  let inner = innermost argumentExpr in
-  if inner == argumentExpr then None
-  else
-    let moduleType = expandModuleType inner.mod_type in
-    match getSignature moduleType with [] -> None | _ -> Some moduleType
+  let concrete (inner : Typedtree.module_expr) =
+    match concreteArgumentType inner with
+    | Some moduleType -> Some moduleType
+    | None -> (
+      let moduleType = expandModuleType inner.mod_type in
+      match getSignature moduleType with [] -> None | _ -> Some moduleType)
+  in
+  match argumentExpr.mod_desc with
+  | Tmod_constraint (inner, _, _, _) -> concrete inner
+  | Tmod_apply _
+#if OCAML_VERSION >= (5, 1, 0)
+  | Tmod_apply_unit _
+#endif
+    -> (
+    match appliedBody argumentExpr 0 with
+    | Some body -> concrete body
+    | None -> None)
+  | _ -> None
 
 (* Implementation of a value of an actual functor argument, by path. *)
 let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
@@ -878,11 +958,7 @@ let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
       ViaParameter (p.functorDef, p.paramIndex, p.prefix @ components)
     | _ -> Direct (fun _ -> None))
   | _ ->
-  let shape =
-    match moduleIdent argumentExpr with
-    | Some (path, lid) -> !identResolutions.moduleShape lid.loc (Path.last path)
-    | None -> None
-  in
+  let shape = moduleShapeOfExpr argumentExpr in
   let resolutions = !identResolutions in
   let rec viaShape shape components =
     match components with
@@ -893,38 +969,30 @@ let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
       | Some shape -> viaShape shape rest
       | None -> None)
   in
-  let rec viaSignature (moduleType : Types.module_type) components =
-    let signature = moduleType |> expandedSignature in
-    match components with
-    | [] -> None
-    | [name] -> (
-      match signature |> findSignatureItem name with
-      | Some (Types.Sig_value _ as item) ->
-        let _id, loc, _kind, _valType = item |> Compat.getSigValue in
-        if loc.loc_ghost then None else Some loc
-      | _ -> None)
-    | m :: rest -> (
-      match signature |> findSignatureItem m with
-      | Some (Types.Sig_module _ as item) -> (
-        match item |> Compat.getSigModuleModtype with
-        | Some (_id, moduleType, _loc) -> viaSignature moduleType rest
-        | None -> None)
-      | _ -> None)
-  in
-  let moduleType =
-    let declared = argumentModuleType argumentExpr in
-    match (expandedSignature declared, concreteArgumentType argumentExpr) with
-    | [], Some concrete -> concrete
-    | _ -> declared
+  let declared = argumentModuleType argumentExpr in
+  let concrete = concreteArgumentType argumentExpr in
+  (* By shape, then by name in the concrete type, then in the declared
+     one (a shared module type item, forwarded to its implementations). *)
+  let firstSome resolvers components =
+    resolvers
+    |> List.fold_left
+         (fun acc resolve ->
+           match acc with Some _ -> acc | None -> resolve components)
+         None
   in
   Direct
-    (fun components ->
-      match shape with
-      | Some shape -> (
-        match viaShape shape components with
-        | Some loc -> Some loc
-        | None -> viaSignature moduleType components)
-      | None -> viaSignature moduleType components)
+    (firstSome
+       [
+         (fun components ->
+           match shape with
+           | Some shape -> viaShape shape components
+           | None -> None);
+         (fun components ->
+           match concrete with
+           | Some concrete -> findValueInModuleType concrete components
+           | None -> None);
+         findValueInModuleType declared;
+       ])
 
 (* Applications already recorded as part of an outer curried application,
    by node identity (a ppx may emit distinct applications at one position). *)
@@ -935,12 +1003,18 @@ let recordedApplications : Typedtree.module_expr list ref = ref []
    parameter to the corresponding argument. *)
 let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
   if not (List.memq moduleExpr !recordedApplications) then
-    (* The arguments of this application chain, and its head. *)
+    (* The arguments of this application chain, in order, and its head. A
+       unit application ([F ()]) consumes an index without an argument. *)
     let rec flatten (e : Typedtree.module_expr) args =
       match e.mod_desc with
       | Tmod_apply (functorExpr, argumentExpr, _) ->
         recordedApplications := e :: !recordedApplications;
-        flatten functorExpr (argumentExpr :: args)
+        flatten functorExpr (Some argumentExpr :: args)
+#if OCAML_VERSION >= (5, 1, 0)
+      | Tmod_apply_unit functorExpr ->
+        recordedApplications := e :: !recordedApplications;
+        flatten functorExpr (None :: args)
+#endif
       | Tmod_constraint (inner, _, _, _) -> flatten inner args
       | _ -> (e, args)
     in
@@ -958,13 +1032,16 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
     | Some (key, consumed) ->
       args
       |> List.iteri (fun i argumentExpr ->
-             delayedApplications :=
-               {
-                 appliedFunctor = key;
-                 argIndex = consumed + i;
-                 resolver = argumentItemResolver argumentExpr;
-               }
-               :: !delayedApplications)
+             match argumentExpr with
+             | Some argumentExpr ->
+               delayedApplications :=
+                 {
+                   appliedFunctor = key;
+                   argIndex = consumed + i;
+                   resolver = argumentItemResolver argumentExpr;
+                 }
+                 :: !delayedApplications
+             | None -> ())
     | None -> ()
 
 (* Traverse the AST *)
@@ -1022,12 +1099,7 @@ let traverseStructure ~doTypes ~doExternals =
          module path, its shape lets the references target that module's
          implementation rather than a shared module type item. *)
       let ident = moduleIdent argumentExpr in
-      let shape =
-        match ident with
-        | Some (path, lid) ->
-          !identResolutions.moduleShape lid.loc (Path.last path)
-        | None -> None
-      in
+      let shape = moduleShapeOfExpr argumentExpr in
       (* A constraint node [(M : S)] can carry a ghost location, which would
          drop the references: use the module path's own location then. *)
       let locFrom =
@@ -1036,13 +1108,13 @@ let traverseStructure ~doTypes ~doExternals =
         | _ when not argumentExpr.mod_loc.loc_ghost -> argumentExpr.mod_loc
         | _ -> moduleExpr.mod_loc
       in
+      let concrete = concreteArgumentType argumentExpr in
       let actualType, coercion =
         let declared = argumentModuleType argumentExpr in
-        match (expandedSignature declared, concreteArgumentType argumentExpr) with
+        match (expandedSignature declared, concrete) with
         | [], Some concrete -> (concrete, Typedtree.Tcoerce_none)
         | _ -> (declared, coercion)
       in
-      let actualType = actualType in
       if !Common.Cli.debug then
         Log_.item "functorArgument %s coercion:%s type:%s items:%d@."
           (argumentExpr.mod_loc.loc_start |> posToString)
@@ -1072,9 +1144,12 @@ let traverseStructure ~doTypes ~doExternals =
       | Some (p, components) ->
         recordParameterCoercion ~locFrom ~coercion ~actualType p components
       | None ->
-        addCoercedModuleValueReferences ~locFrom ~coercion ?shape ~actualType
-          ());
+        addCoercedModuleValueReferences ~locFrom ~coercion ?shape ?concrete
+          ~actualType ());
       recordFunctorApplication moduleExpr
+#if OCAML_VERSION >= (5, 1, 0)
+    | Tmod_apply_unit _ -> recordFunctorApplication moduleExpr
+#endif
     | _ -> ());
     let r = super.Tast_mapper.module_expr self moduleExpr in
     functorParameters := oldFunctorParameters;
@@ -1128,7 +1203,12 @@ let traverseStructure ~doTypes ~doExternals =
         |> List.fold_left
              (fun changed (mb : Typedtree.module_binding) ->
                match (mb.mb_id, (unwrapConstraints mb.mb_expr).mod_desc) with
-               | Some id, (Tmod_apply _ | Tmod_ident _) -> (
+               | ( Some id,
+                   ( Tmod_apply _ | Tmod_ident _
+#if OCAML_VERSION >= (5, 1, 0)
+                   | Tmod_apply_unit _
+#endif
+                     ) ) -> (
                  match functorKeyOfHead mb.mb_expr with
                  | Some key when List.assq_opt id !functorsByIdent <> Some key ->
                    functorsByIdent :=

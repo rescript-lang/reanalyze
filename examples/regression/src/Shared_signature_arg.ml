@@ -859,3 +859,178 @@ let run_letc () =
   A.run ()
 
 let run_constrained () = ignore (Applied_recc.run () + run_letc ())
+
+(* Generative functors: a unit application in an application chain, first,
+   in the middle, last, partially applied, in a recursive binding and in a
+   let-module. [Opt_unit_none] is never applied and keeps its never-used
+   argument. *)
+module Opt_unit_first : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_unit_mid : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_unit_last : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_unit_partial : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_unit_end : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_unit_rec : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_unit_let : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Opt_unit_none : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module F_unit () (M : Shared_signature.O) = struct
+  let run () = M.g ~x:1 ()
+end
+
+module Applied_unit = F_unit () (Opt_unit_first)
+
+module F_unit_mid (M : Shared_signature.O) () (N : Shared_signature.O) = struct
+  let run () = M.g ~x:1 () + N.g ~x:1 ()
+end
+
+module Applied_unit_mid = F_unit_mid (Opt_unit_mid) () (Opt_unit_last)
+module F_unit_partial = F_unit ()
+module Applied_unit_partial = F_unit_partial (Opt_unit_partial)
+
+module F_unit_end (M : Shared_signature.O) () = struct
+  let run () = M.g ~x:1 ()
+end
+
+module Applied_unit_end = F_unit_end (Opt_unit_end) ()
+module rec G_u : Opt_functor = F_unit ()
+module Applied_unit_rec = G_u (Opt_unit_rec)
+
+let run_unit_let () =
+  let module A = F_unit () (Opt_unit_let) in
+  A.run ()
+
+let run_unit () =
+  ignore
+    (Applied_unit.run () + Applied_unit_mid.run ()
+   + Applied_unit_partial.run () + Applied_unit_end.run ()
+   + Applied_unit_rec.run () + run_unit_let () + Opt_unit_none.g ())
+
+(* Arguments that are themselves applications: the result shape of the inner
+   application locates the values in the applied functor's body. Directly,
+   under a constraint, curried, nested, generative, through an alias of the
+   functor, and with a parameter as the inner argument. [Mk_o_none] is
+   applied but its result is never passed on. *)
+module Mk_s (A : Shared_signature.S) : Shared_signature.S = struct
+  let f () = A.f () + 1
+end
+
+module Mk_o (A : Shared_signature.S) : Shared_signature.O = struct
+  let g ?(x = 0) () = x + A.f ()
+end
+
+module Mk_o_c (A : Shared_signature.S) : Shared_signature.O = struct
+  let g ?(x = 0) () = x + A.f ()
+end
+
+module Mk_o2 (A : Shared_signature.S) (B : Shared_signature.S) :
+  Shared_signature.O = struct
+  let g ?(x = 0) () = x + A.f () + B.f ()
+end
+
+module Mk_o_n (A : Shared_signature.S) : Shared_signature.O = struct
+  let g ?(x = 0) () = x + A.f ()
+end
+
+module Mk_o_unit () : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Mk_o_a (A : Shared_signature.S) : Shared_signature.O = struct
+  let g ?(x = 0) () = x + A.f ()
+end
+
+module Mk_o_p (A : Shared_signature.S) : Shared_signature.O = struct
+  let g ?(x = 0) () = x + A.f ()
+end
+
+module Mk_o_none (A : Shared_signature.S) : Shared_signature.O = struct
+  let g ?(x = 0) () = x + A.f ()
+end
+
+module Mk_alias = Mk_o_a
+
+module Use_o (M : Shared_signature.O) = struct
+  let run () = M.g ~x:1 ()
+end
+
+module Applied_appl = Use_o (Mk_o (Chosen))
+module Applied_app_c = Use_o ((Mk_o_c (Chosen) : Shared_signature.O))
+module Applied_app2 = Use_o (Mk_o2 (Chosen) (Chosen))
+module Applied_app_n = Use_o (Mk_o_n (Mk_s (Chosen)))
+module Applied_app_unit = Use_o (Mk_o_unit ())
+module Applied_app_alias = Use_o (Mk_alias (Chosen))
+
+module Via_param (P : Shared_signature.S) = struct
+  module A = Use_o (Mk_o_p (P))
+
+  let run () = A.run ()
+end
+
+module Applied_via_param = Via_param (Chosen)
+module Applied_none = Mk_o_none (Chosen)
+
+module Applied_app_inline =
+  Use_o
+    ((functor (A : Shared_signature.S) ->
+       (struct
+         let g ?(x = 0) () = x + A.f ()
+       end : Shared_signature.O))
+       (Chosen))
+
+let run_app () =
+  ignore
+    (Applied_appl.run () + Applied_app_c.run () + Applied_app2.run ()
+   + Applied_app_n.run () + Applied_app_unit.run ()
+   + Applied_app_alias.run () + Applied_via_param.run ()
+   + Applied_none.g () + Applied_app_inline.run ())
+
+(* A constrained inline structure as argument, and an applied functor that
+   re-exports its argument. [Fwd_unused] is never passed and stays dead. *)
+module Fwd_used : Shared_signature.S = struct
+  let f () = 60
+end
+
+module Fwd_unused : Shared_signature.S = struct
+  let f () = 61
+end
+
+module Mk_fwd (A : Shared_signature.S) : Shared_signature.S = struct
+  include A
+end
+
+module Use_s (M : Shared_signature.S) = struct
+  let run () = M.f ()
+end
+
+module Applied_fwd = Use_s (Mk_fwd (Fwd_used))
+
+module Applied_struct =
+  Use_o
+    ((struct
+       let g ?(x = 0) () = x
+     end : Shared_signature.O))
+
+let run_app2 () = ignore (Applied_fwd.run () + Applied_struct.run ())
