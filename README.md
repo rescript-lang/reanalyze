@@ -1,5 +1,5 @@
 > [!WARNING]
-> This repository is only for keeping OCaml compatibility with an old version of reanalyze. It is further developed in the [rescript](https://github.com/rescript-lang/rescript/tree/master/analysis/reanalyze) monorepo.
+> This repository contains the OCaml version of reanalyze. The ReScript version is being developed inside the [rescript](https://github.com/rescript-lang/rescript/tree/master/analysis/reanalyze) monorepo.
 
 # reanalyze
 
