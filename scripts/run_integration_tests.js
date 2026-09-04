@@ -101,6 +101,9 @@ function runRegressionTests() {
     {
       cwd,
       encoding: "utf8",
+      // The debug output lists every reference; before OCaml 5.3 references
+      // through module type items fan out to every implementation.
+      maxBuffer: 256 * 1024 * 1024,
     }
   );
 
@@ -137,6 +140,10 @@ function runRegressionTests() {
   assertIncludes(output, "Live Value +Shared_signature_arg.Mk_o.+g");
   assertIncludes(output, "Live Value +Shared_signature_arg.Fwd_used.+f");
   assertIncludes(output, "Live Value +Shared_signature_arg.Applied_struct.+g");
+  assertIncludes(output, "Live Value +Higher_order.Opt_ho.+g");
+  assertIncludes(output, "Live Value +Higher_order.Opt_fc.+g");
+  assertIncludes(output, "Live Value +Higher_order.P_esc.+h");
+  assertIncludes(output, "Live Value +Higher_order.Id_used.+f");
   assertNotIncludes(output, "Dead Value +Shared_signature_arg.Chosen2.+f");
   assertNotIncludes(output, "Dead Value +Shared_signature_arg.Opt_constrained.+g");
   // Precise attribution through a shared named module type relies on shape
@@ -430,6 +437,53 @@ function runRegressionTests() {
     // used, another implementation of the module type stays dead.
     assertIncludes(output, "Live Value +Shared_signature_arg.Fwd_used.+f");
     assertIncludes(output, "Dead Value +Shared_signature_arg.Fwd_unused.+f");
+    // Higher-order functors: a functor passed as an argument and applied in
+    // the body, to a parameter, a fixed module, a submodule of a parameter,
+    // through an alias of the functor parameter, in an include, partially
+    // applied beforehand, through two levels; and first-class modules as
+    // head and as argument, in the same file and from another file. Each
+    // call is credited to the argument of the same application only.
+    for (const name of [
+      "Opt_ho",
+      "Opt_fixed",
+      "Opt_sub_holder.Sub",
+      "Opt_alias_ho",
+      "Opt_incl_ho",
+      "Opt_partial_ho",
+      "Opt_2",
+      "Opt_fc",
+      "Opt_fca",
+      "Opt_cross_fc",
+      "Opt_id",
+    ]) {
+      assertIncludes(
+        output,
+        `optional argument x of function ${name}.+g is always supplied (1 calls)`
+      );
+    }
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_twice.+g is always supplied (2 calls)"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_none_ho.+g is never used"
+    );
+    // Inline functors returning (a submodule of) their parameter, or a
+    // functor applied to it: the argument flows on; an unrelated
+    // implementation stays dead.
+    assertIncludes(output, "Live Value +Higher_order.Id_used.+f");
+    assertIncludes(output, "Live Value +Higher_order.Id_sub_holder.Sub.+f");
+    assertIncludes(output, "Live Value +Higher_order.Id_app.+f");
+    assertIncludes(output, "Live Value +Higher_order.Id_curried.+f");
+    assertIncludes(output, "Dead Value +Higher_order.Id_unused.+f");
+    // A functor escaping as a first-class module passed to a function: its
+    // calls are forwarded conservatively, never dropped.
+    assertIncludes(
+      output,
+      "optional argument y of function P_esc.+h is always supplied"
+    );
+    assertNotIncludes(output, "P_esc.+h is never used");
   }
 
   assertNotIncludes(output, "Parent is a dead module");

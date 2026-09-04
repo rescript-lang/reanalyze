@@ -597,6 +597,9 @@ type identResolutions = {
     (Location.t * Typedtree.module_expr * identResolutions option * int) option;
       (** the binding a module path denotes, structurally, with the resolver
           of its unit and the number of functor layers the path applied *)
+  headKeyOfPath : Path.t -> (Location.t * int) option;
+      (** the binding name location of the functor a module path denotes,
+          found structurally, and the arguments consumed *)
   headKey :
     headVisited -> Typedtree.module_expr -> (Location.t * int) option;
       (** visited bindings (start with [noHeadVisited]), module expression ->
@@ -621,6 +624,7 @@ let emptyIdentResolutions =
     moduleTypeOfPath = (fun _ -> None);
     shapeValueItems = (fun _ -> []);
     bindingOfPath = (fun _ -> None);
+    headKeyOfPath = (fun _ -> None);
     headKey = (fun _ _ -> None);
     expandModuleType = (fun mt -> mt);
   }
@@ -807,6 +811,7 @@ let rec makeResolver ~cmtFilePath
     | None -> None
   in
   let selfRef = ref emptyIdentResolutions in
+  let headKeyOfPathRef = ref (fun (_ : Path.t) -> (None : (Location.t * int) option)) in
   let moduleTypeOfPathRef = ref (fun (_ : Path.t) -> (None : Types.module_type option)) in
   let bindingOfUid =
     moduleBindingOfUid ~currentCmtFile:cmtFilePath ~imports ~local
@@ -995,6 +1000,7 @@ let rec makeResolver ~cmtFilePath
        in
        fun shape -> items [] shape []);
     bindingOfPath = (fun path -> bindingOfPath path);
+    headKeyOfPath = (fun path -> !headKeyOfPathRef path);
     headKey =
       (let rec unwrap (e : Typedtree.module_expr) =
          match e.mod_desc with
@@ -1016,8 +1022,20 @@ let rec makeResolver ~cmtFilePath
                | Some head -> Some head
                | None -> Some (loc, 0))
              | None -> Some (loc, 0))
+           | Tmod_unpack _ ->
+             (* A first-class module: the functor it holds is not known
+                here. *)
+             None
            | _ -> Some (loc, 0)
        in
+       headKeyOfPathRef :=
+         (fun path ->
+           match bindingOfPath path with
+           | Some (loc, definition, resolver, applied) -> (
+             match keyOfBinding [] loc definition resolver with
+             | Some (loc, consumed) -> Some (loc, consumed + applied)
+             | None -> None)
+           | None -> None);
        let rec headKey (visited : headVisited) (e : Typedtree.module_expr) =
          match e.mod_desc with
          | Tmod_apply (functorExpr, _, _) | Tmod_apply_unit functorExpr -> (

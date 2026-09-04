@@ -57,3 +57,12 @@ module Applied_app_cross_alias =
     (Cross_alias.Mk_cross_alias (Shared_signature_arg.Chosen))
 
 let run_alias_app () = ignore (Applied_app_cross_alias.run ())
+
+module Opt_cross_fc : Shared_signature.O = struct
+  let g ?(x = 0) () = x
+end
+
+module Applied_cross_fc =
+  (val Cross_alias.packed_cross : Higher_order.Opt_functor) (Opt_cross_fc)
+
+let run_fc () = ignore (Applied_cross_fc.run ())

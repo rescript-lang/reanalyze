@@ -7,6 +7,7 @@
   Cross_include
   Functor_argument
   Generated_source
+  Higher_order
   Included_sig
   Live_ancestors
   Local_side_effects
