@@ -2,5 +2,5 @@
  (name dup_b)
  (wrapped false)
  (modes byte)
- (modules Dup_sig Dup_b_impl Dup_b_use)
+ (modules Dup_sig Dup_shape Dup_b_impl Dup_b_use)
  (flags :standard -w -27-32-34-37-39 -bin-annot))

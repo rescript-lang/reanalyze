@@ -560,6 +560,14 @@ function runRegressionTests() {
 
   assertNotIncludes(dupOutput, "Dead Value +Dup_a_impl.Make.+f");
   assertNotIncludes(dupOutput, "Dead Value +Dup_b_impl.Make.+g");
+  if (ocamlVersionAtLeast(5, 3)) {
+    // The matching .cmti supplies the digest, while the sibling .cmt
+    // supplies the shape needed to distinguish implementations of Dup_sig.S.
+    assertIncludes(dupOutput, "Live Value +Dup_shape.A_chosen.+f");
+    assertNotIncludes(dupOutput, "Live Value +Dup_shape.A_unused.+f");
+    assertIncludes(dupOutput, "Dead Value +Dup_shape.A_unused.+f");
+    assertIncludes(dupOutput, "Dead Value +Dup_shape.B_unused.+f");
+  }
 }
 
 // A broad root may hold copies of the same compiled unit (a library's

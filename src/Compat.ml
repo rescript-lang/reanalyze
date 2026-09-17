@@ -354,6 +354,24 @@ type unitInfo = {
 let unitInfoCache : (string list * string option, unitInfo) Hashtbl.t =
   Hashtbl.create 64
 
+(* An implementation compiled against an interface gets its digest from
+   the sibling .cmti. Retain both files of every matching unit, for shapes
+   as well as declaration dependencies; without a match stay conservative. *)
+let selectUnitFilesByDigest ~interfaceDigest digest files =
+  match digest with
+  | None -> files
+  | Some digest ->
+    let stem = Filename.remove_extension in
+    let matchingStems =
+      files |> List.map stem |> List.sort_uniq compare
+      |> List.filter (fun base ->
+             [".cmt"; ".cmti"]
+             |> List.exists (fun ext -> interfaceDigest (base ^ ext) = Some digest))
+    in
+    match matchingStems with
+    | [] -> files
+    | _ -> List.filter (fun path -> List.mem (stem path) matchingStems) files
+
 let candidateFilesForUnit ~currentCmtFile comp_unit =
   let dir = Filename.dirname currentCmtFile in
   let indexed =
@@ -403,21 +421,17 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
         try Some (path, Cmt_format.read_cmt path) with _ -> None
       in
       let loaded = files |> List.filter_map read in
-      let dirs =
-        loaded |> List.map (fun (p, _) -> Filename.dirname p)
-        |> List.sort_uniq compare
+      let interfaceDigest path =
+        match List.assoc_opt path loaded with
+        | Some infos -> infos.Cmt_format.cmt_interface_digest
+        | None -> (
+          match read path with
+          | Some (_, infos) -> infos.Cmt_format.cmt_interface_digest
+          | None -> None)
       in
+      let selected = selectUnitFilesByDigest ~interfaceDigest digest files in
       let loaded =
-        match (dirs, digest) with
-        | _ :: _ :: _, Some digest -> (
-          match
-            loaded
-            |> List.filter (fun (_, (cmt_infos : Cmt_format.cmt_infos)) ->
-                   cmt_infos.cmt_interface_digest = Some digest)
-          with
-          | [] -> loaded
-          | matching -> matching)
-        | _ -> loaded
+        loaded |> List.filter (fun (path, _) -> List.mem path selected)
       in
       (* Copies of one compiled source (e.g. a library's objects and its
          _build/install copy, or byte and native objects) are one unit: keep
@@ -587,25 +601,7 @@ let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
       | Some (Some digest) -> Some digest
       | _ -> None
     in
-    match digest with
-    | None -> files
-    | Some digest -> (
-      (* A .cmt compiled against an .mli carries no interface digest: the
-         digest is in the .cmti next to it. Group by stem so the whole unit
-         is kept when either file matches. *)
-      let stem path = Filename.remove_extension path in
-      let stems = files |> List.map stem |> List.sort_uniq compare in
-      let matching_stems =
-        stems
-        |> List.filter (fun stem ->
-               [".cmt"; ".cmti"]
-               |> List.exists (fun ext ->
-                      interface_digest_of_file (stem ^ ext) = Some digest))
-      in
-      match matching_stems with
-      | [] -> files
-      | _ -> files |> List.filter (fun path -> List.mem (stem path) matching_stems)
-      )
+    selectUnitFilesByDigest ~interfaceDigest:interface_digest_of_file digest files
   in
   let decls_of_unit comp_unit =
     match Hashtbl.find_opt loadedUnits comp_unit with
