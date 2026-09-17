@@ -338,10 +338,12 @@ let registerCmtFile path =
     Hashtbl.replace cmtFilesByUnit unit (path :: existing)
 
 #if OCAML_VERSION >= (5, 3, 0)
-(* Per compilation unit: the implementation shape (from the .cmt) and the
-   uid -> declaration table (merged from .cmt and .cmti). Loaded on demand. *)
+(* Per compilation unit: the implementation shape and structure (from the
+   .cmt), and the uid -> declaration table (merged from .cmt and .cmti).
+   Loaded on demand. *)
 type unitInfo = {
   shape : Shape.t option;
+  structure : Typedtree.structure option;
   uidToDecl : Typedtree.item_declaration Shape.Uid.Tbl.t;
   cmtPath : string;  (** the .cmt (or, failing that, the first file) loaded *)
   unitImports : Misc.crcs;
@@ -476,13 +478,20 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
                shape := cmt_infos.cmt_impl_shape;
                implementation := Some (path, cmt_infos)
              | _ -> ());
-      let cmtPath, unitImports, occurrences =
+      let cmtPath, unitImports, occurrences, structure =
         match (!implementation, loaded) with
         | Some (path, cmt_infos), _ | None, (path, cmt_infos) :: _ ->
-          (path, cmt_infos.cmt_imports, cmt_infos.cmt_ident_occurrences)
-        | None, [] -> ("", [], [])
+          let structure =
+            match cmt_infos.cmt_annots with
+            | Implementation structure -> Some structure
+            | _ -> None
+          in
+          (path, cmt_infos.cmt_imports, cmt_infos.cmt_ident_occurrences, structure)
+        | None, [] -> ("", [], [], None)
       in
-      let info = {shape = !shape; uidToDecl; cmtPath; unitImports; occurrences} in
+      let info =
+        {shape = !shape; structure; uidToDecl; cmtPath; unitImports; occurrences}
+      in
       Hashtbl.replace unitInfoCache cacheKey info;
       Some info)
 
@@ -973,7 +982,27 @@ let rec makeResolver ~cmtFilePath
     | Some binding -> Some binding
     | None ->
     match path with
-    | Pident id when Ident.global id -> None
+    | Pident id when Ident.global id -> (
+      (* Unpacked modules have uid-less shapes. Keep the unit's structure
+         available so a projection can still find their actual binding. *)
+      let unitName = Ident.name id in
+      match loadUnitInfo ~currentCmtFile:cmtFilePath ~imports unitName with
+      | Some {structure = Some structure} ->
+        let definition : Typedtree.module_expr =
+          {
+            mod_desc = Tmod_structure structure;
+            mod_loc = Location.none;
+            mod_type = Types.Mty_signature structure.str_type;
+            mod_env = structure.str_final_env;
+            mod_attributes = [];
+          }
+        in
+        Some
+          ( Location.none,
+            definition,
+            resolverForUnit ~currentCmtFile:cmtFilePath ~imports unitName,
+            0 )
+      | _ -> None)
     | Pident id -> (
       let uid =
         localUid (function

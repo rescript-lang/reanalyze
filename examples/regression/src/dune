@@ -25,5 +25,8 @@
   Shared_signature_arg
   Shared_signature_unused
   Shared_signature_use
-  Shared_signature_used)
+  Shared_signature_used
+  Unpacked_functor
+  Unpacked_functor_use
+  Unpacked_include)
  (flags :standard -w -27-32-34-37-39 -bin-annot))

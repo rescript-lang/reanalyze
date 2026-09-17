@@ -553,6 +553,24 @@ function runRegressionTests() {
       output,
       "optional argument x of function Packed_arg.+g is always supplied (1 calls)"
     );
+    // A foreign unpacked functor (and its alias) has no shape uid. Resolve
+    // its packed binding precisely; an unpacked include escapes instead.
+    assertIncludes(
+      output,
+      "optional argument x of function Unpacked_arg.+g is always supplied (1 calls)"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Unpacked_unused.+g is never used"
+    );
+    assertIncludes(
+      output,
+      "optional argument included of function Unpacked_include_arg.+g is always supplied (1 calls)"
+    );
+    assertIncludes(
+      output,
+      "optional argument nested of function Unpacked_nested_arg.+g is always supplied (1 calls)"
+    );
     // Escaping holders also expose functors defined outside their lexical
     // range through module aliases and includes.
     for (const [name, argument] of [
@@ -653,6 +671,113 @@ function runDuplicateLayoutTest() {
   }
 }
 
+// Compile the same source as bytecode and native code, as Dune does: the
+// native compilation reuses the bytecode .cmi and records no interface digest.
+function runByteNativeDuplicateTest() {
+  const fs = require("fs");
+  const os = require("os");
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "reanalyze-native-"));
+  const source = path.join(
+    __dirname,
+    "..",
+    "examples",
+    "regression",
+    "duplicate_native",
+    "Duplicate_native.ml"
+  );
+  try {
+    for (const dir of ["byte", "native"]) fs.mkdirSync(path.join(cwd, dir));
+    child_process.execFileSync(
+      "ocamlc",
+      ["-bin-annot", "-c", "-o", "byte/Duplicate_native.cmo", source],
+      { cwd }
+    );
+    child_process.execFileSync(
+      "ocamlopt",
+      [
+        "-bin-annot", "-intf-suffix", ".ml", "-I", "byte", "-c",
+        "-o", "native/Duplicate_native.cmx", source,
+      ],
+      { cwd }
+    );
+    const run = (root) =>
+      child_process.execFileSync(
+        reanalyzeFile,
+        ["-ci", "-dce-cmt", root],
+        { cwd, encoding: "utf8" }
+      );
+    console.log(`${cwd}: reanalyze byte/native duplicate comparison`);
+    const single = run("byte");
+    assertIncludes(
+      single,
+      "optional argument x of function +g is always supplied (1 calls)"
+    );
+    if (single !== run(".")) {
+      throw new Error(
+        "Scanning byte and native artifacts changed optional-call counts"
+      );
+    }
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
+function runUnpackedScanOrderTest() {
+  if (!ocamlVersionAtLeast(5, 3)) return;
+  const fs = require("fs");
+  const os = require("os");
+  const cwd = path.join(__dirname, "..", "examples", "regression");
+  const cmtDir = path.join(cwd, "_build/default/src/.regression_fixture.objs/byte");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "reanalyze-unpack-order-"));
+  try {
+    for (const dir of ["first", "second"]) fs.mkdirSync(path.join(root, dir));
+    const files = fs.readdirSync(cmtDir).filter((file) => /\.cmti?$/.test(file));
+    const provider = "regression_fixture__Unpacked_functor.cmt";
+    const consumer = "regression_fixture__Unpacked_functor_use.cmt";
+    const orders = [];
+    console.log(`${cwd}: reanalyze unpacked functors in both scan orders`);
+    for (const providerDir of ["first", "second"]) {
+      const otherDir = providerDir === "first" ? "second" : "first";
+      for (const file of files) {
+        const dir = file === provider ? providerDir : otherDir;
+        fs.copyFileSync(path.join(cmtDir, file), path.join(root, dir, file));
+      }
+      const output = child_process.execFileSync(
+        reanalyzeFile,
+        ["-ci", "-debug", "-native-build-target", ".", "-dce-cmt", root],
+        { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 }
+      );
+      assertIncludes(output, `Scanning ${provider} `);
+      assertIncludes(output, `Scanning ${consumer} `);
+      orders.push(
+        output.indexOf(`Scanning ${provider} `) <
+          output.indexOf(`Scanning ${consumer} `)
+      );
+      assertIncludes(
+        output,
+        "optional argument x of function Unpacked_arg.+g is always supplied (1 calls)"
+      );
+      assertIncludes(
+        output,
+        "optional argument x of function Unpacked_unused.+g is never used"
+      );
+      assertIncludes(
+        output,
+        "optional argument nested of function Unpacked_nested_arg.+g is always supplied (1 calls)"
+      );
+      for (const file of files) {
+        const dir = file === provider ? providerDir : otherDir;
+        fs.unlinkSync(path.join(root, dir, file));
+      }
+    }
+    if (orders[0] === orders[1]) {
+      throw new Error("Scan-order test did not reverse the unit order");
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function checkSetup() {
   console.log("Checking if --version outputs the right version");
   let output;
@@ -686,6 +811,8 @@ function main() {
     cleanBuildExamples();
     runRegressionTests();
     runDuplicateLayoutTest();
+    runByteNativeDuplicateTest();
+    runUnpackedScanOrderTest();
     checkDiff();
 
     console.log("Test successful!");

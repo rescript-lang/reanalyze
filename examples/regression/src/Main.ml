@@ -58,4 +58,6 @@ let () =
   Reference_order.run ();
   Higher_order_fixpoint.run ();
   Packed_interface_use.run ();
-  Escape_exports.run ()
+  Escape_exports.run ();
+  Unpacked_functor_use.run ();
+  Unpacked_include.run ()

@@ -10,7 +10,7 @@ let loadCmtFile ~cmtRoot cmtFilePath =
   let unitKey =
     ( cmt_infos.cmt_sourcefile,
       cmt_infos.cmt_builddir,
-      cmt_infos.cmt_interface_digest,
+      cmt_infos.cmt_source_digest,
       Filename.check_suffix cmtFilePath ".cmti" )
   in
   if Hashtbl.mem scannedUnits unitKey then ()

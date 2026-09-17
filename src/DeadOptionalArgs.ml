@@ -7,10 +7,6 @@ type item = {
   posTo : Lexing.position;
   posToImpl : Lexing.position option;
       (** Shape-resolved implementation, used when [posTo] is not a declaration. *)
-  forwardable : bool;
-      (** Whether the call may be attributed to the implementations of a module
-          type item. False for calls through a functor parameter, which are
-          credited at application sites. *)
   argNames : string list;
   argNamesMaybe : string list;
 }
@@ -53,14 +49,14 @@ let rec fromTypeExpr (texpr : Types.type_expr) =
   | _ -> []
 
 let addReferences ~(locFrom : Location.t) ~(locTo : Location.t)
-    ?(locToImpl : Location.t option) ?(forwardable = true) ~path
+    ?(locToImpl : Location.t option) ~path
     (argNames, argNamesMaybe) =
   if active () then (
     let posTo = locTo.loc_start in
     let posToImpl = Option.map (fun (l : Location.t) -> l.loc_start) locToImpl in
     let posFrom = locFrom.loc_start in
     delayedItems :=
-      {posTo; posToImpl; forwardable; argNames; argNamesMaybe} :: !delayedItems;
+      {posTo; posToImpl; argNames; argNamesMaybe} :: !delayedItems;
     if !Common.Cli.debug then
       Log_.item
         "DeadOptionalArgs.addReferences %s called with optional argNames:%s \
@@ -79,7 +75,7 @@ let addCallToImplementation ~(posTo : Lexing.position) (argNames, argNamesMaybe)
     =
   if active () then
     delayedItems :=
-      {posTo; posToImpl = None; forwardable = true; argNames; argNamesMaybe}
+      {posTo; posToImpl = None; argNames; argNamesMaybe}
       :: !delayedItems
 
 (* Once all declarations are known, calls whose target is not a declaration
@@ -101,7 +97,7 @@ let forwardDelayedItems ~(posFrom : Lexing.position) ~(posTo : Lexing.position)
   let forwarded =
     !delayedItems
     |> List.filter_map (fun item ->
-           if item.forwardable && item.posTo = posFrom then
+           if item.posTo = posFrom then
              Some {item with posTo}
            else None)
   in

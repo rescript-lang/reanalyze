@@ -114,9 +114,6 @@ type functorParameter = {
 
 let functorParameters : functorParameter list ref = ref []
 
-(* Name position of the module binding being traversed, see [Tstr_module]. *)
-let currentModuleBindingPos = ref Lexing.dummy_pos
-
 let findFunctorParameter (path : Path.t) =
   match Path.head path with
   | head -> List.find_opt (fun p -> Ident.same p.paramId head) !functorParameters
@@ -654,8 +651,7 @@ let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
        resolution it can only be forwarded to every implementation. *)
     if parameter = None || not Compat.shapeResolutionAvailable then
       call
-      |> DeadOptionalArgs.addReferences ~locFrom ~locTo ?locToImpl
-           ~forwardable:true ~path)
+      |> DeadOptionalArgs.addReferences ~locFrom ~locTo ?locToImpl ~path)
 
 (* Implementation locations of identifier occurrences resolved through
    shapes. See [Compat.resolveIdentOccurrences]. *)
@@ -888,6 +884,37 @@ and definitionRangeOfPath ?(visited = []) ?(resolutions = !identResolutions)
     bindingRange @ definitionRange ~visited ~resolutions definition
   | None -> []
 
+(* Unlike ordinary functor keys, an unpacked head refers to a value binding
+   whose pack may be registered later, in another unit or behind an .mli.
+   Chase aliases using each definition's own resolver, without depending on
+   traversal order or on the unpack's (possibly uid-less) shape. *)
+let packedHeadOfPath resolutions path =
+  let rec ofPath visited (resolutions : Compat.identResolutions) path consumed =
+    match resolutions.bindingOfPath path with
+    | Some (_, definition, resolver, applied) ->
+      let resolutions = Option.value resolver ~default:resolutions in
+      ofExpr visited resolutions definition (consumed + applied)
+    | None -> None
+  and ofExpr visited resolutions (e : Typedtree.module_expr) consumed =
+    if List.memq e visited then None
+    else
+      let visited = e :: visited in
+      match e.mod_desc with
+      | Tmod_constraint (inner, _, _, _) ->
+        ofExpr visited resolutions inner consumed
+      | Tmod_apply (inner, _, _) ->
+        ofExpr visited resolutions inner (consumed + 1)
+#if OCAML_VERSION >= (5, 1, 0)
+      | Tmod_apply_unit inner ->
+        ofExpr visited resolutions inner (consumed + 1)
+#endif
+      | Tmod_ident (path, _) -> ofPath visited resolutions path consumed
+      | Tmod_unpack (packed, _) ->
+        unpackedBinding packed |> Option.map (fun pos -> Packed (pos, consumed))
+      | _ -> None
+  in
+  ofPath [] resolutions path 0
+
 (* The functor a module expression applies, and the number of arguments
    already consumed by partial applications it stands for, as in
    [module G = F (A)] followed by [G (B)]. Aliases ([module G = F]) are
@@ -975,7 +1002,14 @@ and headOfPath ?lid (path : Path.t) components : functorHead option =
     | f :: rest -> (
       match f () with Some head -> Some head | None -> first rest)
   in
-  first [byParameter; byBinding; byIdent; byResolver]
+  first
+    [
+      byParameter;
+      byBinding;
+      byIdent;
+      (fun () -> packedHeadOfPath !identResolutions extended);
+      byResolver;
+    ]
 
 (* Register the head a module binding stands for, when its right-hand side
    is an alias, an application or an unpacking (see [headsByBinding]). *)
@@ -1723,10 +1757,13 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
             components
             |> List.fold_left (fun p name -> Path.Pdot (p, name)) path
           in
-          match resolutions.headKeyOfPath extended with
-          | Some ((loc : Location.t), consumed) ->
-            Some (Key (loc.loc_start, consumed))
-          | None -> None)
+          match packedHeadOfPath resolutions extended with
+          | Some head -> Some head
+          | None -> (
+            match resolutions.headKeyOfPath extended with
+            | Some ((loc : Location.t), consumed) ->
+              Some (Key (loc.loc_start, consumed))
+            | None -> None))
         | _, None, None -> None
     in
     match head with
@@ -1734,9 +1771,10 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
       (* The functors passed to an application whose head cannot be chased
          (a first-class module from elsewhere, a member of the result of an
          applied functor parameter) escape: their calls can only be
-         forwarded. So does what the head's root stands for, when it is a
-         parameter: [G.Inner (X)] with [module G = F (A)] applies a functor
-         nested in the argument passed for [F]. *)
+         forwarded. So does the nearest resolvable parent of the head:
+         [G.Inner (X)] with [module G = F (A)] applies a functor nested in
+         the argument passed for [F], while [Other.G.Inner (X)] may apply
+         one nested in a foreign unpacked module. *)
       args
       |> List.iter (fun argumentExpr ->
              match argumentExpr with
@@ -1746,15 +1784,17 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
                | Some head -> escapedHeads := head :: !escapedHeads
                | None -> ())
              | None -> ());
+      let rec escapeParent = function
+        | Path.Pdot (parent, _) -> (
+          match headOfPath parent [] with
+          | Some head ->
+            escapedHeads := head :: !escapedHeads;
+            escapedRanges := definitionRangeOfPath parent @ !escapedRanges
+          | None -> escapeParent parent)
+        | _ -> ()
+      in
       (match headExpr.mod_desc with
-      | Tmod_ident ((Pdot _ as path), _) -> (
-        match headOfPath (Pident (Path.head path)) [] with
-        | Some root ->
-          escapedHeads := root :: !escapedHeads;
-          escapedRanges :=
-            definitionRangeOfPath (Pident (Path.head path)) @ !escapedRanges
-        | None -> ()
-        | exception _ -> ())
+      | Tmod_ident (path, _) -> escapeParent path
       | _ -> ())
     | Some head ->
       let appliedFunctor, firstIndex =
@@ -1897,10 +1937,8 @@ let traverseStructure ~doTypes ~doExternals =
   let value_binding self vb = vb |> collectValueBinding super self in
   let structure_item self (structureItem : Typedtree.structure_item) =
     let oldModulePath = ModulePath.getCurrent () in
-    let oldModuleBindingPos = !currentModuleBindingPos in
     (match structureItem.str_desc with
     | Tstr_module {mb_expr; mb_id; mb_loc; mb_name} -> (
-      currentModuleBindingPos := mb_name.loc.loc_start;
       setFunctorKey mb_expr mb_name.loc.loc_start;
       registerParameterAlias mb_id mb_expr;
       registerBindingHead ~namePos:mb_name.loc.loc_start mb_id mb_expr;
@@ -2005,6 +2043,15 @@ let traverseStructure ~doTypes ~doExternals =
                DeadType.addDeclaration ~typeId:typeDeclaration.typ_id
                  ~typeKind:typeDeclaration.typ_type.type_kind)
     | Tstr_include {incl_mod; incl_type} -> (
+      (* An unpacked include introduces bare identifiers, with no module
+         root left to chase at their applications. Its packed functors must
+         therefore retain the conservative escape fallback. *)
+      (match (unwrapConstraints incl_mod).mod_desc with
+      | Tmod_unpack _ -> (
+        match functorHeadOf incl_mod with
+        | Some head -> escapedHeads := head :: !escapedHeads
+        | None -> ())
+      | _ -> ());
       (* [include M] with [M] a functor parameter: the included identifiers
          stand for the parameter's items. *)
       (match moduleIdent incl_mod with
@@ -2062,7 +2109,6 @@ let traverseStructure ~doTypes ~doExternals =
     | _ -> ());
     let result = super.structure_item self structureItem in
     ModulePath.setCurrent oldModulePath;
-    currentModuleBindingPos := oldModuleBindingPos;
     result
   in
   {super with expr; module_expr; pat; structure_item; value_binding}
@@ -2158,7 +2204,7 @@ let forceDelayedItems () =
         |> List.iter (fun {call; callFrom; callTo; callToImpl; callPath} ->
                call
                |> DeadOptionalArgs.addReferences ~locFrom:callFrom ~locTo:callTo
-                    ?locToImpl:callToImpl ~forwardable:true ~path:callPath)
+                    ?locToImpl:callToImpl ~path:callPath)
       else if hasApplication def index then
         match
           resolveArgumentItems ~visited:[] ~bindings:[] def index components
