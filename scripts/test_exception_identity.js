@@ -46,6 +46,20 @@ module.exports = function testExceptionIdentity(reanalyzeFile) {
       analyze(cwd, ".", live, dead);
     }
 
+    // An interface-only provider can forward an explicit alias to a scanned
+    // implementation, without importing that provider's implementation CMT.
+    const interfaceOnly = path.join(root, "interface-only");
+    compile(interfaceOnly, "source.ml", "exception Used = Not_found\nexception Unused = Not_found");
+    compile(interfaceOnly, "wrapper.mli", "module Alias = Source");
+    compile(interfaceOnly, "wrapper.ml", "module Alias = Source");
+    compile(interfaceOnly, "use.ml", "let () = raise Wrapper.Alias.Used");
+    const interfaceScan = path.join(interfaceOnly, "scan");
+    fs.mkdirSync(interfaceScan);
+    for (const filename of ["source.cmt", "wrapper.cmti", "use.cmt"]) {
+      fs.copyFileSync(path.join(interfaceOnly, filename), path.join(interfaceScan, filename));
+    }
+    analyze(interfaceOnly, interfaceScan, ["source.Used"], ["source.Unused"]);
+
     // The consumer imports one Foo, and Foo in turn imports its own Target.
     // A same-named sibling with a conflicting digest must never win, even
     // when the matching provider is absent from the scan.

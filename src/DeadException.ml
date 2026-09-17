@@ -192,7 +192,16 @@ let importedUnit unit name =
   in
   match implementation with
   | Some (cmtFilePath, infos) -> Some (getCompilationUnit ~cmtFilePath infos)
-  | None -> None
+  | None ->
+    (* An interface can still expose explicit forwarding aliases when the
+       implementation annotations are outside the analysis root. *)
+    annotations
+    |> List.find_opt (fun (_, infos) ->
+        match infos.Cmt_format.cmt_annots with
+        | Interface _ -> true
+        | _ -> false)
+    |> Option.map (fun (cmtFilePath, infos) ->
+        getCompilationUnit ~cmtFilePath infos)
 
 let rec resolvePath ~visited unit path fields =
   match CompilerPath.flatten path with
