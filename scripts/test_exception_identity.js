@@ -122,6 +122,35 @@ module.exports = function testExceptionIdentity(reanalyzeFile) {
     }
     assertContexts();
 
+    // Identical provider sources can also have equal interface digests but
+    // distinct imports. Without a matching sibling, do not choose either one.
+    const ambiguous = path.join(root, "ambiguous-provider-contexts");
+    compile(ambiguous, "left.ml", "exception Used = Not_found");
+    compile(ambiguous, "right.ml", "exception Used = Not_found");
+    compile(path.join(ambiguous, "a"), "provider.ml", "module Target = Left", [ambiguous]);
+    compile(path.join(ambiguous, "b"), "provider.ml", "module Target = Right", [ambiguous]);
+    const aliasSource = path.join(ambiguous, "shared.ml");
+    fs.writeFileSync(aliasSource, "module Alias = Provider.Target");
+    for (const dir of ["a", "b"]) {
+      child_process.execFileSync("ocamlc", [
+        "-bin-annot", "-I", dir, "-c", "-o", `${dir}/shared.cmo`, aliasSource,
+      ], { cwd: ambiguous, stdio: "pipe" });
+    }
+    compile(ambiguous, "use.ml", "let () = raise Shared.Alias.Used", [path.join(ambiguous, "b")]);
+    for (const reverse of [false, true]) {
+      const scanRoot = path.join(ambiguous, `order-${reverse}`);
+      for (const dir of ["a", "b", "consumer"]) fs.mkdirSync(path.join(scanRoot, dir), { recursive: true });
+      for (const file of ["left.cmt", "right.cmt", "use.cmt"]) {
+        fs.copyFileSync(path.join(ambiguous, file), path.join(scanRoot, "consumer", file));
+      }
+      for (const [from, to] of reverse ? [["a", "b"], ["b", "a"]] : [["a", "a"], ["b", "b"]]) {
+        for (const file of ["provider.cmt", "shared.cmt"]) {
+          fs.copyFileSync(path.join(ambiguous, from, file), path.join(scanRoot, to, file));
+        }
+      }
+      analyze(ambiguous, scanRoot, [], ["left.Used", "right.Used"]);
+    }
+
     // The consumer imports one Foo, and Foo in turn imports its own Target.
     // A same-named sibling with a conflicting digest must never win, even
     // when the matching provider is absent from the scan.

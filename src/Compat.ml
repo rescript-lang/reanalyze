@@ -569,6 +569,11 @@ let compilationContext ~cmtFilePath infos =
        Its equivalence is unproved: keep it separate rather than merging. *)
     sourceContext infos ^ ":unindexed:" ^ cmtFilePath
 
+(* Scanning, provider selection, and exception graphs share the resolved
+   dependency context, while keeping interfaces and implementations separate. *)
+let cmtUnitKey ~cmtFilePath ~isInterface (infos : Cmt_format.cmt_infos) =
+  (compilationContext ~cmtFilePath infos, isInterface)
+
 let unitAnnotationsCache = Hashtbl.create 64
 
 (* [imports] are the consumer's recorded imports: when the same unit name
@@ -611,21 +616,17 @@ let selectUnitAnnotations ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
     let loaded =
       loaded |> List.filter (fun (path, _) -> List.mem path selected)
     in
-    (* Copies of one compiled source (e.g. a library's objects and its
-       _build/install copy, or byte and native objects) are one unit: keep
-       the first of each. Candidates that are still distinct sources in
-       several build directories (same name and same interface) cannot be
-       told apart: resolve nothing rather than redirect into the wrong
-       target. *)
+    (* Copies of one compilation context (e.g. byte/native or install copies)
+       are one unit. Distinct contexts of the same artifact kind are ambiguous,
+       but a matching interface/implementation pair may live in separate
+       directories. *)
     let loaded =
       let seen = Hashtbl.create 4 in
       loaded
       |> List.filter (fun (path, (cmt_infos : Cmt_format.cmt_infos)) ->
           let key =
-            ( compilationContext ~cmtFilePath:path cmt_infos,
-              match cmt_infos.cmt_annots with
-              | Implementation _ -> true
-              | _ -> false )
+            cmtUnitKey ~cmtFilePath:path
+              ~isInterface:(Filename.check_suffix path ".cmti") cmt_infos
           in
           if Hashtbl.mem seen key then false
           else (

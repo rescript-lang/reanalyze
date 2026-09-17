@@ -8,11 +8,9 @@ let scannedUnits = Hashtbl.create 256
 
 let loadCmtFile ~cmtRoot cmtFilePath =
   let cmt_infos = Cmt_format.read_cmt cmtFilePath in
-  (* Identical source can use different dependency implementations, even
-     through the same interface. Preserve the full resolved context without
-     distinguishing actual byte/native/install copies. *)
   let unitKey =
-    (Compat.compilationContext ~cmtFilePath cmt_infos, Filename.check_suffix cmtFilePath ".cmti")
+    Compat.cmtUnitKey ~cmtFilePath ~isInterface:(Filename.check_suffix cmtFilePath ".cmti")
+      cmt_infos
   in
   if Hashtbl.mem scannedUnits unitKey then ()
   else
