@@ -289,8 +289,10 @@ end
 
 let tstrExceptionGet (x : Typedtree.structure_item_desc) = match x with
 #if OCAML_VERSION >= (4, 08, 0)
-  | Tstr_exception({tyexn_constructor= {ext_id}; tyexn_loc}) ->
-    Some((ext_id, tyexn_loc))
+  | Tstr_exception({tyexn_constructor= {ext_id; ext_loc}}) ->
+    (* Some compiler versions leave tyexn_loc ghost/empty. The constructor's
+       location identifies the declaration, including exception aliases. *)
+    Some((ext_id, ext_loc))
 #else
   | Tstr_exception({ext_id; ext_loc}) ->
     Some((ext_id, ext_loc))
