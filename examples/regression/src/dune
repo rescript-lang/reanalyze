@@ -1,6 +1,7 @@
 (library
  (name regression_fixture)
  (modules
+  Attribution_sweep
   Cross_alias
   Cross_alias_use
   Cross_c
@@ -20,6 +21,7 @@
   Packed_interface
   Packed_interface_use
   Packed_types
+  Partial_context_use
   Reference_order
   Shared_signature
   Shared_signature_arg
@@ -28,5 +30,8 @@
   Shared_signature_used
   Unpacked_functor
   Unpacked_functor_use
-  Unpacked_include)
+  Unpacked_include
+  Unpacked_open
+  Unpacked_open_provider
+  Unpacked_open_types)
  (flags :standard -w -27-32-34-37-39 -bin-annot))

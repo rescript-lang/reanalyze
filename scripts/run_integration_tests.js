@@ -571,6 +571,66 @@ function runRegressionTests() {
       output,
       "optional argument nested of function Unpacked_nested_arg.+g is always supplied (1 calls)"
     );
+    for (const name of [
+      "Direct.Open_arg", "Local.Local_open_arg", "Open_struct.Open_struct_arg",
+      "Include_struct.Include_struct_arg", "Cross_unit.Cross_open_arg",
+    ]) {
+      assertIncludes(
+        output,
+        `optional argument opened of function ${name}.+g is always supplied (1 calls)`
+      );
+    }
+    assertIncludes(
+      output,
+      "optional argument unrelated of function Unrelated.Unrelated_arg.+g is never used"
+    );
+    for (const [name, argument] of [
+      ["Repacked.Repacked_arg", "repacked"],
+      ["Projected.Projected_arg", "projected"],
+      ["Opaque_holder.Opaque_arg", "opaque"],
+    ]) {
+      assertIncludes(
+        output,
+        `optional argument ${argument} of function ${name}.+g is always supplied (1 calls)`
+      );
+    }
+    for (const [name, argument] of [
+      ["Repacked.Repacked_unused", "repacked"],
+      ["Projected.Projected_unused", "projected"],
+    ]) {
+      assertIncludes(
+        output,
+        `optional argument ${argument} of function ${name}.+g is never used`
+      );
+    }
+    assertIncludes(
+      output,
+      "optional argument untouched of function Opaque_holder.Opaque_unrelated.+h is never used"
+    );
+    for (const name of [
+      "Partial_context.Partial_supplied_arg",
+      "Partial_context.Passed_supplied_arg",
+      "Partial_context.Packed_partial_arg",
+      "Partial_context.Unit_partial_arg",
+      "Partial_context.Forwarded_supplied_arg",
+      "Foreign_supplied_arg",
+    ]) {
+      assertIncludes(
+        output,
+        `optional argument partial of function ${name}.+g is always supplied (1 calls)`
+      );
+    }
+    for (const name of [
+      "Partial_context.Partial_omitted_arg",
+      "Partial_context.Passed_omitted_arg",
+      "Partial_context.Forwarded_omitted_arg",
+      "Foreign_omitted_arg",
+    ]) {
+      assertIncludes(
+        output,
+        `optional argument partial of function ${name}.+g is never used`
+      );
+    }
     // Escaping holders also expose functors defined outside their lexical
     // range through module aliases and includes.
     for (const [name, argument] of [
@@ -722,7 +782,7 @@ function runByteNativeDuplicateTest() {
   }
 }
 
-function runUnpackedScanOrderTest() {
+function runFunctorScanOrderTest(providerName, consumerName, assertions) {
   if (!ocamlVersionAtLeast(5, 3)) return;
   const fs = require("fs");
   const os = require("os");
@@ -732,10 +792,10 @@ function runUnpackedScanOrderTest() {
   try {
     for (const dir of ["first", "second"]) fs.mkdirSync(path.join(root, dir));
     const files = fs.readdirSync(cmtDir).filter((file) => /\.cmti?$/.test(file));
-    const provider = "regression_fixture__Unpacked_functor.cmt";
-    const consumer = "regression_fixture__Unpacked_functor_use.cmt";
+    const provider = `regression_fixture__${providerName}.cmt`;
+    const consumer = `regression_fixture__${consumerName}.cmt`;
     const orders = [];
-    console.log(`${cwd}: reanalyze unpacked functors in both scan orders`);
+    console.log(`${cwd}: reanalyze ${providerName} in both scan orders`);
     for (const providerDir of ["first", "second"]) {
       const otherDir = providerDir === "first" ? "second" : "first";
       for (const file of files) {
@@ -753,18 +813,7 @@ function runUnpackedScanOrderTest() {
         output.indexOf(`Scanning ${provider} `) <
           output.indexOf(`Scanning ${consumer} `)
       );
-      assertIncludes(
-        output,
-        "optional argument x of function Unpacked_arg.+g is always supplied (1 calls)"
-      );
-      assertIncludes(
-        output,
-        "optional argument x of function Unpacked_unused.+g is never used"
-      );
-      assertIncludes(
-        output,
-        "optional argument nested of function Unpacked_nested_arg.+g is always supplied (1 calls)"
-      );
+      for (const assertion of assertions) assertIncludes(output, assertion);
       for (const file of files) {
         const dir = file === provider ? providerDir : otherDir;
         fs.unlinkSync(path.join(root, dir, file));
@@ -863,7 +912,15 @@ function main() {
     runRegressionTests();
     runDuplicateLayoutTest();
     runByteNativeDuplicateTest();
-    runUnpackedScanOrderTest();
+    runFunctorScanOrderTest("Unpacked_functor", "Unpacked_functor_use", [
+      "optional argument x of function Unpacked_arg.+g is always supplied (1 calls)",
+      "optional argument x of function Unpacked_unused.+g is never used",
+      "optional argument nested of function Unpacked_nested_arg.+g is always supplied (1 calls)",
+    ]);
+    runFunctorScanOrderTest("Attribution_sweep", "Partial_context_use", [
+      "optional argument partial of function Foreign_supplied_arg.+g is always supplied (1 calls)",
+      "optional argument partial of function Foreign_omitted_arg.+g is never used",
+    ]);
     runImportDigestSelectionTest();
     checkDiff();
 

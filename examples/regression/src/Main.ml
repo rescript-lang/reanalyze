@@ -1,6 +1,8 @@
 let definitely_dead () = ()
 
 let () =
+  Attribution_sweep.run ();
+  Partial_context_use.run ();
   Live_ancestors.use_child ();
   Functor_argument.use_set ();
   Functor_argument.use_anonymous_set ();
@@ -60,4 +62,5 @@ let () =
   Packed_interface_use.run ();
   Escape_exports.run ();
   Unpacked_functor_use.run ();
-  Unpacked_include.run ()
+  Unpacked_include.run ();
+  Unpacked_open.run ()

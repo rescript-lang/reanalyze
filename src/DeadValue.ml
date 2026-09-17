@@ -150,6 +150,9 @@ type functorHead =
   | Key of Lexing.position * int
       (** a functor's key, and the arguments partial applications already
           consumed, as in [module G = F (A)] followed by [G (B)] *)
+  | Partial of Lexing.position * functorHead
+      (** application expression supplying the already consumed arguments;
+          retained so separate partial bindings keep their own context *)
   | ParamHead of Lexing.position * int * string list * int
       (** (a submodule of) a parameter of the enclosing functor, applied in
           its body: the functor's key, the parameter's index, the path within
@@ -184,6 +187,53 @@ type delayedApplication = {
 let delayedApplications : delayedApplication list ref = ref []
 let nextApplicationId = ref 0
 
+let applicationIdsByPosition : (Lexing.position, int list) Hashtbl.t =
+  Hashtbl.create 16
+
+let applicationPrefixes : (int, Lexing.position list) Hashtbl.t =
+  Hashtbl.create 16
+
+(* Unit-only applications have no argument record but can still extend a
+   partial context that a later application must inherit. *)
+let applicationHeads : (int, functorHead) Hashtbl.t = Hashtbl.create 16
+
+let prefixApplicationIds sources =
+  let rec first = function
+    | [] -> []
+    | pos :: rest -> (
+      match Hashtbl.find_opt applicationIdsByPosition pos with
+      | Some ids -> ids
+      | None -> first rest)
+  in
+  first sources
+
+let rec extendsApplication ?(visited = []) applicationId prefixId =
+  applicationId = prefixId
+  || ((not (List.mem applicationId visited))
+     && match Hashtbl.find_opt applicationPrefixes applicationId with
+        | None -> false
+        | Some sources ->
+          prefixApplicationIds sources
+          |> List.exists
+               (fun parent ->
+                 extendsApplication ~visited:(applicationId :: visited)
+                   parent prefixId))
+
+let compatibleApplications left right =
+  extendsApplication left right || extendsApplication right left
+
+(* A completed application is a more specific context than its prefix.
+   Do not replace it with the prefix when inheriting another binding set. *)
+let mergeBindings bindings =
+  bindings
+  |> List.fold_left
+       (fun acc ((def, id) as binding) ->
+         match List.assoc_opt def acc with
+         | Some prior when extendsApplication prior id -> acc
+         | _ -> binding :: List.remove_assoc def acc)
+       []
+  |> List.sort compare
+
 (* The applications of the functor keyed [functorDef] supplying its parameter
    [argIndex], under [bindings]. *)
 let applicationsOf ~bindings functorDef argIndex =
@@ -193,7 +243,11 @@ let applicationsOf ~bindings functorDef argIndex =
          appliedFunctor = Key (functorDef, 0)
          && index = argIndex
          && (match List.assoc_opt functorDef bindings with
-            | Some id -> id = applicationId
+            | Some id ->
+              extendsApplication applicationId id
+              || (match List.assoc_opt functorDef own with
+                 | Some ownId -> compatibleApplications ownId id
+                 | None -> false)
             | None -> true)
          (* A template instantiated through different enclosing applications
             retains its source ID. Its inherited context must agree too,
@@ -201,7 +255,7 @@ let applicationsOf ~bindings functorDef argIndex =
          && List.for_all
               (fun (def, id) ->
                 match List.assoc_opt def bindings with
-                | Some requested -> id = requested
+                | Some requested -> compatibleApplications id requested
                 | None -> true)
               own)
 
@@ -230,9 +284,12 @@ let inRanges (pos : Lexing.position) ranges =
          && start.pos_cnum <= pos.pos_cnum
          && pos.pos_cnum <= stop.pos_cnum)
 
-let functorHeadToString head =
+let rec functorHeadToString head =
   match head with
   | Key (pos, consumed) -> Printf.sprintf "%s+%d" (pos |> posToString) consumed
+  | Partial (pos, head) ->
+    Printf.sprintf "partial(%s,%s)" (pos |> posToString)
+      (functorHeadToString head)
   | ParamHead (def, index, components, consumed) ->
     Printf.sprintf "param(%s,%d,%s)+%d" (def |> posToString) index
       (String.concat "." components)
@@ -282,8 +339,9 @@ let rec resolveArgumentItems ~visited ~bindings functorDef argIndex components
            | Direct resolve -> (
              match resolve components with Some loc -> [loc] | None -> [])
            | ViaParameter (outerDef, outerIndex, prefix) ->
-             resolveArgumentItems ~visited ~bindings:(own @ bindings) outerDef
-               outerIndex (prefix @ components))
+             resolveArgumentItems ~visited
+               ~bindings:(mergeBindings (own @ bindings)) outerDef outerIndex
+               (prefix @ components))
 
 (* Whether the functor keyed [functorDef] has an application supplying its
    parameter [argIndex]. *)
@@ -300,6 +358,32 @@ let findPackedModule ~sigToImpl pos =
     | Some implPos -> Hashtbl.find_opt packedModules implPos
     | None -> None)
 
+(* Repacking an unpacked functor adds another value-binding indirection.
+   Chase the whole chain after every unit is registered, preserving partial
+   applications and guarding cycles. *)
+let rec resolvePackedHead ~sigToImpl ?(visited = []) head =
+  match head with
+  | Packed (pos, consumed) when not (List.mem pos visited) -> (
+    match findPackedModule ~sigToImpl pos with
+    | Some {packedHead = Some head} -> (
+      match resolvePackedHead ~sigToImpl ~visited:(pos :: visited) head with
+      | Some (head, sources) ->
+        let head =
+          match head with
+          | Key (key, consumed') -> Key (key, consumed + consumed')
+          | ParamHead (def, index, components, consumed') ->
+            ParamHead (def, index, components, consumed + consumed')
+          | _ -> head
+        in
+        Some (head, sources)
+      | _ -> None)
+    | _ -> None)
+  | Packed _ -> None
+  | Partial (pos, head) ->
+    resolvePackedHead ~sigToImpl ~visited head
+    |> Option.map (fun (head, sources) -> (head, pos :: sources))
+  | head -> Some (head, [])
+
 (* The functors (a submodule of) the argument at [argIndex] of the
    applications of [functorDef] denotes: their keys, the arguments they
    consumed, and the applications they came through. *)
@@ -310,25 +394,28 @@ let rec resolveHeads ~sigToImpl ~visited ~bindings functorDef argIndex
     let visited = (functorDef, argIndex, components) :: visited in
     applicationsOf ~bindings functorDef argIndex
     |> List.concat_map (fun {applicationId; argHead; bindings = own} ->
-           let here = ((functorDef, applicationId) :: own) @ bindings in
-           match argHead components with
-           | Some (Key (pos, consumed)) -> [(pos, consumed, here)]
-           | Some (ParamHead (def, index, prefix, consumed)) ->
+           let here =
+             mergeBindings (((functorDef, applicationId) :: own) @ bindings)
+           in
+           let withPrefixes sources (pos, consumed, bindings) =
+             match prefixApplicationIds sources with
+             | [] -> [(pos, consumed, bindings)]
+             | ids ->
+               List.map
+                 (fun id ->
+                   (pos, consumed, mergeBindings ((pos, id) :: bindings)))
+                 ids
+           in
+           match Option.bind (argHead components) (resolvePackedHead ~sigToImpl) with
+           | Some (Key (pos, consumed), sources) ->
+             withPrefixes sources (pos, consumed, here)
+           | Some (ParamHead (def, index, prefix, consumed), sources) ->
              resolveHeads ~sigToImpl ~visited ~bindings:here def index
-               (prefix @ components)
+               prefix
              |> List.map (fun (pos, consumed', bindings) ->
                     (pos, consumed + consumed', bindings))
-           | Some (Packed (pos, consumed)) -> (
-             match (findPackedModule ~sigToImpl pos, components) with
-             | Some {packedHead = Some (Key (key, consumed'))}, [] ->
-               [(key, consumed + consumed', here)]
-             | ( Some {packedHead = Some (ParamHead (def, index, prefix, consumed'))},
-                 [] ) ->
-               resolveHeads ~sigToImpl ~visited ~bindings:here def index prefix
-               |> List.map (fun (pos, consumed'', bindings) ->
-                      (pos, consumed + consumed' + consumed'', bindings))
-             | _ -> [])
-           | None -> [])
+             |> List.concat_map (withPrefixes sources)
+           | Some ((Packed _ | Partial _), _) | None -> [])
 
 (* Applications headed by a functor parameter stand for the applications of
    the functors passed for it. Resolved to a fixed point, as an argument may
@@ -337,26 +424,27 @@ let rec resolveHeads ~sigToImpl ~visited ~bindings functorDef argIndex
    dropped, and the calls they would credit fall back to forwarding. *)
 let resolveParameterHeadedApplications ~sigToImpl =
   (* First-class modules, from the values they were packed into. *)
+  Hashtbl.iter
+    (fun id head ->
+      match resolvePackedHead ~sigToImpl head with
+      | Some (_, sources) -> Hashtbl.replace applicationPrefixes id sources
+      | None -> ())
+    applicationHeads;
   delayedApplications :=
     !delayedApplications
     |> List.map (fun application ->
-           match application.appliedFunctor with
-           | Packed (pos, consumed) -> (
-             match findPackedModule ~sigToImpl pos with
-             | Some {packedHead = Some (Key (key, consumed'))} ->
+           match resolvePackedHead ~sigToImpl application.appliedFunctor with
+           | Some (head, sources) ->
+             Hashtbl.replace applicationPrefixes application.applicationId sources;
+             (match head with
+             | Key (key, consumed) ->
                {
                  application with
                  appliedFunctor = Key (key, 0);
-                 argIndex = application.argIndex + consumed + consumed';
+                 argIndex = application.argIndex + consumed;
                }
-             | Some {packedHead = Some (ParamHead (def, index, components, consumed'))} ->
-               {
-                 application with
-                 appliedFunctor =
-                   ParamHead (def, index, components, consumed + consumed');
-               }
-             | _ -> application)
-           | _ -> application);
+             | appliedFunctor -> {application with appliedFunctor})
+           | None -> application);
   (* Keep the templates until the whole fixed point is complete: resolving
      one head does not mean all enclosing applications are known yet. *)
   let templates =
@@ -364,19 +452,11 @@ let resolveParameterHeadedApplications ~sigToImpl =
     |> List.filter (fun {appliedFunctor} ->
            match appliedFunctor with ParamHead _ -> true | _ -> false)
   in
-  let normalizeBindings bindings =
-    bindings
-    |> List.fold_left
-         (fun acc ((def, _) as binding) ->
-           if List.mem_assoc def acc then acc else binding :: acc)
-         []
-    |> List.sort compare
-  in
   (* Function-valued resolvers cannot be compared. The original application
      identity, target argument, and effective enclosing bindings identify a
      derived application without comparing those closures. *)
   let key {applicationId; appliedFunctor; argIndex; bindings} =
-    (applicationId, appliedFunctor, argIndex, normalizeBindings bindings)
+    (applicationId, appliedFunctor, argIndex, mergeBindings bindings)
   in
   let known = Hashtbl.create 16 in
   List.iter (fun application -> Hashtbl.replace known (key application) ())
@@ -399,14 +479,14 @@ let resolveParameterHeadedApplications ~sigToImpl =
                         appliedFunctor = Key (pos, 0);
                         argIndex = application.argIndex + consumed + consumed';
                         bindings =
-                          normalizeBindings (bindings @ application.bindings);
+                          mergeBindings (bindings @ application.bindings);
                       }
                     in
                     let key = key derived in
                     if not (Hashtbl.mem known key) then (
                       Hashtbl.add known key ();
                       additions := derived :: !additions))
-           | Key _ | Packed _ -> ());
+           | Key _ | Packed _ | Partial _ -> ());
     if !additions <> [] then (
       delayedApplications := !delayedApplications @ List.rev !additions;
       loop ())
@@ -420,15 +500,18 @@ let resolveParameterHeadedApplications ~sigToImpl =
            match application.appliedFunctor with
            | ParamHead (def, index, components, _) ->
              heads application def index components = []
-           | Key _ | Packed _ -> true);
+           | Key _ | Packed _ | Partial _ -> true);
   !delayedApplications
   |> List.iter (fun {appliedFunctor; argIndex; argHead; argRange} ->
          match appliedFunctor with
-         | ParamHead _ | Packed _ -> (
+         | ParamHead _ | Packed _ | Partial _ -> (
            if !Common.Cli.debug then
              Log_.item "unresolvedApplication %s index:%d@."
                (functorHeadToString appliedFunctor)
                argIndex;
+           (* The unresolved head may itself hide a nested functor in an
+              argument holder. Escape its known definition ranges too. *)
+           escapedHeads := appliedFunctor :: !escapedHeads;
            escapedRanges := argRange @ !escapedRanges;
            match argHead [] with
            | Some head -> escapedHeads := head :: !escapedHeads
@@ -451,27 +534,24 @@ let rec resolveRanges ~visited functorDef argIndex =
 
 (* The keys and definition ranges of what escaped, see [escapedHeads]. *)
 let escapedKeysAndRanges ~sigToImpl =
-  let ofHead head =
+  let rec ofHead visited head =
     match head with
     | Key (pos, _) -> ([pos], [])
+    | Partial (_, head) -> ofHead visited head
     | ParamHead (def, index, components, _) ->
       ( resolveHeads ~sigToImpl ~visited:[] ~bindings:[] def index components
         |> List.map (fun (pos, _, _) -> pos),
         resolveRanges ~visited:[] def index )
-    | Packed (pos, _) -> (
+    | Packed (pos, _) when not (List.mem pos visited) -> (
       match findPackedModule ~sigToImpl pos with
-      | Some {packedHead = Some (Key (key, _)); packedRange} ->
-        ([key], packedRange)
-      | Some
-          {packedHead = Some (ParamHead (def, index, components, _)); packedRange}
-        ->
-        ( resolveHeads ~sigToImpl ~visited:[] ~bindings:[] def index components
-          |> List.map (fun (pos, _, _) -> pos),
-          packedRange @ resolveRanges ~visited:[] def index )
+      | Some {packedHead = Some head; packedRange} ->
+        let keys, ranges = ofHead (pos :: visited) head in
+        (keys, packedRange @ ranges)
       | Some {packedRange} -> ([], packedRange)
       | None -> ([], []))
+    | Packed _ -> ([], [])
   in
-  let keys, ranges = !escapedHeads |> List.map ofHead |> List.split in
+  let keys, ranges = !escapedHeads |> List.map (ofHead []) |> List.split in
   (List.concat keys, List.concat ranges @ !escapedRanges)
 
 (* Packed modules that flowed somewhere other than a direct unpack escape,
@@ -904,9 +984,11 @@ let packedHeadOfPath resolutions path =
         ofExpr visited resolutions inner consumed
       | Tmod_apply (inner, _, _) ->
         ofExpr visited resolutions inner (consumed + 1)
+        |> Option.map (fun head -> Partial (e.mod_loc.loc_start, head))
 #if OCAML_VERSION >= (5, 1, 0)
       | Tmod_apply_unit inner ->
         ofExpr visited resolutions inner (consumed + 1)
+        |> Option.map (fun head -> Partial (e.mod_loc.loc_start, head))
 #endif
       | Tmod_ident (path, _) -> ofPath visited resolutions path consumed
       | Tmod_unpack (packed, _) ->
@@ -915,6 +997,35 @@ let packedHeadOfPath resolutions path =
   in
   ofPath [] resolutions path 0
 
+(* A foreign alias of a partial application may be read before its unit is
+   traversed. Its application position still identifies the argument group
+   once that unit has been scanned. *)
+let partialHeadOfPath resolutions path head =
+  let rec ofPath visited (resolutions : Compat.identResolutions) path =
+    match resolutions.bindingOfPath path with
+    | Some (_, definition, resolver, _) ->
+      ofExpr visited (Option.value resolver ~default:resolutions) definition
+    | None -> None
+  and ofExpr visited resolutions (e : Typedtree.module_expr) =
+    if List.memq e visited then None
+    else
+      let visited = e :: visited in
+      match e.mod_desc with
+      | Tmod_apply _ -> Some e.mod_loc.loc_start
+#if OCAML_VERSION >= (5, 1, 0)
+      | Tmod_apply_unit _ -> Some e.mod_loc.loc_start
+#endif
+      | Tmod_constraint (inner, _, _, _) -> ofExpr visited resolutions inner
+      | Tmod_ident (path, _) -> ofPath visited resolutions path
+      | _ -> None
+  in
+  match head with
+  | Key (_, consumed) when consumed > 0 -> (
+    match ofPath [] resolutions path with
+    | Some pos -> Partial (pos, head)
+    | None -> head)
+  | _ -> head
+
 (* The functor a module expression applies, and the number of arguments
    already consumed by partial applications it stands for, as in
    [module G = F (A)] followed by [G (B)]. Aliases ([module G = F]) are
@@ -922,20 +1033,26 @@ let packedHeadOfPath resolutions path =
    resolver. A functor parameter ([F (M)] in [functor (F : FT) -> ...]) is
    resolved once all applications are known. *)
 let rec functorHeadOf (e : Typedtree.module_expr) : functorHead option =
-  let consume head =
+  let rec consume head =
     match head with
     | Some (Key (pos, consumed)) -> Some (Key (pos, consumed + 1))
     | Some (ParamHead (def, index, components, consumed)) ->
       Some (ParamHead (def, index, components, consumed + 1))
     | Some (Packed (pos, consumed)) -> Some (Packed (pos, consumed + 1))
+    | Some (Partial (pos, head)) ->
+      consume (Some head) |> Option.map (fun head -> Partial (pos, head))
     | None -> None
   in
+  let applied inner =
+    consume (functorHeadOf inner)
+    |> Option.map (fun head -> Partial (e.mod_loc.loc_start, head))
+  in
   match e.mod_desc with
-  | Tmod_apply (functorExpr, _, _) -> consume (functorHeadOf functorExpr)
+  | Tmod_apply (functorExpr, _, _) -> applied functorExpr
 #if OCAML_VERSION >= (5, 1, 0)
   | Tmod_apply_unit functorExpr ->
     (* [F ()]: the unit parameter occupies an index. *)
-    consume (functorHeadOf functorExpr)
+    applied functorExpr
 #endif
   | Tmod_constraint (inner, _, _, _) -> functorHeadOf inner
   | Tmod_functor _ ->
@@ -994,7 +1111,9 @@ and headOfPath ?lid (path : Path.t) components : functorHead option =
     in
     match key with
     | Some ((nameLoc : Location.t), consumed) ->
-      Some (Key (nameLoc.loc_start, consumed))
+      Some
+        (partialHeadOfPath !identResolutions extended
+           (Key (nameLoc.loc_start, consumed)))
     | None -> None
   in
   let rec first = function
@@ -1026,6 +1145,43 @@ let registerBindingHead ~(namePos : Lexing.position) (id : Ident.t option)
       | None -> ())
     | None -> ())
 
+(* Opens and includes can introduce fresh identifiers whose unpacked origin
+   cannot be recovered at an application. Preserve the escape fallback for
+   unpacked exports, including bindings nested inside a structure wrapper. *)
+let rec escapeUnpackedExports ?(visited = [])
+    ?(resolutions = !identResolutions) (e : Typedtree.module_expr) =
+  if not (List.memq e visited) then
+    let visited = e :: visited in
+    let walk = escapeUnpackedExports ~visited ~resolutions in
+    match e.mod_desc with
+    | Tmod_unpack (packed, _) -> (
+      match unpackedBinding packed with
+      | Some pos -> escapedHeads := Packed (pos, 0) :: !escapedHeads
+      | None -> ())
+    | Tmod_constraint (inner, _, _, _) | Tmod_functor (_, inner) -> walk inner
+    | Tmod_apply (functorExpr, argumentExpr, _) ->
+      walk functorExpr;
+      walk argumentExpr
+#if OCAML_VERSION >= (5, 1, 0)
+    | Tmod_apply_unit inner -> walk inner
+#endif
+    | Tmod_ident (path, _) -> (
+      match resolutions.bindingOfPath path with
+      | Some (_, definition, resolver, _) ->
+        escapeUnpackedExports ~visited
+          ~resolutions:(Option.value resolver ~default:resolutions) definition
+      | None -> ())
+    | Tmod_structure {str_items} ->
+      str_items
+      |> List.iter (fun (item : Typedtree.structure_item) ->
+             match item.str_desc with
+             | Tstr_module {mb_expr} -> walk mb_expr
+             | Tstr_recmodule bindings ->
+               List.iter (fun (mb : Typedtree.module_binding) -> walk mb.mb_expr)
+                 bindings
+             | Tstr_include {incl_mod} -> walk incl_mod
+             | _ -> ())
+
 let rec collectExpr super self (e : Typedtree.expression) =
   let locFrom = e.exp_loc in
   (* [let module F (M : S) = ... in]: key the functor by its binding. On
@@ -1042,6 +1198,7 @@ let rec collectExpr super self (e : Typedtree.expression) =
   | _ -> ());
   #else
   (match e.exp_desc with
+  | Texp_open ({open_expr}, _) -> escapeUnpackedExports open_expr
   | Texp_letmodule (id, name, _, moduleExpr, _) ->
     setFunctorKey moduleExpr name.loc.loc_start;
     registerParameterAlias id moduleExpr;
@@ -1703,16 +1860,19 @@ let recordedApplications : Typedtree.module_expr list ref = ref []
    parameter to the corresponding argument. *)
 let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
   if not (List.memq moduleExpr !recordedApplications) then
+    let chain = ref [] in
     (* The arguments of this application chain, in order, and its head. A
        unit application ([F ()]) consumes an index without an argument. *)
     let rec flatten (e : Typedtree.module_expr) args =
       match e.mod_desc with
       | Tmod_apply (functorExpr, argumentExpr, _) ->
         recordedApplications := e :: !recordedApplications;
+        chain := e :: !chain;
         flatten functorExpr (Some argumentExpr :: args)
 #if OCAML_VERSION >= (5, 1, 0)
       | Tmod_apply_unit functorExpr ->
         recordedApplications := e :: !recordedApplications;
+        chain := e :: !chain;
         flatten functorExpr (None :: args)
 #endif
       | Tmod_constraint (inner, _, _, _) -> flatten inner args
@@ -1762,7 +1922,9 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
           | None -> (
             match resolutions.headKeyOfPath extended with
             | Some ((loc : Location.t), consumed) ->
-              Some (Key (loc.loc_start, consumed))
+              Some
+                (partialHeadOfPath resolutions extended
+                   (Key (loc.loc_start, consumed)))
             | None -> None))
         | _, None, None -> None
     in
@@ -1797,13 +1959,18 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
       | Tmod_ident (path, _) -> escapeParent path
       | _ -> ())
     | Some head ->
-      let appliedFunctor, firstIndex =
-        match head with
-        | Key (pos, consumed) -> (Key (pos, 0), consumed)
-        | ParamHead _ | Packed _ -> (head, 0)
-      in
       incr nextApplicationId;
       let applicationId = !nextApplicationId in
+      Hashtbl.replace applicationHeads applicationId head;
+      !chain
+      |> List.iter (fun (e : Typedtree.module_expr) ->
+             let pos = e.mod_loc.loc_start in
+             let ids =
+               Option.value (Hashtbl.find_opt applicationIdsByPosition pos)
+                 ~default:[]
+             in
+             Hashtbl.replace applicationIdsByPosition pos
+               (List.sort_uniq compare (applicationId :: ids)));
       args
       |> List.iteri (fun i argumentExpr ->
              match argumentExpr with
@@ -1812,8 +1979,8 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
                  {
                    applicationId;
                    bindings = [];
-                   appliedFunctor;
-                   argIndex = firstIndex + i;
+                   appliedFunctor = head;
+                   argIndex = i;
                    resolver = argumentItemResolver argumentExpr;
                    argHead = argHead argumentExpr;
                    argRange = definitionRange argumentExpr;
@@ -2043,15 +2210,7 @@ let traverseStructure ~doTypes ~doExternals =
                DeadType.addDeclaration ~typeId:typeDeclaration.typ_id
                  ~typeKind:typeDeclaration.typ_type.type_kind)
     | Tstr_include {incl_mod; incl_type} -> (
-      (* An unpacked include introduces bare identifiers, with no module
-         root left to chase at their applications. Its packed functors must
-         therefore retain the conservative escape fallback. *)
-      (match (unwrapConstraints incl_mod).mod_desc with
-      | Tmod_unpack _ -> (
-        match functorHeadOf incl_mod with
-        | Some head -> escapedHeads := head :: !escapedHeads
-        | None -> ())
-      | _ -> ());
+      escapeUnpackedExports incl_mod;
       (* [include M] with [M] a functor parameter: the included identifiers
          stand for the parameter's items. *)
       (match moduleIdent incl_mod with
@@ -2097,6 +2256,7 @@ let traverseStructure ~doTypes ~doExternals =
                 ~doValues:false (* TODO: also values? *)
                 ~moduleLoc:incl_mod.mod_loc ~path:currentPath)
       | _ -> ())
+    | Tstr_open {open_expr} -> escapeUnpackedExports open_expr
     | Tstr_exception _ -> (
       match structureItem.str_desc |> Compat.tstrExceptionGet with
       | Some (id, loc) ->
@@ -2248,6 +2408,9 @@ let forceDelayedItems () =
                       ~locFrom:coercionFrom ~locTo));
   parameterCoercions := [];
   delayedApplications := [];
+  Hashtbl.reset applicationIdsByPosition;
+  Hashtbl.reset applicationPrefixes;
+  Hashtbl.reset applicationHeads;
   DeadOptionalArgs.settleDelayedItems ();
   let dependencies = List.rev !delayedValueDependencies in
   delayedValueDependencies := [];
