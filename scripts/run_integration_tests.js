@@ -95,6 +95,19 @@ function runRegressionTests() {
   });
 
   console.log(`${cwd}: reanalyze regression assertions`);
+  // Outer.Inner.Alias belongs to an external unit outside this analysis root.
+  // Its real namespace must not be stripped to reference the local Inner.Alias.
+  const exceptionOutput = child_process.execFileSync(
+    reanalyzeFile,
+    [
+      "-ci", "-debug", "-native-build-target", ".", "-dce-cmt",
+      "_build/default/exception_collision/.exception_collision.objs/byte",
+    ],
+    { cwd, encoding: "utf8" }
+  );
+  assertIncludes(exceptionOutput, "Dead Exception +Inner.Alias");
+  assertNotIncludes(exceptionOutput, "Live Exception +Inner.Alias");
+
   const output = child_process.execFileSync(
     reanalyzeFile,
     ["-ci", "-debug", "-native-build-target", ".", "-dce-cmt", cmtDir],

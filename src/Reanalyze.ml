@@ -17,6 +17,9 @@ let loadCmtFile ~cmtRoot cmtFilePath =
   if Hashtbl.mem scannedUnits unitKey then ()
   else
   let () = Hashtbl.replace scannedUnits unitKey () in
+  let () =
+    if runConfig.dce then DeadException.registerCompilationUnit cmt_infos
+  in
   let excludePath sourceFile =
     !Cli.excludePaths
     |> List.exists (fun prefix_ ->

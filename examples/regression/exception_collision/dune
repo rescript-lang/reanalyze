@@ -1,0 +1,6 @@
+(library
+ (name exception_collision)
+ (wrapped false)
+ (modules Inner Exception_collision_use)
+ (libraries exception_external)
+ (flags :standard -bin-annot))
