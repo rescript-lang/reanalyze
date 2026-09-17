@@ -10,10 +10,9 @@ let declarations = Hashtbl.create 1
 let compilationUnit = ref ""
 let moduleAliases = Hashtbl.create 16
 
-(* A wrapper exposes compilation units through module aliases, for example
-   [Dune__exe.Location = Dune__exe__Location]. Read these aliases even when
-   the wrapper's generated source is unavailable. Never infer them by
-   dropping a namespace or by recognizing a compiler's naming convention. *)
+(* Read explicit aliases throughout the signature, including wrappers whose
+   generated source is unavailable. Local roots are resolved by identifier,
+   so a nested module can alias an outer module despite name shadowing. *)
 let registerCompilationUnit (infos : Cmt_format.cmt_infos) =
   compilationUnit := infos.cmt_modname;
   let unitName = Name.create ~isInterface:false infos.cmt_modname in
@@ -23,20 +22,43 @@ let registerCompilationUnit (infos : Cmt_format.cmt_infos) =
     | Interface signature -> signature.sig_type
     | _ -> []
   in
-  signature
-  |> List.iter (fun (item : Types.signature_item) ->
-         match item with
-         | Sig_module _ -> (
-           match Compat.getSigModuleModtype item with
-           | Some (id, Mty_alias target, _) -> (
-             match CompilerPath.flatten target with
-             | `Ok (root, _) when Ident.persistent root ->
-               Hashtbl.replace moduleAliases
-                 [Name.create (Ident.name id); unitName]
-                 (target |> Path.fromPathT |> Path.moduleToImplementation)
-             | _ -> ())
+  let modulePaths = ref Ident.empty in
+  let aliases = ref [] in
+  let rec collect ~path signature =
+    signature
+    |> List.iter (fun (item : Types.signature_item) ->
+           match item with
+           | Sig_module _ -> (
+             match Compat.getSigModuleModtype item with
+             | Some (id, moduleType, _) ->
+               let path = Name.create (Ident.name id) :: path in
+               modulePaths := Ident.add id path !modulePaths;
+               (match moduleType with
+               | Mty_alias target -> aliases := (path, target) :: !aliases
+               | Mty_signature signature -> collect ~path signature
+               | _ -> ())
+             | None -> ())
            | _ -> ())
-         | _ -> ())
+  in
+  collect ~path:[unitName] signature;
+  (* Collect all module bindings first, including recursive groups, before
+     resolving local alias roots to their fully qualified paths. *)
+  !aliases
+  |> List.iter (fun (path, target) ->
+         match CompilerPath.flatten target with
+         | `Ok (root, fields) ->
+           let rootPath =
+             if Ident.persistent root then
+               Some [Name.create ~isInterface:false (Ident.name root)]
+             else
+               try Some (Ident.find_same root !modulePaths)
+               with Not_found -> None
+           in
+           rootPath
+           |> Option.iter (fun rootPath ->
+                  Hashtbl.replace moduleAliases path
+                    (List.rev_map Name.create fields @ rootPath))
+         | `Contains_apply -> ())
 
 let add ~path ~loc ~(strLoc : Location.t) name =
   let exceptionPath =

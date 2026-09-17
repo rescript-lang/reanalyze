@@ -123,13 +123,28 @@ function runRegressionTests() {
   assertIncludes(output, "+definitely_dead is never used");
   // Exception aliases reached through nested module targets, including an
   // alias chain and the surrounding Dune wrapper, stay live independently.
-  for (const name of ["Direct", "Through_chain", "Deep.Used"]) {
+  for (const name of ["Direct", "Through_chain", "Through_nested_alias", "Deep.Used"]) {
     assertIncludes(output, `Live Exception +Exception_nested_source.Inner.${name}`);
     assertNotIncludes(output, `Dead Exception +Exception_nested_source.Inner.${name}`);
   }
   for (const name of ["Unused", "Deep.Unused"]) {
     assertIncludes(output, `Dead Exception +Exception_nested_source.Inner.${name}`);
     assertNotIncludes(output, `Live Exception +Exception_nested_source.Inner.${name}`);
+  }
+  // Local alias roots retain their lexical module identity, including
+  // aliases inside nested signatures and references to an outer scope.
+  for (const name of [
+    "Source.Direct", "Source.Fresh", "Source.Through_nested", "Source.Deep.Used",
+    "Nested.Source.Shadowed", "Nested.Source.Through_deeper",
+  ]) {
+    assertIncludes(output, `Live Exception +Exception_scoped_alias.${name}`);
+    assertNotIncludes(output, `Dead Exception +Exception_scoped_alias.${name}`);
+  }
+  for (const name of [
+    "Source.Shadowed", "Source.Unused", "Source.Deep.Unused", "Nested.Source.Unused",
+  ]) {
+    assertIncludes(output, `Dead Exception +Exception_scoped_alias.${name}`);
+    assertNotIncludes(output, `Live Exception +Exception_scoped_alias.${name}`);
   }
   assertIncludes(output, "Source:src/Generated_source.ml");
   assertIncludes(output, "Live Value +Functor_argument.Ordered.+compare");

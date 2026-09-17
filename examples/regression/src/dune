@@ -12,6 +12,7 @@
   Exception_nested_chain
   Exception_nested_source
   Exception_nested_use
+  Exception_scoped_alias
   Functor_argument
   Generated_source
   Higher_order
