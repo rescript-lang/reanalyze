@@ -33,3 +33,23 @@ struct
 
   let run () = A.run ()
 end
+
+(* Packed by a consumer in another compilation unit: chasing the alias's
+   local path requires this unit's resolver. *)
+module type Escaped_arg = sig
+  val k : ?cross:int -> unit -> int
+end
+
+module type Escaped_holder_type = sig
+  module Inner : functor (M : Escaped_arg) -> sig
+    val run : unit -> int
+  end
+end
+
+module Escaped_holder = struct
+  module Inner (M : Escaped_arg) = struct
+    let run () = M.k ~cross:1 ()
+  end
+end
+
+module Escaped_alias = Escaped_holder

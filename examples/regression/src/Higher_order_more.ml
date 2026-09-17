@@ -74,10 +74,34 @@ module P2_esc : P2 = struct
   let k ?(z = 0) () = z
 end
 
-let packed_holder = (module Holder : Holder_t)
+(* Escaping through a long, acyclic alias chain must still retain Inner's
+   calls. This exceeds the former fixed definition-lookup depth limit. *)
+module Holder1 = Holder
+module Holder2 = Holder1
+module Holder3 = Holder2
+module Holder4 = Holder3
+module Holder5 = Holder4
+module Holder6 = Holder5
+module Holder7 = Holder6
+module Holder8 = Holder7
+module Holder9 = Holder8
+module Holder10 = Holder9
+
+let packed_holder = (module Holder10 : Holder_t)
 
 let apply_holder (module H : Holder_t) =
   let module A = H.Inner (P2_esc) in
+  A.run ()
+
+module Cross_esc : Cross_alias.Escaped_arg = struct
+  let k ?(cross = 0) () = cross
+end
+
+let packed_cross_holder =
+  (module Cross_alias.Escaped_alias : Cross_alias.Escaped_holder_type)
+
+let apply_cross_holder (module H : Cross_alias.Escaped_holder_type) =
+  let module A = H.Inner (Cross_esc) in
   A.run ()
 
 module type P3 = sig
@@ -109,7 +133,10 @@ end
 
 module Applied_gi = Outer_gi (Impl_gi) (P3_esc)
 
-let run_nested () = ignore (apply_holder packed_holder + Applied_gi.run ())
+let run_nested () =
+  ignore
+    (apply_holder packed_holder + apply_cross_holder packed_cross_holder
+   + Applied_gi.run ())
 
 (* A functor applied directly and also packed into a value that flows
    through a function: the unseen application means its calls are forwarded,

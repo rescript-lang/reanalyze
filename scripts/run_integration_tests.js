@@ -513,6 +513,11 @@ function runRegressionTests() {
     assertNotIncludes(output, "P2_esc.+k is never used");
     assertIncludes(
       output,
+      "optional argument cross of function Cross_esc.+k is always supplied"
+    );
+    assertNotIncludes(output, "Cross_esc.+k is never used");
+    assertIncludes(
+      output,
       "optional argument w of function P3_esc.+q is always supplied"
     );
     assertNotIncludes(output, "P3_esc.+q is never used");

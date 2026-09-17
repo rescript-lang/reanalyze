@@ -778,22 +778,26 @@ let rec moduleShapeOfExpr ?(env = []) (moduleExpr : Typedtree.module_expr) =
    or functor, its binding's through paths and aliases (in any unit), and
    those of the functor and the arguments for an application (the result
    may re-export either). *)
-let rec definitionRange ?(depth = 0) (e : Typedtree.module_expr) =
+let rec definitionRange ?(visited = []) ?(resolutions = !identResolutions)
+    (e : Typedtree.module_expr) =
   let own =
     if e.mod_loc.loc_ghost then []
     else [(e.mod_loc.loc_start, e.mod_loc.loc_end)]
   in
-  if depth > 8 then []
+  if List.memq e visited then []
   else
+    let visited = e :: visited in
     match e.mod_desc with
     | Tmod_structure _ | Tmod_functor _ -> own
-    | Tmod_constraint (inner, _, _, _) -> definitionRange ~depth inner
-    | Tmod_ident (path, _) -> definitionRangeOfPath ~depth path
+    | Tmod_constraint (inner, _, _, _) ->
+      definitionRange ~visited ~resolutions inner
+    | Tmod_ident (path, _) -> definitionRangeOfPath ~visited ~resolutions path
     | Tmod_apply (functorExpr, argumentExpr, _) ->
-      definitionRange ~depth:(depth + 1) functorExpr
-      @ definitionRange ~depth:(depth + 1) argumentExpr
+      definitionRange ~visited ~resolutions functorExpr
+      @ definitionRange ~visited ~resolutions argumentExpr
 #if OCAML_VERSION >= (5, 1, 0)
-    | Tmod_apply_unit functorExpr -> definitionRange ~depth:(depth + 1) functorExpr
+    | Tmod_apply_unit functorExpr ->
+      definitionRange ~visited ~resolutions functorExpr
 #endif
     | Tmod_unpack (packed, _) -> (
       match unpackedBinding packed with
@@ -803,9 +807,12 @@ let rec definitionRange ?(depth = 0) (e : Typedtree.module_expr) =
         | None -> [])
       | None -> [])
 
-and definitionRangeOfPath ?(depth = 0) (path : Path.t) =
-  match !identResolutions.bindingOfPath path with
-  | Some (_, definition, _, _) -> definitionRange ~depth:(depth + 1) definition
+and definitionRangeOfPath ?(visited = []) ?(resolutions = !identResolutions)
+    (path : Path.t) =
+  match resolutions.bindingOfPath path with
+  | Some (_, definition, definingResolver, _) ->
+    let resolutions = Option.value definingResolver ~default:resolutions in
+    definitionRange ~visited ~resolutions definition
   | None -> []
 
 (* The functor a module expression applies, and the number of arguments

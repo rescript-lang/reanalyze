@@ -943,6 +943,17 @@ let rec makeResolver ~cmtFilePath
       resolverForUnit ~currentCmtFile:cmtFilePath ~imports comp_unit
     | _ -> None
   in
+  (* Wrapped libraries introduce aliases to compilation units, such as
+     [Library.Unit.Member]. There is no module binding for the intermediate
+     compilation unit; reduce the complete path before structural lookup. *)
+  let rec globalPathShape (path : Path.t) =
+    match path with
+    | Pident id when Ident.global id -> Some (compUnitShape (Ident.name id))
+    | Pdot (parent, name) ->
+      globalPathShape parent
+      |> Option.map (fun shape -> Shape.proj shape (Shape.Item.make name Module))
+    | _ -> None
+  in
   (* The binding a module path denotes, structurally: through units,
      local bindings, and the bodies of applied functors, as in
      [Outer (A).Inner]. Returns the binding, the resolver of its unit,
@@ -950,6 +961,21 @@ let rec makeResolver ~cmtFilePath
   let rec bindingOfPath (path : Path.t) :
       (Location.t * Typedtree.module_expr * identResolutions option * int)
       option =
+    let byShape =
+      match globalPathShape path with
+      | Some shape -> (
+        match Reduce.reduce_for_uid Env.empty shape |> uidOfResult with
+        | Some uid -> (
+          match bindingOfUid uid with
+          | Some (loc, definition) ->
+            Some (loc, definition, resolverOfUid uid, 0)
+          | None -> None)
+        | None -> None)
+      | None -> None
+    in
+    match byShape with
+    | Some binding -> Some binding
+    | None ->
     match path with
     | Pident id when Ident.global id -> None
     | Pident id -> (
@@ -963,18 +989,6 @@ let rec makeResolver ~cmtFilePath
       | Some uid -> (
         match bindingOfUid uid with
         | Some (loc, definition) -> Some (loc, definition, Some !selfRef, 0)
-        | None -> None)
-      | None -> None)
-    | Pdot (Pident unit, name) when Ident.global unit -> (
-      let shape =
-        Shape.proj (compUnitShape (Ident.name unit))
-          (Shape.Item.make name Module)
-      in
-      match Reduce.reduce_for_uid Env.empty shape |> uidOfResult with
-      | Some uid -> (
-        match bindingOfUid uid with
-        | Some (loc, definition) ->
-          Some (loc, definition, resolverOfUid uid, 0)
         | None -> None)
       | None -> None)
     | Pdot (parent, name) -> (
