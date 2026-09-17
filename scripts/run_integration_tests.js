@@ -123,7 +123,9 @@ function runRegressionTests() {
   assertIncludes(output, "+definitely_dead is never used");
   // Exception aliases reached through nested module targets, including an
   // alias chain and the surrounding Dune wrapper, stay live independently.
-  for (const name of ["Direct", "Through_chain", "Through_nested_alias", "Deep.Used"]) {
+  for (const name of [
+    "Direct", "Through_chain", "Through_nested_alias", "Through_include", "Deep.Used",
+  ]) {
     assertIncludes(output, `Live Exception +Exception_nested_source.Inner.${name}`);
     assertNotIncludes(output, `Dead Exception +Exception_nested_source.Inner.${name}`);
   }

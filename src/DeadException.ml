@@ -48,7 +48,9 @@ let registerCompilationUnit (infos : Cmt_format.cmt_infos) =
            | Tstr_module binding -> collectBinding ~path binding
            | Tstr_recmodule bindings ->
              List.iter (collectBinding ~path) bindings
-           | Tstr_include incl -> collectInclude ~path incl.incl_mod
+           | Tstr_include incl ->
+             collect ~recurse:true ~path incl.incl_type;
+             collectInclude ~path incl.incl_mod
            | Tstr_exception _ -> (
              match Compat.tstrExceptionGet item.str_desc with
              | Some (id, loc) ->
