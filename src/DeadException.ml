@@ -38,6 +38,17 @@ let newModule () =
     alias = None;
   }
 
+(* Includes can expose more precise signature facts than an inferred
+   forwarding module. Enrich a copy so earlier aliases retain their binding. *)
+let copyModule node =
+  incr nextNode;
+  {
+    node with
+    id = !nextNode;
+    modules = Hashtbl.copy node.modules;
+    exceptions = Hashtbl.copy node.exceptions;
+  }
+
 let getCompilationUnit ~cmtFilePath (infos : Cmt_format.cmt_infos) =
   let key =
     ( infos.cmt_sourcefile,
@@ -69,12 +80,18 @@ let getCompilationUnit ~cmtFilePath (infos : Cmt_format.cmt_infos) =
           | Sig_module _ -> (
             match Compat.getSigModuleModtype item with
             | Some (id, moduleType, _) ->
-              let child = newModule () in
+              let child =
+                match Hashtbl.find_opt node.modules (Ident.name id) with
+                | Some child -> copyModule child
+                | None -> newModule ()
+              in
               bind node id child;
               collectModuleType child moduleType
             | None -> ())
           | Sig_typext (id, extension, Text_exception, _) ->
-            Hashtbl.replace node.exceptions (Ident.name id) extension.ext_loc
+            let name = Ident.name id in
+            if not (Hashtbl.mem node.exceptions name) then
+              Hashtbl.add node.exceptions name extension.ext_loc
           | _ -> ())
     and collectModuleType node = function
       | Types.Mty_alias target -> node.alias <- Some target
@@ -89,8 +106,8 @@ let getCompilationUnit ~cmtFilePath (infos : Cmt_format.cmt_infos) =
           | Tstr_include incl ->
             let included = newModule () in
             collectModule included incl.incl_mod;
-            (* Includes introduce fresh identifiers for the exported bindings.
-             Point them at the concrete nodes, retaining captured old ones. *)
+            (* Includes introduce fresh identifiers. Retain concrete locations
+               and explicit signature aliases in each exported binding. *)
             incl.incl_type
             |> List.iter (fun (item : Types.signature_item) ->
                 match item with
@@ -100,12 +117,10 @@ let getCompilationUnit ~cmtFilePath (infos : Cmt_format.cmt_infos) =
                     let name = Ident.name id in
                     let child =
                       match Hashtbl.find_opt included.modules name with
-                      | Some child -> child
-                      | None ->
-                        let child = newModule () in
-                        collectModuleType child moduleType;
-                        child
+                      | Some child -> copyModule child
+                      | None -> newModule ()
                     in
+                    collectModuleType child moduleType;
                     (match (child.alias, included.alias) with
                     | None, Some target ->
                       child.alias <- Some (CompilerPath.Pdot (target, name))

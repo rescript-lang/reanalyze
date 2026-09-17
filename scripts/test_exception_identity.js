@@ -60,6 +60,21 @@ module.exports = function testExceptionIdentity(reanalyzeFile) {
     }
     analyze(interfaceOnly, interfaceScan, ["source.Used"], ["source.Unused"]);
 
+    // Unwrapped identifiers can infer forwarding children before a constraint
+    // exposes more specific aliases. Retain those aliases without the provider.
+    const unwrappedInclude = path.join(root, "unwrapped-include");
+    compile(unwrappedInclude, "exn.ml", "exception Used = Not_found\nexception Unused = Not_found");
+    compile(unwrappedInclude, "exports.ml", "module Nested = struct module Alias = Exn end");
+    compile(unwrappedInclude, "constrained.ml",
+      "include (Exports : sig module Nested : sig module Alias = Exn end end)");
+    compile(unwrappedInclude, "use.ml", "let () = raise Constrained.Nested.Alias.Used");
+    const includeScan = path.join(unwrappedInclude, "scan");
+    fs.mkdirSync(includeScan);
+    for (const filename of ["exn.cmt", "constrained.cmt", "use.cmt"]) {
+      fs.copyFileSync(path.join(unwrappedInclude, filename), path.join(includeScan, filename));
+    }
+    analyze(unwrappedInclude, includeScan, ["exn.Used"], ["exn.Unused"]);
+
     // The consumer imports one Foo, and Foo in turn imports its own Target.
     // A same-named sibling with a conflicting digest must never win, even
     // when the matching provider is absent from the scan.
