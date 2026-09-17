@@ -513,26 +513,136 @@ let moduleTypeOfUid ~currentCmtFile ~imports ~local uid =
 
 let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
 #if OCAML_VERSION >= (5, 3, 0)
-  let local = Shape.Uid.Tbl.create 1024 in
-  Shape.Uid.Tbl.iter (Shape.Uid.Tbl.replace local) cmt_infos.cmt_uid_to_decl;
-  (let cmti = (cmtFilePath |> Filename.remove_extension) ^ ".cmti" in
-   if Sys.file_exists cmti then
-     try
-       let cmti_infos = Cmt_format.read_cmt cmti in
-       Shape.Uid.Tbl.iter
-         (fun uid decl ->
-           if not (Shape.Uid.Tbl.mem local uid) then
-             Shape.Uid.Tbl.replace local uid decl)
-         cmti_infos.cmt_uid_to_decl
-     with _ -> ());
-  let loc_of_uid =
-    locOfUid ~currentCmtFile:cmtFilePath ~imports:cmt_infos.cmt_imports ~local
+  let module UidTbl = Shape.Uid.Tbl in
+  (* The declarations of the file being processed and of its own interface. *)
+  let own_uid_to_decl = UidTbl.create 1024 in
+  UidTbl.iter (UidTbl.replace own_uid_to_decl) cmt_infos.cmt_uid_to_decl;
+  let read_cmt path =
+    if Sys.file_exists path then
+      try Some (Cmt_format.read_cmt path) with _ -> None
+    else None
+  in
+  (match read_cmt ((cmtFilePath |> Filename.remove_extension) ^ ".cmti") with
+  | Some cmti_infos ->
+    UidTbl.iter
+      (fun uid decl ->
+        if not (UidTbl.mem own_uid_to_decl uid) then
+          UidTbl.replace own_uid_to_decl uid decl)
+      cmti_infos.cmt_uid_to_decl
+  | None -> ());
+  (* Declarations of other compilation units, one table per candidate file.
+     The analysis root can contain several units with the same name (e.g.
+     unwrapped libraries in different directories), whose declarations share
+     uids. Candidates are narrowed down using the interface digest recorded
+     in the importer; when that is not possible every candidate is consulted,
+     so a reference is never dropped because the wrong unit was picked. *)
+  let loadedFiles : (string, Typedtree.item_declaration UidTbl.t option) Hashtbl.t
+      =
+    Hashtbl.create 16
+  in
+  let decls_of_file path =
+    match Hashtbl.find_opt loadedFiles path with
+    | Some decls -> decls
+    | None ->
+      let decls =
+        match read_cmt path with
+        | Some infos -> Some infos.cmt_uid_to_decl
+        | None -> None
+      in
+      Hashtbl.replace loadedFiles path decls;
+      decls
+  in
+  let interface_digest_of_file path =
+    match read_cmt path with
+    | Some infos -> infos.cmt_interface_digest
+    | None -> None
+  in
+  let loadedUnits : (string, Typedtree.item_declaration UidTbl.t list) Hashtbl.t
+      =
+    Hashtbl.create 16
+  in
+  let candidate_files comp_unit =
+    let indexed =
+      match Hashtbl.find_opt cmtFilesByUnit comp_unit with
+      | Some paths -> paths
+      | None -> []
+    in
+    (* Fall back to sibling files, for callers that did not register. *)
+    let dir = Filename.dirname cmtFilePath in
+    let siblings =
+      [".cmt"; ".cmti"]
+      |> List.concat_map (fun ext ->
+             [
+               Filename.concat dir (comp_unit ^ ext);
+               Filename.concat dir (String.uncapitalize_ascii comp_unit ^ ext);
+             ])
+    in
+    indexed @ siblings
+    |> List.filter (fun path -> path <> cmtFilePath && Sys.file_exists path)
+    |> List.sort_uniq compare
+  in
+  let select_by_digest comp_unit files =
+    let digest =
+      match List.assoc_opt comp_unit cmt_infos.cmt_imports with
+      | Some (Some digest) -> Some digest
+      | _ -> None
+    in
+    match digest with
+    | None -> files
+    | Some digest -> (
+      (* A .cmt compiled against an .mli carries no interface digest: the
+         digest is in the .cmti next to it. Group by stem so the whole unit
+         is kept when either file matches. *)
+      let stem path = Filename.remove_extension path in
+      let stems = files |> List.map stem |> List.sort_uniq compare in
+      let matching_stems =
+        stems
+        |> List.filter (fun stem ->
+               [".cmt"; ".cmti"]
+               |> List.exists (fun ext ->
+                      interface_digest_of_file (stem ^ ext) = Some digest))
+      in
+      match matching_stems with
+      | [] -> files
+      | _ -> files |> List.filter (fun path -> List.mem (stem path) matching_stems)
+      )
+  in
+  let decls_of_unit comp_unit =
+    match Hashtbl.find_opt loadedUnits comp_unit with
+    | Some decls -> decls
+    | None ->
+      let decls =
+        candidate_files comp_unit |> select_by_digest comp_unit
+        |> List.filter_map decls_of_file
+      in
+      Hashtbl.replace loadedUnits comp_unit decls;
+      decls
+  in
+  let loc_of_value_decl = function
+    | Typedtree.Value {val_loc; _} -> Some val_loc
+    | Typedtree.Value_binding {vb_pat = {pat_loc; _}; _} -> Some pat_loc
+    | _ -> None
+  in
+  let locs_of_uid uid =
+    match UidTbl.find_opt own_uid_to_decl uid with
+    | Some item_decl -> Option.to_list (loc_of_value_decl item_decl)
+    | None -> (
+      match uid with
+      | Shape.Uid.Item {comp_unit; _} ->
+        decls_of_unit comp_unit
+        |> List.filter_map (fun decls ->
+               match UidTbl.find_opt decls uid with
+               | Some item_decl -> loc_of_value_decl item_decl
+               | None -> None)
+        |> List.sort_uniq compare
+      | _ -> [])
   in
   cmt_infos.cmt_declaration_dependencies
-  |> filter_map (fun (_, uid_def, uid_decl) ->
-         match (loc_of_uid uid_def, loc_of_uid uid_decl) with
-         | Some def_loc, Some decl_loc -> Some (def_loc, decl_loc)
-         | _ -> None)
+  |> List.concat_map (fun (_, uid_def, uid_decl) ->
+         let decl_locs = locs_of_uid uid_decl in
+         locs_of_uid uid_def
+         |> List.concat_map (fun def_loc ->
+                decl_locs |> List.map (fun decl_loc -> (def_loc, decl_loc))))
 #else
   let _ = cmtFilePath in
   cmt_infos.cmt_value_dependencies

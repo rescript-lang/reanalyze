@@ -543,6 +543,7 @@ function runRegressionTests() {
     {
       cwd,
       encoding: "utf8",
+      maxBuffer: 256 * 1024 * 1024,
     }
   );
 
