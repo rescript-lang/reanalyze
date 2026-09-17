@@ -153,6 +153,12 @@ function runRegressionTests() {
   }
   assertNotIncludes(output, "Rec_used is never raised");
   assertIncludes(output, "Rec_unused is never raised");
+  assertIncludes(output,
+    "Live Exception +Exception_alias_exports.Local.Through_local_include");
+  assertNotIncludes(output,
+    "Dead Exception +Exception_alias_exports.Local.Through_local_include");
+  assertIncludes(output, "Dead Exception +Exception_alias_exports.Local.Unused");
+  assertNotIncludes(output, "Live Exception +Exception_alias_exports.Local.Unused");
   assertIncludes(output, "Source:src/Generated_source.ml");
   assertIncludes(output, "Live Value +Functor_argument.Ordered.+compare");
   assertIncludes(output, "Dead Value +Functor_argument.Ordered.+unused");

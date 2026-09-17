@@ -50,7 +50,7 @@ let registerCompilationUnit (infos : Cmt_format.cmt_infos) =
              List.iter (collectBinding ~path) bindings
            | Tstr_include incl ->
              collect ~recurse:true ~path incl.incl_type;
-             collectInclude ~path incl.incl_mod
+             collectInclude ~path ~signature:incl.incl_type incl.incl_mod
            | Tstr_exception _ -> (
              match Compat.tstrExceptionGet item.str_desc with
              | Some (id, loc) ->
@@ -72,10 +72,26 @@ let registerCompilationUnit (infos : Cmt_format.cmt_infos) =
       match moduleExpr.mod_type with
       | Mty_signature signature -> collect ~recurse:true ~path signature
       | _ -> ())
-  and collectInclude ~path (moduleExpr : Typedtree.module_expr) =
+  and collectInclude ~path ~signature (moduleExpr : Typedtree.module_expr) =
     match moduleExpr.mod_desc with
     | Tmod_structure structure -> collectStructure ~path structure
-    | Tmod_constraint (inner, _, _, _) -> collectInclude ~path inner
+    | Tmod_constraint (inner, _, _, _) ->
+      collectInclude ~path ~signature inner
+    | Tmod_ident (target, _) ->
+      (* Included modules retain their identity even when a constraint
+         exposes a signature rather than an alias for each module. *)
+      signature
+      |> List.iter (fun (item : Types.signature_item) ->
+             match item with
+             | Sig_module _ -> (
+               match Compat.getSigModuleModtype item with
+               | Some (id, _, _) ->
+                 let name = Ident.name id in
+                 aliases :=
+                   (Name.create name :: path, CompilerPath.Pdot (target, name))
+                   :: !aliases
+               | None -> ())
+             | _ -> ())
     | _ -> ()
   in
   (match infos.cmt_annots with
@@ -119,22 +135,27 @@ let add ~path ~(loc : Location.t) ~(strLoc : Location.t) name =
   |> addDeclaration_ ~posEnd:strLoc.loc_end ~posStart:strLoc.loc_start
        ~declKind:Exception ~moduleLoc:(ModulePath.getCurrent ()).loc ~path ~loc
 
-(* Resolve outer modules before looking up an alias inside them: a Dune
-   wrapper may first expose the unit containing [module X = B.Y]. Resolve
-   the target as well, since B or Y can themselves be aliases. *)
+(* Prefer explicit facts about the full path, which an include may expose
+   even when its provider is outside the scan root. Otherwise normalize
+   outer modules and retry, so wrappers can expose further aliases. *)
 let rec resolveModuleAliases ~visited path =
-  match path with
-  | [] -> Some []
-  | name :: rest -> (
-    match resolveModuleAliases ~visited rest with
-    | None -> None
-    | Some rest ->
-      let path = name :: rest in
-      match Hashtbl.find_opt moduleAliases path with
-      | None -> Some path
-      | Some target ->
-        if List.mem path visited then None
-        else resolveModuleAliases ~visited:(path :: visited) target)
+  let follow path target =
+    if List.mem path visited then None
+    else resolveModuleAliases ~visited:(path :: visited) target
+  in
+  match Hashtbl.find_opt moduleAliases path with
+  | Some target -> follow path target
+  | None -> (
+    match path with
+    | [] -> Some []
+    | name :: rest -> (
+      match resolveModuleAliases ~visited rest with
+      | None -> None
+      | Some rest ->
+        let path = name :: rest in
+        match Hashtbl.find_opt moduleAliases path with
+        | None -> Some path
+        | Some target -> follow path target))
 
 let findDeclaration exceptionPath =
   match exceptionPath |> Path.moduleToImplementation with

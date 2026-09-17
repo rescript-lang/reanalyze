@@ -12,4 +12,5 @@ let run () =
   (try raise Exception_scoped_alias.Constrained.Alias.Used with _ -> ());
   (try raise Exception_scoped_alias.Forward.Alias.Forwarded with _ -> ());
   (try raise Exception_scoped_alias.Recursive_alias.Rec_used with _ -> ());
-  try raise Exception_alias_include.Nested.Alias.Through_include with _ -> ()
+  (try raise Exception_alias_include.Nested.Alias.Through_include with _ -> ());
+  try raise Exception_alias_include.Local_nested.Alias.Through_local_include with _ -> ()
