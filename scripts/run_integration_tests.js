@@ -778,6 +778,57 @@ function runUnpackedScanOrderTest() {
   }
 }
 
+// The importer was compiled against digest_a. A mismatching Collision unit
+// beside it must not hide that dependency or replace it when it is absent.
+function runImportDigestSelectionTest() {
+  if (!ocamlVersionAtLeast(5, 3)) return;
+  const fs = require("fs");
+  const os = require("os");
+  const cwd = path.join(__dirname, "..", "examples", "regression");
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "reanalyze-digest-"));
+  const root = path.join(temp, "layout");
+  try {
+    for (const dir of ["provider", "consumer"]) {
+      fs.mkdirSync(path.join(root, dir), { recursive: true });
+    }
+    const copy = (library, unit, dir) =>
+      fs.copyFileSync(
+        path.join(cwd, "_build/default", library, `.${library}.objs/byte`, unit),
+        path.join(root, dir, unit)
+      );
+    copy("digest_a", "collision.cmt", "provider");
+    copy("digest_b", "collision.cmt", "consumer");
+    copy("digest_use", "use_collision.cmt", "consumer");
+    const run = () =>
+      child_process.execFileSync(
+        reanalyzeFile,
+        ["-ci", "-debug", "-native-build-target", ".", "-dce-cmt", root],
+        { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 }
+      );
+    console.log(`${cwd}: reanalyze import digest before sibling preference`);
+    const present = run();
+    assertIncludes(present, "Live Value +Collision.Chosen_impl.+g");
+    assertIncludes(present, "Dead Value +Collision.Unrelated_impl.+g");
+    assertIncludes(
+      present,
+      "optional argument x of function Chosen_impl.+g is always supplied (1 calls)"
+    );
+    assertNotIncludes(present, "Live Value +Collision.Unrelated_impl.+g");
+
+    fs.renameSync(
+      path.join(root, "provider/collision.cmt"),
+      path.join(temp, "collision.cmt")
+    );
+    console.log(`${cwd}: reanalyze missing imported digest stays unresolved`);
+    const absent = run();
+    assertIncludes(absent, "Dead Value +Collision.Unrelated_impl.+g");
+    assertNotIncludes(absent, "Live Value +Collision.Unrelated_impl.+g");
+    assertNotIncludes(absent, "function Unrelated_impl.+g is always supplied");
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+}
+
 function checkSetup() {
   console.log("Checking if --version outputs the right version");
   let output;
@@ -813,6 +864,7 @@ function main() {
     runDuplicateLayoutTest();
     runByteNativeDuplicateTest();
     runUnpackedScanOrderTest();
+    runImportDigestSelectionTest();
     checkDiff();
 
     console.log("Test successful!");

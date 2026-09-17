@@ -1,0 +1,6 @@
+(library
+ (name digest_b)
+ (wrapped false)
+ (modes byte)
+ (modules Collision)
+ (flags :standard -w -27-32-34-37-39 -bin-annot))

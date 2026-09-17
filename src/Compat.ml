@@ -353,13 +353,14 @@ type unitInfo = {
 (* Keyed by the list of files a unit is loaded from, so that same-named units
    in different build targets (e.g. two unwrapped libraries each defining
    [Config]) do not share an entry. *)
-let unitInfoCache : (string list * string option, unitInfo) Hashtbl.t =
+let unitInfoCache : (string list * string option * string, unitInfo) Hashtbl.t =
   Hashtbl.create 64
 
 (* An implementation compiled against an interface gets its digest from
    the sibling .cmti. Retain both files of every matching unit, for shapes
-   as well as declaration dependencies; without a match stay conservative. *)
-let selectUnitFilesByDigest ~interfaceDigest digest files =
+   as well as declaration dependencies. Only dependency extraction may fan
+   out to unmatched candidates; shape resolution must not choose one. *)
+let selectUnitFilesByDigest ~interfaceDigest ~allowUnmatched digest files =
   match digest with
   | None -> files
   | Some digest ->
@@ -371,7 +372,7 @@ let selectUnitFilesByDigest ~interfaceDigest digest files =
              |> List.exists (fun ext -> interfaceDigest (base ^ ext) = Some digest))
     in
     match matchingStems with
-    | [] -> files
+    | [] when allowUnmatched -> files
     | _ -> List.filter (fun path -> List.mem (stem path) matchingStems) files
 
 let candidateFilesForUnit ~currentCmtFile comp_unit =
@@ -390,14 +391,7 @@ let candidateFilesForUnit ~currentCmtFile comp_unit =
              Filename.concat dir (String.uncapitalize_ascii comp_unit ^ ext);
            ])
   in
-  let candidates =
-    (indexed @ siblings) |> List.filter Sys.file_exists |> List.sort_uniq compare
-  in
-  (* Prefer the unit built alongside the current file when the same unit name
-     exists in several build targets. *)
-  match candidates |> List.filter (fun p -> Filename.dirname p = dir) with
-  | [] -> candidates
-  | sameDir -> sameDir
+  (indexed @ siblings) |> List.filter Sys.file_exists |> List.sort_uniq compare
 
 (* [imports] are the consumer's recorded imports: when the same unit name
    exists in several build directories, the candidate whose interface digest
@@ -410,9 +404,10 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
     | Some (Some digest) -> Some digest
     | _ -> None
   in
-  (* The digest takes part in the key: two consumers compiled against
-     different same-named units must not share an entry. *)
-  let cacheKey = (files, Option.map Digest.to_hex digest) in
+  (* Both the import digest and the later sibling preference affect which
+     same-named unit a consumer can resolve. *)
+  let dir = Filename.dirname currentCmtFile in
+  let cacheKey = (files, Option.map Digest.to_hex digest, dir) in
   match Hashtbl.find_opt unitInfoCache cacheKey with
   | Some info -> Some info
   | None -> (
@@ -431,7 +426,16 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
           | Some (_, infos) -> infos.Cmt_format.cmt_interface_digest
           | None -> None)
       in
-      let selected = selectUnitFilesByDigest ~interfaceDigest digest files in
+      let selected =
+        selectUnitFilesByDigest ~interfaceDigest ~allowUnmatched:false digest files
+      in
+      (* Prefer siblings only after selecting the recorded import digest:
+         a same-named sibling must not hide the actual dependency elsewhere. *)
+      let selected =
+        match selected |> List.filter (fun p -> Filename.dirname p = dir) with
+        | [] -> selected
+        | sameDir -> sameDir
+      in
       let loaded =
         loaded |> List.filter (fun (path, _) -> List.mem path selected)
       in
@@ -610,7 +614,8 @@ let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
       | Some (Some digest) -> Some digest
       | _ -> None
     in
-    selectUnitFilesByDigest ~interfaceDigest:interface_digest_of_file digest files
+    selectUnitFilesByDigest ~interfaceDigest:interface_digest_of_file
+      ~allowUnmatched:true digest files
   in
   let decls_of_unit comp_unit =
     match Hashtbl.find_opt loadedUnits comp_unit with
