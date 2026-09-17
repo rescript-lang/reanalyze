@@ -50,4 +50,8 @@ let () =
   Higher_order.run ();
   Higher_order.run_id ();
   Higher_order.run_esc ();
-  Cross_alias_use.run_fc ()
+  Cross_alias_use.run_fc ();
+  Higher_order_more.run ();
+  Higher_order_more.run_anon ();
+  Higher_order_more.run_nested ();
+  Higher_order_more.run_both ()

@@ -1034,3 +1034,8 @@ module Applied_struct =
      end : Shared_signature.O))
 
 let run_app2 () = ignore (Applied_fwd.run () + Applied_struct.run ())
+
+(* Passed to a higher-order functor of another file, from a third. *)
+module Impl_third (M : Shared_signature.O) = struct
+  let run () = M.g ~x:1 ()
+end

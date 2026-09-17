@@ -180,6 +180,8 @@ type delayedApplication = {
           functor the head came through, by the functor's key. A parameter
           of such a functor then resolves through that application only,
           so that [M] pairs with the [F] of the same application. *)
+  argRange : (Lexing.position * Lexing.position) list;
+      (** source ranges of the argument's definition, see [escapedRanges] *)
 }
 
 let delayedApplications : delayedApplication list ref = ref []
@@ -198,11 +200,29 @@ let applicationsOf ~bindings functorDef argIndex =
          | None -> true)
 
 (* Functors whose applications cannot all be seen: packed as first-class
-   modules, or passed to an application whose head cannot be chased. Calls
-   through their parameters are forwarded to every implementation when no
-   application is known; a functor never applied nor escaping credits
-   nothing, as its calls never run. *)
+   modules that flow somewhere other than a direct [(val p)], or passed to
+   an application whose head cannot be chased. Calls through their parameters
+   are forwarded to every implementation of the item; a functor never applied
+   nor escaping credits nothing, as its calls never run. A module that
+   escapes takes the functors nested in its definition with it: those are
+   covered by source ranges rather than keys. *)
 let escapedHeads : functorHead list ref = ref []
+
+let escapedRanges : (Lexing.position * Lexing.position) list ref = ref []
+
+(* Positions of the value expressions that are the operand of a
+   [(val e : S)], and the values (by binding position) used anywhere else:
+   a packed module used only through direct unpacks is followed precisely,
+   any other use makes it escape. *)
+let unpackOperands = ref PosSet.empty
+let usedOutsideUnpack = ref PosSet.empty
+
+let inRanges (pos : Lexing.position) ranges =
+  ranges
+  |> List.exists (fun ((start : Lexing.position), (stop : Lexing.position)) ->
+         start.pos_fname = pos.pos_fname
+         && start.pos_cnum <= pos.pos_cnum
+         && pos.pos_cnum <= stop.pos_cnum)
 
 let functorHeadToString head =
   match head with
@@ -223,10 +243,19 @@ type packedModule = {
   packedHead : functorHead option;
   packedShape : Compat.moduleShape option;
   packedConcrete : Types.module_type option;
+  packedRange : (Lexing.position * Lexing.position) list;
+  packedExpr : Typedtree.module_expr;
 }
 
 let packedModules : (Lexing.position, packedModule) Hashtbl.t =
   Hashtbl.create 4
+
+(* Whether a packed module expression is the right-hand side of a value
+   binding registered in [packedModules]; other packs escape at once. *)
+let isRegisteredPack (moduleExpr : Typedtree.module_expr) =
+  Hashtbl.fold
+    (fun _ {packedExpr} acc -> acc || packedExpr == moduleExpr)
+    packedModules false
 
 (* The binding a [(val e : S)] unpacks, when [e] names a value. *)
 let unpackedBinding (e : Typedtree.expression) =
@@ -288,14 +317,24 @@ let rec resolveHeads ~visited ~bindings functorDef argIndex components =
    itself come through a parameter; the ones left unresolved (the enclosing
    functor is never applied, or applied to something not resolvable) are
    dropped, and the calls they would credit fall back to forwarding. *)
-let resolveParameterHeadedApplications () =
+(* The packed module a value position denotes: bound there, or declared
+   there in an interface and bound at the implementation position. *)
+let findPackedModule ~sigToImpl pos =
+  match Hashtbl.find_opt packedModules pos with
+  | Some packed -> Some packed
+  | None -> (
+    match Hashtbl.find_opt sigToImpl pos with
+    | Some implPos -> Hashtbl.find_opt packedModules implPos
+    | None -> None)
+
+let resolveParameterHeadedApplications ~sigToImpl =
   (* First-class modules, from the values they were packed into. *)
   delayedApplications :=
     !delayedApplications
     |> List.map (fun application ->
            match application.appliedFunctor with
            | Packed (pos, consumed) -> (
-             match Hashtbl.find_opt packedModules pos with
+             match findPackedModule ~sigToImpl pos with
              | Some {packedHead = Some (Key (key, consumed'))} ->
                {
                  application with
@@ -337,34 +376,78 @@ let resolveParameterHeadedApplications () =
   in
   loop ();
   !delayedApplications
-  |> List.iter (fun {appliedFunctor; argIndex; argHead} ->
+  |> List.iter (fun {appliedFunctor; argIndex; argHead; argRange} ->
          match appliedFunctor with
          | ParamHead _ | Packed _ -> (
            if !Common.Cli.debug then
              Log_.item "unresolvedApplication %s index:%d@."
                (functorHeadToString appliedFunctor)
                argIndex;
+           escapedRanges := argRange @ !escapedRanges;
            match argHead [] with
            | Some head -> escapedHeads := head :: !escapedHeads
            | None -> ())
          | Key _ -> ())
 
-(* The keys of the functors that escaped, see [escapedHeads]. *)
-let escapedKeys () =
-  !escapedHeads
-  |> List.concat_map (fun head ->
-         match head with
-         | Key (pos, _) -> [pos]
-         | ParamHead (def, index, components, _) ->
-           resolveHeads ~visited:[] ~bindings:[] def index components
-           |> List.map (fun (pos, _, _) -> pos)
-         | Packed (pos, _) -> (
-           match Hashtbl.find_opt packedModules pos with
-           | Some {packedHead = Some (Key (key, _))} -> [key]
-           | Some {packedHead = Some (ParamHead (def, index, components, _))} ->
-             resolveHeads ~visited:[] ~bindings:[] def index components
-             |> List.map (fun (pos, _, _) -> pos)
-           | _ -> []))
+(* The definition ranges of the arguments at [argIndex] of the applications
+   of [functorDef], through parameters of enclosing functors. *)
+let rec resolveRanges ~visited functorDef argIndex =
+  if List.mem (functorDef, argIndex) visited then []
+  else
+    let visited = (functorDef, argIndex) :: visited in
+    applicationsOf ~bindings:[] functorDef argIndex
+    |> List.concat_map (fun {argRange; resolver} ->
+           argRange
+           @
+           match resolver with
+           | ViaParameter (def, index, _) -> resolveRanges ~visited def index
+           | Direct _ -> [])
+
+(* The keys and definition ranges of what escaped, see [escapedHeads]. *)
+let escapedKeysAndRanges ~sigToImpl =
+  let ofHead head =
+    match head with
+    | Key (pos, _) -> ([pos], [])
+    | ParamHead (def, index, components, _) ->
+      ( resolveHeads ~visited:[] ~bindings:[] def index components
+        |> List.map (fun (pos, _, _) -> pos),
+        resolveRanges ~visited:[] def index )
+    | Packed (pos, _) -> (
+      match findPackedModule ~sigToImpl pos with
+      | Some {packedHead = Some (Key (key, _)); packedRange} ->
+        ([key], packedRange)
+      | Some
+          {packedHead = Some (ParamHead (def, index, components, _)); packedRange}
+        ->
+        ( resolveHeads ~visited:[] ~bindings:[] def index components
+          |> List.map (fun (pos, _, _) -> pos),
+          packedRange @ resolveRanges ~visited:[] def index )
+      | Some {packedRange} -> ([], packedRange)
+      | None -> ([], []))
+  in
+  let keys, ranges = !escapedHeads |> List.map ofHead |> List.split in
+  (List.concat keys, List.concat ranges @ !escapedRanges)
+
+(* Packed modules that flowed somewhere other than a direct unpack escape,
+   decided once every use is known; an interface item stands for its
+   implementation. *)
+let escapePackedModulesUsedElsewhere ~sigToImpl =
+  let usedElsewhere = ref !usedOutsideUnpack in
+  Hashtbl.iter
+    (fun sigPos implPos ->
+      if PosSet.mem sigPos !usedOutsideUnpack then
+        usedElsewhere := PosSet.add implPos !usedElsewhere)
+    sigToImpl;
+  Hashtbl.iter
+    (fun pos {packedHead; packedRange} ->
+      if PosSet.mem pos !usedElsewhere then (
+        if !Common.Cli.debug then
+          Log_.item "packedEscapes %s@." (pos |> posToString);
+        escapedRanges := packedRange @ !escapedRanges;
+        match packedHead with
+        | Some head -> escapedHeads := head :: !escapedHeads
+        | None -> ()))
+    packedModules
 
 (* Coercion references made through a functor parameter, as in
    [module Outer (M : S) = Inner (M)]: credited to the arguments of the
@@ -495,8 +578,11 @@ let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
            | _ -> ());
     let call = (!supplied, !suppliedMaybe) in
     let parameter = findFunctorParameter path in
+    (* Without shape resolution the call is only forwarded (below); recording
+       it here too would credit it twice. *)
     (match (parameter, pathComponents path) with
-    | Some {functorDef; paramIndex; prefix}, Some components ->
+    | Some {functorDef; paramIndex; prefix}, Some components
+      when Compat.shapeResolutionAvailable ->
       let components = prefix @ components in
       let key = (functorDef, paramIndex, components) in
       if !Common.Cli.debug then
@@ -687,6 +773,41 @@ let rec moduleShapeOfExpr ?(env = []) (moduleExpr : Typedtree.module_expr) =
 #endif
   | _ -> None
 
+(* The source ranges of the definition a module expression denotes, for
+   the functors nested in it (see [escapedRanges]): its own for a structure
+   or functor, its binding's through paths and aliases (in any unit), and
+   those of the functor and the arguments for an application (the result
+   may re-export either). *)
+let rec definitionRange ?(depth = 0) (e : Typedtree.module_expr) =
+  let own =
+    if e.mod_loc.loc_ghost then []
+    else [(e.mod_loc.loc_start, e.mod_loc.loc_end)]
+  in
+  if depth > 8 then []
+  else
+    match e.mod_desc with
+    | Tmod_structure _ | Tmod_functor _ -> own
+    | Tmod_constraint (inner, _, _, _) -> definitionRange ~depth inner
+    | Tmod_ident (path, _) -> definitionRangeOfPath ~depth path
+    | Tmod_apply (functorExpr, argumentExpr, _) ->
+      definitionRange ~depth:(depth + 1) functorExpr
+      @ definitionRange ~depth:(depth + 1) argumentExpr
+#if OCAML_VERSION >= (5, 1, 0)
+    | Tmod_apply_unit functorExpr -> definitionRange ~depth:(depth + 1) functorExpr
+#endif
+    | Tmod_unpack (packed, _) -> (
+      match unpackedBinding packed with
+      | Some pos -> (
+        match Hashtbl.find_opt packedModules pos with
+        | Some {packedRange} -> packedRange
+        | None -> [])
+      | None -> [])
+
+and definitionRangeOfPath ?(depth = 0) (path : Path.t) =
+  match !identResolutions.bindingOfPath path with
+  | Some (_, definition, _, _) -> definitionRange ~depth:(depth + 1) definition
+  | None -> []
+
 (* The functor a module expression applies, and the number of arguments
    already consumed by partial applications it stands for, as in
    [module G = F (A)] followed by [G (B)]. Aliases ([module G = F]) are
@@ -827,11 +948,16 @@ let rec collectExpr super self (e : Typedtree.expression) =
   | _ -> ());
   #endif
   (match e.exp_desc with
-  | Texp_pack moduleExpr -> (
-    (* A functor packed as a first-class module escapes, see [escapedHeads]. *)
+  | Texp_pack moduleExpr when not (isRegisteredPack moduleExpr) -> (
+    (* A module packed as a first-class value anywhere but in a value
+       binding escapes at once, with the functors nested in it. *)
+    escapedRanges := definitionRange moduleExpr @ !escapedRanges;
     match functorHeadOf moduleExpr with
     | Some head -> escapedHeads := head :: !escapedHeads
     | None -> ())
+  | Texp_ident (_, _, {val_loc})
+    when not (PosSet.mem e.exp_loc.loc_start !unpackOperands) ->
+    usedOutsideUnpack := PosSet.add val_loc.loc_start !usedOutsideUnpack
   | _ -> ());
   (match e.exp_desc with
   | Texp_ident (_path, _, {Types.val_loc = {loc_ghost = false; _} as locTo})
@@ -1374,8 +1500,11 @@ let registerPackedModule (vb : Typedtree.value_binding) =
         packedHead = functorHeadOf moduleExpr;
         packedShape = moduleShapeOfExpr moduleExpr;
         packedConcrete = concrete;
+        packedRange = definitionRange moduleExpr;
+        packedExpr = moduleExpr;
       }
   | _ -> ()
+
 
 let () = registerPackedModuleRef := registerPackedModule
 
@@ -1475,8 +1604,8 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
       | Tmod_constraint (inner, _, _, _) -> flatten inner args
       | _ -> (e, args)
     in
-    let head, args = flatten moduleExpr [] in
-    let head = functorHeadOf head in
+    let headExpr, args = flatten moduleExpr [] in
+    let head = functorHeadOf headExpr in
     if !Common.Cli.debug then
       Log_.item "functorApplication %s key:%s args:%d@."
         (moduleExpr.mod_loc.loc_start |> posToString)
@@ -1523,16 +1652,30 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
     match head with
     | None ->
       (* The functors passed to an application whose head cannot be chased
-         (a first-class module from elsewhere) escape: their calls can only
-         be forwarded. *)
+         (a first-class module from elsewhere, a member of the result of an
+         applied functor parameter) escape: their calls can only be
+         forwarded. So does what the head's root stands for, when it is a
+         parameter: [G.Inner (X)] with [module G = F (A)] applies a functor
+         nested in the argument passed for [F]. *)
       args
       |> List.iter (fun argumentExpr ->
              match argumentExpr with
              | Some argumentExpr -> (
+               escapedRanges := definitionRange argumentExpr @ !escapedRanges;
                match functorHeadOf argumentExpr with
                | Some head -> escapedHeads := head :: !escapedHeads
                | None -> ())
-             | None -> ())
+             | None -> ());
+      (match headExpr.mod_desc with
+      | Tmod_ident ((Pdot _ as path), _) -> (
+        match headOfPath (Pident (Path.head path)) [] with
+        | Some root ->
+          escapedHeads := root :: !escapedHeads;
+          escapedRanges :=
+            definitionRangeOfPath (Pident (Path.head path)) @ !escapedRanges
+        | None -> ()
+        | exception _ -> ())
+      | _ -> ())
     | Some head ->
       let appliedFunctor, firstIndex =
         match head with
@@ -1553,6 +1696,7 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
                    argIndex = firstIndex + i;
                    resolver = argumentItemResolver argumentExpr;
                    argHead = argHead argumentExpr;
+                   argRange = definitionRange argumentExpr;
                  }
                  :: !delayedApplications
              | None -> ())
@@ -1663,6 +1807,8 @@ let traverseStructure ~doTypes ~doExternals =
 #if OCAML_VERSION >= (5, 1, 0)
     | Tmod_apply_unit _ -> recordFunctorApplication moduleExpr
 #endif
+    | Tmod_unpack (packed, _) ->
+      unpackOperands := PosSet.add packed.exp_loc.loc_start !unpackOperands
     | _ -> ());
     let r = super.Tast_mapper.module_expr self moduleExpr in
     functorParameters := oldFunctorParameters;
@@ -1903,8 +2049,17 @@ let forceDelayedItems () =
      behaviour: the calls are forwarded to every implementation of the item.
      An argument whose item cannot be resolved falls back to the item too. *)
   delayedApplications := List.rev !delayedApplications;
-  resolveParameterHeadedApplications ();
-  let escaped = escapedKeys () in
+  (* Interface items stand for their implementations (value dependencies
+     pair an implementation with the item it satisfies). *)
+  let sigToImpl = Hashtbl.create 16 in
+  !delayedValueDependencies
+  |> List.iter (fun ((locTo : Location.t), (locFrom : Location.t)) ->
+         if not (locTo.loc_ghost || locFrom.loc_ghost) then
+           Hashtbl.replace sigToImpl locFrom.loc_start locTo.loc_start);
+  resolveParameterHeadedApplications ~sigToImpl;
+  escapePackedModulesUsedElsewhere ~sigToImpl;
+  let keys, ranges = escapedKeysAndRanges ~sigToImpl in
+  let isEscaped def = List.mem def keys || inRanges def ranges in
   Hashtbl.iter
     (fun (def, index, components) calls ->
       let calls = List.rev calls in
@@ -1912,10 +2067,19 @@ let forceDelayedItems () =
         Log_.item "parameterCalls %s index:%d %s: %s@." (def |> posToString)
           index
           (String.concat "." components)
-          (if hasApplication def index then "applied"
-           else if List.mem def escaped then "escaped"
+          (if isEscaped def then "escaped"
+           else if hasApplication def index then "applied"
            else "never applied");
-      if hasApplication def index then
+      (* An escaping functor may have applications this analysis cannot
+         see: its calls are forwarded, even when some applications are
+         known (crediting those precisely as well would count them twice). *)
+      if isEscaped def then
+        calls
+        |> List.iter (fun {call; callFrom; callTo; callToImpl; callPath} ->
+               call
+               |> DeadOptionalArgs.addReferences ~locFrom:callFrom ~locTo:callTo
+                    ?locToImpl:callToImpl ~forwardable:true ~path:callPath)
+      else if hasApplication def index then
         match
           resolveArgumentItems ~visited:[] ~bindings:[] def index components
         with
@@ -1931,15 +2095,11 @@ let forceDelayedItems () =
                  |> List.iter (fun {call} ->
                         DeadOptionalArgs.addCallToImplementation
                           ~posTo:locTo.loc_start call))
-      else if List.mem def escaped then
-        calls
-        |> List.iter (fun {call; callFrom; callTo; callToImpl; callPath} ->
-               call
-               |> DeadOptionalArgs.addReferences ~locFrom:callFrom ~locTo:callTo
-                    ?locToImpl:callToImpl ~forwardable:true ~path:callPath))
+      else ())
     parameterCalls;
   Hashtbl.reset parameterCalls;
   escapedHeads := [];
+  escapedRanges := [];
   (* Reference the items a parameter's coercion uses, in the arguments of the
      enclosing functor's applications; the module type item is the fallback
      when an argument cannot be resolved. *)

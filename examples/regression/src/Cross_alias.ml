@@ -26,3 +26,10 @@ module Impl_cross_fc (M : Shared_signature.O) = struct
 end
 
 let packed_cross = (module Impl_cross_fc : Higher_order.Opt_functor)
+
+module Outer_cross_ho (F : Higher_order.Opt_functor) (M : Shared_signature.O) =
+struct
+  module A = F (M)
+
+  let run () = A.run ()
+end

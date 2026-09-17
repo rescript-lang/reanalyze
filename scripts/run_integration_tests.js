@@ -465,6 +465,25 @@ function runRegressionTests() {
       output,
       "optional argument x of function Opt_twice.+g is always supplied (2 calls)"
     );
+    // ... a functor whose body is directly the parameter's application, and a
+    // higher-order functor from another file applied to a functor from a
+    // third file.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_direct_body.+g is always supplied (1 calls)"
+    );
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_cross_ho.+g is always supplied (1 calls)"
+    );
+    // ... and with the functor parameter's type written inline: the passed
+    // functor's values used through it stay live, its unused helper dead.
+    assertIncludes(
+      output,
+      "optional argument x of function Opt_anon.+g is always supplied (1 calls)"
+    );
+    assertIncludes(output, "Live Value +Higher_order_more.Impl_anon.+run");
+    assertIncludes(output, "Dead Value +Higher_order_more.Impl_anon.+helper");
     assertIncludes(
       output,
       "optional argument x of function Opt_none_ho.+g is never used"
@@ -484,6 +503,25 @@ function runRegressionTests() {
       "optional argument y of function P_esc.+h is always supplied"
     );
     assertNotIncludes(output, "P_esc.+h is never used");
+    // ... including functors nested in a module that escapes, nested in
+    // the result of an applied functor parameter, and a functor applied
+    // directly whose packed value also flows through a function.
+    assertIncludes(
+      output,
+      "optional argument z of function P2_esc.+k is always supplied"
+    );
+    assertNotIncludes(output, "P2_esc.+k is never used");
+    assertIncludes(
+      output,
+      "optional argument w of function P3_esc.+q is always supplied"
+    );
+    assertNotIncludes(output, "P3_esc.+q is never used");
+    assertIncludes(
+      output,
+      "optional argument v of function P4_b.+u is always supplied"
+    );
+    assertNotIncludes(output, "P4_b.+u is never used");
+    assertNotIncludes(output, "P4_a.+u is never used");
   }
 
   assertNotIncludes(output, "Parent is a dead module");
