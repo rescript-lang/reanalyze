@@ -1264,6 +1264,7 @@ function main() {
     cleanBuildExamples();
     runRegressionTests();
     runExceptionAliasMissingProviderTest();
+    require("./test_exception_identity")(reanalyzeFile);
     runDuplicateLayoutTest();
     runByteNativeDuplicateTest();
     runDuplicateContextTest();

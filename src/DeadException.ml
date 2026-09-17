@@ -1,183 +1,259 @@
 module CompilerPath = Path
-
 open DeadCommon
-open Common
 
-type item = {exceptionPath : Path.t; locFrom : Location.t}
+(* A module's exported names and its lexical identity are separate: replacing
+   an export must not change a binding captured by an earlier alias. *)
+type moduleNode = {
+  id : int;
+  modules : (string, moduleNode) Hashtbl.t;
+  exceptions : (string, Location.t) Hashtbl.t;
+  mutable alias : CompilerPath.t option;
+}
+
+type compilationUnit = {
+  cmtFilePath : string;
+  imports : Misc.crcs;
+  root : moduleNode;
+  mutable bindings : moduleNode Ident.tbl;
+  declarations : Location.t PosHash.t;
+}
+
+type item = {
+  exceptionPath : CompilerPath.t;
+  unit : compilationUnit;
+  locFrom : Location.t;
+}
 
 let delayedItems = ref []
-let declarations = Hashtbl.create 1
-let compilationUnit = ref ""
-let moduleAliases = Hashtbl.create 16
-let declarationPaths = PosHash.create 16
+let units = Hashtbl.create 16
+let currentUnit = ref None
+let nextNode = ref 0
 
-(* Read explicit aliases from annotations, including wrappers whose source
-   is unavailable. Local roots are resolved by identifier, so a nested
-   module can alias an outer module despite name shadowing. *)
-let registerCompilationUnit (infos : Cmt_format.cmt_infos) =
-  compilationUnit := infos.cmt_modname;
-  PosHash.clear declarationPaths;
-  let unitName = Name.create ~isInterface:false infos.cmt_modname in
-  let modulePaths = ref Ident.empty in
-  let aliases = ref [] in
-  let rec collect ~recurse ~path signature =
-    signature
-    |> List.iter (fun (item : Types.signature_item) ->
-           match item with
-           | Sig_module _ -> (
-             match Compat.getSigModuleModtype item with
-             | Some (id, moduleType, _) ->
-               let path = Name.create (Ident.name id) :: path in
-               modulePaths := Ident.add id path !modulePaths;
-               (match moduleType with
-               | Mty_alias target -> aliases := (path, target) :: !aliases
-               | Mty_signature signature when recurse ->
-                 collect ~recurse ~path signature
-               | _ -> ())
-             | None -> ())
-           | _ -> ())
+let newModule () =
+  incr nextNode;
+  {
+    id = !nextNode;
+    modules = Hashtbl.create 4;
+    exceptions = Hashtbl.create 4;
+    alias = None;
+  }
+
+let getCompilationUnit ~cmtFilePath (infos : Cmt_format.cmt_infos) =
+  let key =
+    ( infos.cmt_sourcefile,
+      infos.cmt_builddir,
+      infos.cmt_source_digest,
+      match infos.cmt_annots with Interface _ -> true | _ -> false )
   in
-  (* A named module-type constraint can hide an implementation's aliases
-     behind [Mty_ident]. Inspect the concrete body beneath the constraint;
-     bindings in separate implementations keep their own identifiers. *)
-  let rec collectStructure ~path (structure : Typedtree.structure) =
-    collect ~recurse:false ~path structure.str_type;
-    structure.str_items
-    |> List.iter (fun (item : Typedtree.structure_item) ->
-           match item.str_desc with
-           | Tstr_module binding -> collectBinding ~path binding
-           | Tstr_recmodule bindings ->
-             List.iter (collectBinding ~path) bindings
-           | Tstr_include incl ->
-             collect ~recurse:true ~path incl.incl_type;
-             collectInclude ~path ~signature:incl.incl_type incl.incl_mod
-           | Tstr_exception _ -> (
-             match Compat.tstrExceptionGet item.str_desc with
-             | Some (id, loc) ->
-               PosHash.replace declarationPaths loc.loc_start
-                 (Name.create (Ident.name id) :: path)
-             | None -> ())
-           | _ -> ())
-  and collectBinding ~path (binding : Typedtree.module_binding) =
-    match binding.mb_id with
-    | Some id ->
-      collectModule ~path:(Name.create (Ident.name id) :: path) binding.mb_expr
-    | None -> ()
-  and collectModule ~path (moduleExpr : Typedtree.module_expr) =
-    match moduleExpr.mod_desc with
-    | Tmod_structure structure -> collectStructure ~path structure
-    | Tmod_constraint (inner, _, _, _) -> collectModule ~path inner
-    | Tmod_ident (target, _) -> aliases := (path, target) :: !aliases
-    | _ -> (
-      match moduleExpr.mod_type with
-      | Mty_signature signature -> collect ~recurse:true ~path signature
-      | _ -> ())
-  and collectInclude ~path ~signature (moduleExpr : Typedtree.module_expr) =
-    match moduleExpr.mod_desc with
-    | Tmod_structure structure -> collectStructure ~path structure
-    | Tmod_constraint (inner, _, _, _) ->
-      collectInclude ~path ~signature inner
-    | Tmod_ident (target, _) ->
-      (* Included modules retain their identity even when a constraint
-         exposes a signature rather than an alias for each module. *)
+  match Hashtbl.find_opt units key with
+  | Some unit -> unit
+  | None ->
+    let unit =
+      {
+        cmtFilePath;
+        imports = infos.cmt_imports;
+        root = newModule ();
+        bindings = Ident.empty;
+        declarations = PosHash.create 16;
+      }
+    in
+    Hashtbl.add units key unit;
+    let bind parent id node =
+      unit.bindings <- Ident.add id node unit.bindings;
+      Hashtbl.replace parent.modules (Ident.name id) node
+    in
+    let rec collectSignature node signature =
       signature
       |> List.iter (fun (item : Types.signature_item) ->
-             match item with
-             | Sig_module _ -> (
-               match Compat.getSigModuleModtype item with
-               | Some (id, _, _) ->
-                 let name = Ident.name id in
-                 aliases :=
-                   (Name.create name :: path, CompilerPath.Pdot (target, name))
-                   :: !aliases
-               | None -> ())
-             | _ -> ())
-    | _ -> ()
-  in
-  (match infos.cmt_annots with
-  | Implementation structure -> collectStructure ~path:[unitName] structure
-  | Interface signature ->
-    collect ~recurse:true ~path:[unitName] signature.sig_type
-  | _ -> ());
-  (* Collect all module bindings first, including recursive groups, before
-     resolving local alias roots to their fully qualified paths. *)
-  !aliases
-  |> List.iter (fun (path, target) ->
-         match CompilerPath.flatten target with
-         | `Ok (root, fields) ->
-           let rootPath =
-             if Ident.persistent root then
-               Some [Name.create ~isInterface:false (Ident.name root)]
-             else
-               try Some (Ident.find_same root !modulePaths)
-               with Not_found -> None
-           in
-           rootPath
-           |> Option.iter (fun rootPath ->
-                  Hashtbl.replace moduleAliases path
-                    (List.rev_map Name.create fields @ rootPath))
-         | `Contains_apply -> ())
+          match item with
+          | Sig_module _ -> (
+            match Compat.getSigModuleModtype item with
+            | Some (id, moduleType, _) ->
+              let child = newModule () in
+              bind node id child;
+              collectModuleType child moduleType
+            | None -> ())
+          | Sig_typext (id, extension, Text_exception, _) ->
+            Hashtbl.replace node.exceptions (Ident.name id) extension.ext_loc
+          | _ -> ())
+    and collectModuleType node = function
+      | Types.Mty_alias target -> node.alias <- Some target
+      | Mty_signature signature -> collectSignature node signature
+      | _ -> ()
+    and collectStructure node (structure : Typedtree.structure) =
+      structure.str_items
+      |> List.iter (fun (item : Typedtree.structure_item) ->
+          match item.str_desc with
+          | Tstr_module binding -> collectBinding node binding
+          | Tstr_recmodule bindings -> List.iter (collectBinding node) bindings
+          | Tstr_include incl ->
+            let included = newModule () in
+            collectModule included incl.incl_mod;
+            (* Includes introduce fresh identifiers for the exported bindings.
+             Point them at the concrete nodes, retaining captured old ones. *)
+            incl.incl_type
+            |> List.iter (fun (item : Types.signature_item) ->
+                match item with
+                | Sig_module _ -> (
+                  match Compat.getSigModuleModtype item with
+                  | Some (id, moduleType, _) ->
+                    let name = Ident.name id in
+                    let child =
+                      match Hashtbl.find_opt included.modules name with
+                      | Some child -> child
+                      | None ->
+                        let child = newModule () in
+                        collectModuleType child moduleType;
+                        child
+                    in
+                    (match (child.alias, included.alias) with
+                    | None, Some target ->
+                      child.alias <- Some (CompilerPath.Pdot (target, name))
+                    | _ -> ());
+                    bind node id child
+                  | None -> ())
+                | Sig_typext (id, extension, Text_exception, _) ->
+                  let name = Ident.name id in
+                  let loc =
+                    match Hashtbl.find_opt included.exceptions name with
+                    | Some loc -> loc
+                    | None -> extension.ext_loc
+                  in
+                  Hashtbl.replace node.exceptions name loc
+                | _ -> ())
+          | Tstr_exception _ -> (
+            match Compat.tstrExceptionGet item.str_desc with
+            | Some (id, loc) ->
+              Hashtbl.replace node.exceptions (Ident.name id) loc
+            | None -> ())
+          | _ -> ())
+    and collectBinding node (binding : Typedtree.module_binding) =
+      match binding.mb_id with
+      | Some id ->
+        let child = newModule () in
+        bind node id child;
+        collectModule child binding.mb_expr
+      | None -> ()
+    and collectModule node (expr : Typedtree.module_expr) =
+      match expr.mod_desc with
+      | Tmod_structure structure -> collectStructure node structure
+      | Tmod_constraint (inner, _, _, _) -> collectModule node inner
+      | Tmod_ident (target, _) ->
+        collectModuleType node expr.mod_type;
+        node.alias <- Some target
+      | _ -> collectModuleType node expr.mod_type
+    in
+    (match infos.cmt_annots with
+    | Implementation structure ->
+      collectStructure unit.root structure;
+      (* Expression-local modules do not occur in structure signatures. *)
+      let super = Tast_iterator.default_iterator in
+      let iterator =
+        {
+          super with
+          expr =
+            (fun self expr ->
+              Compat.iterExpressionModule
+                (fun id moduleExpr ->
+                  let node = newModule () in
+                  unit.bindings <- Ident.add id node unit.bindings;
+                  collectModule node moduleExpr)
+                expr;
+              super.expr self expr);
+        }
+      in
+      iterator.structure iterator structure
+    | Interface signature -> collectSignature unit.root signature.sig_type
+    | _ -> ());
+    unit
+
+let registerCompilationUnit ~cmtFilePath infos =
+  currentUnit := Some (getCompilationUnit ~cmtFilePath infos)
 
 let add ~path ~(loc : Location.t) ~(strLoc : Location.t) name =
-  let exceptionPath =
-    (* The concrete annotation path also retains recursive module bindings,
-       which the general declaration visitor does not put on ModulePath. *)
-    match PosHash.find_opt declarationPaths loc.loc_start with
-    | Some exceptionPath -> exceptionPath
-    | None -> (
-      match List.rev (name :: path) with
-      | _ :: rest ->
-        List.rev (Name.create ~isInterface:false !compilationUnit :: rest)
-      | [] -> [])
-  in
-  Hashtbl.add declarations exceptionPath loc;
+  !currentUnit
+  |> Option.iter (fun unit ->
+      PosHash.replace unit.declarations loc.loc_start loc);
   name
   |> addDeclaration_ ~posEnd:strLoc.loc_end ~posStart:strLoc.loc_start
        ~declKind:Exception ~moduleLoc:(ModulePath.getCurrent ()).loc ~path ~loc
 
-(* Rewrite the most specific known prefix once, then retry the full path.
-   A wrapper rewrite may expose a specific alias that must take precedence
-   over forwarding another prefix to a provider outside the scan root. *)
-let rec resolveModuleAliases ~visited path =
-  let rec rewrite inner path =
-    match Hashtbl.find_opt moduleAliases path with
-    | Some target -> Some (path, List.rev_append inner target)
-    | None -> (
-      match path with
-      | name :: rest -> rewrite (name :: inner) rest
-      | [] -> None)
+let importedUnit unit name =
+  let annotations =
+    Compat.selectUnitAnnotations ~currentCmtFile:unit.cmtFilePath
+      ~imports:unit.imports name
   in
-  match rewrite [] path with
-  | None -> Some path
-  | Some (alias, target) ->
-    if List.mem alias visited then None
-    else resolveModuleAliases ~visited:(alias :: visited) target
+  let implementation =
+    annotations
+    |> List.find_opt (fun (_, infos) ->
+        match infos.Cmt_format.cmt_annots with
+        | Implementation _ -> true
+        | _ -> false)
+  in
+  match implementation with
+  | Some (cmtFilePath, infos) -> Some (getCompilationUnit ~cmtFilePath infos)
+  | None -> None
 
-let findDeclaration exceptionPath =
-  match exceptionPath |> Path.moduleToImplementation with
-  | name :: modulePath -> (
-    match resolveModuleAliases ~visited:[] modulePath with
-    | Some modulePath -> Hashtbl.find_opt declarations (name :: modulePath)
-    | None -> None)
-  | [] -> None
+let rec resolvePath ~visited unit path fields =
+  match CompilerPath.flatten path with
+  | `Contains_apply -> None
+  | `Ok (root, suffix) -> (
+    let fields = suffix @ fields in
+    if Ident.persistent root then
+      importedUnit unit (Ident.name root)
+      |> Option.fold ~none:None ~some:(fun provider ->
+          resolveNode ~visited provider provider.root fields)
+    else
+      match Ident.find_same root unit.bindings with
+      | node -> resolveNode ~visited unit node fields
+      | exception Not_found -> None)
+
+and resolveNode ~visited unit node fields =
+  (* Re-entering a wrapper through a different field is not a cycle. A
+     repeated node with the same (or an expanding) suffix is. *)
+  let rec isSuffix suffix fields =
+    suffix = fields
+    || match fields with _ :: rest -> isSuffix suffix rest | [] -> false
+  in
+  if
+    List.exists
+      (fun (id, suffix) -> id = node.id && isSuffix suffix fields)
+      visited
+  then None
+  else
+    let visited = (node.id, fields) :: visited in
+    let direct =
+      match fields with
+      | [name] ->
+        Hashtbl.find_opt node.exceptions name
+        |> Option.fold ~none:None ~some:(fun loc ->
+            PosHash.find_opt unit.declarations loc.Location.loc_start)
+      | name :: rest ->
+        Hashtbl.find_opt node.modules name
+        |> Option.fold ~none:None ~some:(fun child ->
+            resolveNode ~visited unit child rest)
+      | [] -> None
+    in
+    match (direct, node.alias) with
+    | Some _, _ -> direct
+    | None, Some target -> resolvePath ~visited unit target fields
+    | None, None -> None
 
 let forceDelayedItems () =
   let items = !delayedItems |> List.rev in
   delayedItems := [];
   items
-  |> List.iter (fun {exceptionPath; locFrom} ->
-         match findDeclaration exceptionPath with
-         | None -> ()
-         | Some locTo ->
-           addValueReference ~addFileReference:true ~locFrom ~locTo;
-           (* Exception declarations are resolved through type references,
-              like the non-delayed case in DeadValue. *)
-           if !Config.analyzeTypes then
-             TypeReferences.add locTo.loc_start locFrom.loc_start)
+  |> List.iter (fun {exceptionPath; unit; locFrom} ->
+      match resolvePath ~visited:[] unit exceptionPath [] with
+      | None -> ()
+      | Some locTo ->
+        addValueReference ~addFileReference:true ~locFrom ~locTo;
+        if !Config.analyzeTypes then
+          TypeReferences.add locTo.loc_start locFrom.loc_start)
 
-let markAsUsed ~(locFrom : Location.t) ~(locTo : Location.t) path_ =
+let markAsUsed ~(locFrom : Location.t) ~(locTo : Location.t) exceptionPath =
   if locTo.loc_ghost then
-    (* Probably defined in another file, delay processing and check at the end *)
-    let exceptionPath = path_ |> Path.fromPathT in
-    delayedItems := {exceptionPath; locFrom} :: !delayedItems
+    !currentUnit
+    |> Option.iter (fun unit ->
+        delayedItems := {exceptionPath; unit; locFrom} :: !delayedItems)
   else addValueReference ~addFileReference:true ~locFrom ~locTo
