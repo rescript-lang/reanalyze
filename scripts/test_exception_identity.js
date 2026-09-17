@@ -122,6 +122,26 @@ module.exports = function testExceptionIdentity(reanalyzeFile) {
     }
     assertContexts();
 
+    // Ordered implicit opens can change a local alias target while leaving
+    // the source and imported interfaces identical. Keep both lexical graphs.
+    const opens = path.join(root, "ordered-open-contexts");
+    for (const name of ["left", "right"]) {
+      compile(opens, `${name}.ml`, "exception Used = Not_found\nexception Unused = Not_found");
+    }
+    compile(opens, "first.ml", "module Target = Left");
+    compile(opens, "second.ml", "module Target = Right");
+    const openedSource = path.join(opens, "shared.ml");
+    fs.writeFileSync(openedSource,
+      "let run () = let module Alias = Target in raise Alias.Used\nlet () = run ()");
+    for (const [dir, names] of [["a", ["First", "Second"]], ["b", ["Second", "First"]]]) {
+      fs.mkdirSync(path.join(opens, dir));
+      child_process.execFileSync("ocamlc", [
+        "-bin-annot", ...names.flatMap((name) => ["-open", name]),
+        "-c", "-o", `${dir}/shared.cmo`, openedSource,
+      ], { cwd: opens, stdio: "pipe" });
+    }
+    analyze(opens, ".", ["left.Used", "right.Used"], ["left.Unused", "right.Unused"]);
+
     // Identical provider sources can also have equal interface digests but
     // distinct imports. Without a matching sibling, do not choose either one.
     const ambiguous = path.join(root, "ambiguous-provider-contexts");
