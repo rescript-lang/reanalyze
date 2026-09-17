@@ -2,6 +2,7 @@ let definitely_dead () = ()
 
 let () =
   Attribution_sweep.run ();
+  Escaped_coercion.run ();
   Partial_context_use.run ();
   Live_ancestors.use_child ();
   Functor_argument.use_set ();

@@ -1,16 +1,24 @@
 open Common
 
-(* Compiled units already scanned, by source: a broad root may hold copies
-   of the same artifact (a library's objects and its _build/install copy,
-   byte and native objects), which must not be scanned twice. *)
+(* Compiled units already scanned, by source and dependency context: a broad
+   root may hold copies of the same artifact (a library's objects and its
+   _build/install copy, byte and native objects), which must not be scanned
+   twice. *)
 let scannedUnits = Hashtbl.create 256
 
 let loadCmtFile ~cmtRoot cmtFilePath =
   let cmt_infos = Cmt_format.read_cmt cmtFilePath in
+  (* Identical source can be compiled against different interfaces. Preserve
+     those contexts, but not the byte/native distinction: [cmt_imports]
+     records the reused self-interface in both artifacts, whereas
+     [cmt_interface_digest] can be absent from the native artifact. *)
+  let imports = List.sort_uniq compare cmt_infos.cmt_imports in
   let unitKey =
-    ( cmt_infos.cmt_sourcefile,
+    ( cmt_infos.cmt_modname,
+      cmt_infos.cmt_sourcefile,
       cmt_infos.cmt_builddir,
       cmt_infos.cmt_source_digest,
+      imports,
       Filename.check_suffix cmtFilePath ".cmti" )
   in
   if Hashtbl.mem scannedUnits unitKey then ()

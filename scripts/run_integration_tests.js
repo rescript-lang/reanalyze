@@ -662,6 +662,19 @@ function runRegressionTests() {
       );
       assertNotIncludes(output, `${name}.+g is never used`);
     }
+    for (const name of ["Escaped_only", "Known_and_escaped"]) {
+      assertIncludes(output, `Live Value +Escaped_coercion.${name}.Possible_arg.+needed`);
+      assertNotIncludes(output, `Dead Value +Escaped_coercion.${name}.Possible_arg.+needed`);
+      assertIncludes(output, `Dead Value +Escaped_coercion.${name}.Possible_arg.+unused`);
+    }
+    assertIncludes(
+      output,
+      "Dead Value +Escaped_coercion.Never_applied.Unrelated_arg.+needed"
+    );
+    assertIncludes(output, "Live Value +Escaped_coercion.Known_only.Known_arg.+needed");
+    assertIncludes(output, "Dead Value +Escaped_coercion.Known_only.Unrelated_arg.+needed");
+    assertIncludes(output, "Live Value +Escaped_coercion.Nested_stored.Possible_arg.N.+needed");
+    assertIncludes(output, "Dead Value +Escaped_coercion.Nested_stored.Possible_arg.N.+unused");
   }
 
   assertNotIncludes(output, "Parent is a dead module");
@@ -801,6 +814,55 @@ function runByteNativeDuplicateTest() {
   }
 }
 
+function runDuplicateContextTest() {
+  if (!ocamlVersionAtLeast(5, 3)) return;
+  const fs = require("fs");
+  const os = require("os");
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "reanalyze-context-"));
+  const fixture = path.join(__dirname, "..", "examples", "regression", "duplicate_context");
+  try {
+    fs.copyFileSync(path.join(fixture, "Shared.ml"), path.join(cwd, "Shared.ml"));
+    for (const dir of ["a", "b"]) {
+      fs.mkdirSync(path.join(cwd, dir));
+      fs.copyFileSync(path.join(fixture, dir, "Provider.ml"), path.join(cwd, dir, "Provider.ml"));
+      child_process.execFileSync("ocamlc", [
+        "-bin-annot", "-bin-annot-occurrences", "-c", `${dir}/Provider.ml`,
+      ], { cwd });
+      child_process.execFileSync("ocamlc", [
+        "-bin-annot", "-bin-annot-occurrences", "-I", dir, "-c",
+        "-o", `${dir}/Shared.cmo`, "Shared.ml",
+      ], { cwd });
+    }
+    const run = () => child_process.execFileSync(
+      reanalyzeFile, ["-ci", "-debug", "-dce-cmt", "."],
+      { cwd, encoding: "utf8" }
+    );
+    const assertContexts = (output) => {
+      if ((output.match(/Scanning .*Shared\.cmt /g) || []).length !== 2) {
+        throw new Error("Both dependency contexts must be scanned exactly once");
+      }
+      if ((output.match(/Live Value \+Provider\.\+g:/g) || []).length !== 2) {
+        throw new Error("Both dependency implementations must remain live");
+      }
+      if ((output.match(/optional argument x of function \+g is always supplied \(1 calls\)/g) || []).length !== 2) {
+        throw new Error("Each dependency context must receive exactly one call");
+      }
+      assertNotIncludes(output, "Dead Value +Provider.+g");
+    };
+    console.log(`${cwd}: reanalyze identical source with distinct dependency contexts`);
+    assertContexts(run());
+    for (const dir of ["a", "b"]) {
+      fs.mkdirSync(path.join(cwd, dir, "install"));
+      for (const file of ["Provider.cmt", "Shared.cmt"]) {
+        fs.copyFileSync(path.join(cwd, dir, file), path.join(cwd, dir, "install", file));
+      }
+    }
+    assertContexts(run());
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
 function runFunctorScanOrderTest(providerName, consumerName, assertions) {
   if (!ocamlVersionAtLeast(5, 3)) return;
   const fs = require("fs");
@@ -931,6 +993,7 @@ function main() {
     runRegressionTests();
     runDuplicateLayoutTest();
     runByteNativeDuplicateTest();
+    runDuplicateContextTest();
     runFunctorScanOrderTest("Unpacked_functor", "Unpacked_functor_use", [
       "optional argument x of function Unpacked_arg.+g is always supplied (1 calls)",
       "optional argument x of function Unpacked_unused.+g is never used",

@@ -2501,14 +2501,18 @@ let forceDelayedItems () =
       else ())
     parameterCalls;
   Hashtbl.reset parameterCalls;
-  escapedHeads := [];
-  escapedRanges := [];
   (* Reference the items a parameter's coercion uses, in the arguments of the
      enclosing functor's applications; the module type item is the fallback
-     when an argument cannot be resolved. *)
+     when an argument cannot be resolved. An escaped functor also needs that
+     fallback even when some known applications resolve precisely: its
+     unseen applications can supply other implementations of the item. *)
   List.rev !parameterCoercions
   |> List.iter
        (fun {outerFunctor; outerIndex; itemPath; coercionFrom; coercionTo} ->
+         if isEscaped outerFunctor then
+           addValueReference ~addFileReference:true ~locFrom:coercionFrom
+             ~locTo:coercionTo
+         else
            let resolved =
              resolveArgumentItems ~visited:[] ~bindings:[] outerFunctor
                outerIndex itemPath
@@ -2524,6 +2528,8 @@ let forceDelayedItems () =
                     addValueReference ~addFileReference:true
                       ~locFrom:coercionFrom ~locTo));
   parameterCoercions := [];
+  escapedHeads := [];
+  escapedRanges := [];
   delayedApplications := [];
   Hashtbl.reset applicationIdsByPosition;
   Hashtbl.reset applicationPrefixes;
