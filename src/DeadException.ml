@@ -135,27 +135,23 @@ let add ~path ~(loc : Location.t) ~(strLoc : Location.t) name =
   |> addDeclaration_ ~posEnd:strLoc.loc_end ~posStart:strLoc.loc_start
        ~declKind:Exception ~moduleLoc:(ModulePath.getCurrent ()).loc ~path ~loc
 
-(* Prefer explicit facts about the full path, which an include may expose
-   even when its provider is outside the scan root. Otherwise normalize
-   outer modules and retry, so wrappers can expose further aliases. *)
+(* Rewrite the most specific known prefix once, then retry the full path.
+   A wrapper rewrite may expose a specific alias that must take precedence
+   over forwarding another prefix to a provider outside the scan root. *)
 let rec resolveModuleAliases ~visited path =
-  let follow path target =
-    if List.mem path visited then None
-    else resolveModuleAliases ~visited:(path :: visited) target
+  let rec rewrite inner path =
+    match Hashtbl.find_opt moduleAliases path with
+    | Some target -> Some (path, List.rev_append inner target)
+    | None -> (
+      match path with
+      | name :: rest -> rewrite (name :: inner) rest
+      | [] -> None)
   in
-  match Hashtbl.find_opt moduleAliases path with
-  | Some target -> follow path target
-  | None -> (
-    match path with
-    | [] -> Some []
-    | name :: rest -> (
-      match resolveModuleAliases ~visited rest with
-      | None -> None
-      | Some rest ->
-        let path = name :: rest in
-        match Hashtbl.find_opt moduleAliases path with
-        | None -> Some path
-        | Some target -> follow path target))
+  match rewrite [] path with
+  | None -> Some path
+  | Some (alias, target) ->
+    if List.mem alias visited then None
+    else resolveModuleAliases ~visited:(alias :: visited) target
 
 let findDeclaration exceptionPath =
   match exceptionPath |> Path.moduleToImplementation with

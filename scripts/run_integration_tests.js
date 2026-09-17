@@ -1198,6 +1198,39 @@ function runImportDigestSelectionTest() {
   }
 }
 
+function runExceptionAliasMissingProviderTest() {
+  const fs = require("fs");
+  const os = require("os");
+  const cwd = path.join(__dirname, "..", "examples", "regression");
+  const cmtDir = path.join(cwd, "_build/default/src/.regression_fixture.objs/byte");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "reanalyze-exception-include-"));
+  const provider = "regression_fixture__Exception_alias_exports.cmt";
+  try {
+    for (const file of fs.readdirSync(cmtDir)) {
+      if (/\.cmti?$/.test(file) && file !== provider) {
+        fs.copyFileSync(path.join(cmtDir, file), path.join(root, file));
+      }
+    }
+    console.log(`${cwd}: reanalyze wrapped exception include without provider`);
+    const output = child_process.execFileSync(
+      reanalyzeFile,
+      ["-ci", "-debug", "-native-build-target", ".", "-dce-cmt", root],
+      { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 }
+    );
+    // The generated wrapper source may be absent, but its aliases must be read.
+    if (!fs.existsSync(path.join(root, "regression_fixture.cmt"))) {
+      throw new Error("Exception include regression is missing the Dune wrapper");
+    }
+    assertIncludes(output, "Scanning regression_fixture__Exception_alias_include.cmt ");
+    assertNotIncludes(output, `Scanning ${provider} `);
+    assertIncludes(output, "Live Exception +Exception_nested_source.Inner.Through_include");
+    assertNotIncludes(output, "Dead Exception +Exception_nested_source.Inner.Through_include");
+    assertIncludes(output, "Dead Exception +Exception_nested_source.Inner.Unused");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function checkSetup() {
   console.log("Checking if --version outputs the right version");
   let output;
@@ -1230,6 +1263,7 @@ function main() {
     checkSetup();
     cleanBuildExamples();
     runRegressionTests();
+    runExceptionAliasMissingProviderTest();
     runDuplicateLayoutTest();
     runByteNativeDuplicateTest();
     runDuplicateContextTest();
