@@ -9,22 +9,18 @@ let delayedItems = ref []
 let declarations = Hashtbl.create 1
 let compilationUnit = ref ""
 let moduleAliases = Hashtbl.create 16
+let declarationPaths = PosHash.create 16
 
-(* Read explicit aliases throughout the signature, including wrappers whose
-   generated source is unavailable. Local roots are resolved by identifier,
-   so a nested module can alias an outer module despite name shadowing. *)
+(* Read explicit aliases from annotations, including wrappers whose source
+   is unavailable. Local roots are resolved by identifier, so a nested
+   module can alias an outer module despite name shadowing. *)
 let registerCompilationUnit (infos : Cmt_format.cmt_infos) =
   compilationUnit := infos.cmt_modname;
+  PosHash.clear declarationPaths;
   let unitName = Name.create ~isInterface:false infos.cmt_modname in
-  let signature =
-    match infos.cmt_annots with
-    | Implementation structure -> structure.str_type
-    | Interface signature -> signature.sig_type
-    | _ -> []
-  in
   let modulePaths = ref Ident.empty in
   let aliases = ref [] in
-  let rec collect ~path signature =
+  let rec collect ~recurse ~path signature =
     signature
     |> List.iter (fun (item : Types.signature_item) ->
            match item with
@@ -35,12 +31,56 @@ let registerCompilationUnit (infos : Cmt_format.cmt_infos) =
                modulePaths := Ident.add id path !modulePaths;
                (match moduleType with
                | Mty_alias target -> aliases := (path, target) :: !aliases
-               | Mty_signature signature -> collect ~path signature
+               | Mty_signature signature when recurse ->
+                 collect ~recurse ~path signature
                | _ -> ())
              | None -> ())
            | _ -> ())
   in
-  collect ~path:[unitName] signature;
+  (* A named module-type constraint can hide an implementation's aliases
+     behind [Mty_ident]. Inspect the concrete body beneath the constraint;
+     bindings in separate implementations keep their own identifiers. *)
+  let rec collectStructure ~path (structure : Typedtree.structure) =
+    collect ~recurse:false ~path structure.str_type;
+    structure.str_items
+    |> List.iter (fun (item : Typedtree.structure_item) ->
+           match item.str_desc with
+           | Tstr_module binding -> collectBinding ~path binding
+           | Tstr_recmodule bindings ->
+             List.iter (collectBinding ~path) bindings
+           | Tstr_include incl -> collectInclude ~path incl.incl_mod
+           | Tstr_exception _ -> (
+             match Compat.tstrExceptionGet item.str_desc with
+             | Some (id, loc) ->
+               PosHash.replace declarationPaths loc.loc_start
+                 (Name.create (Ident.name id) :: path)
+             | None -> ())
+           | _ -> ())
+  and collectBinding ~path (binding : Typedtree.module_binding) =
+    match binding.mb_id with
+    | Some id ->
+      collectModule ~path:(Name.create (Ident.name id) :: path) binding.mb_expr
+    | None -> ()
+  and collectModule ~path (moduleExpr : Typedtree.module_expr) =
+    match moduleExpr.mod_desc with
+    | Tmod_structure structure -> collectStructure ~path structure
+    | Tmod_constraint (inner, _, _, _) -> collectModule ~path inner
+    | Tmod_ident (target, _) -> aliases := (path, target) :: !aliases
+    | _ -> (
+      match moduleExpr.mod_type with
+      | Mty_signature signature -> collect ~recurse:true ~path signature
+      | _ -> ())
+  and collectInclude ~path (moduleExpr : Typedtree.module_expr) =
+    match moduleExpr.mod_desc with
+    | Tmod_structure structure -> collectStructure ~path structure
+    | Tmod_constraint (inner, _, _, _) -> collectInclude ~path inner
+    | _ -> ()
+  in
+  (match infos.cmt_annots with
+  | Implementation structure -> collectStructure ~path:[unitName] structure
+  | Interface signature ->
+    collect ~recurse:true ~path:[unitName] signature.sig_type
+  | _ -> ());
   (* Collect all module bindings first, including recursive groups, before
      resolving local alias roots to their fully qualified paths. *)
   !aliases
@@ -60,12 +100,17 @@ let registerCompilationUnit (infos : Cmt_format.cmt_infos) =
                     (List.rev_map Name.create fields @ rootPath))
          | `Contains_apply -> ())
 
-let add ~path ~loc ~(strLoc : Location.t) name =
+let add ~path ~(loc : Location.t) ~(strLoc : Location.t) name =
   let exceptionPath =
-    match List.rev (name :: path) with
-    | _ :: rest ->
-      List.rev (Name.create ~isInterface:false !compilationUnit :: rest)
-    | [] -> []
+    (* The concrete annotation path also retains recursive module bindings,
+       which the general declaration visitor does not put on ModulePath. *)
+    match PosHash.find_opt declarationPaths loc.loc_start with
+    | Some exceptionPath -> exceptionPath
+    | None -> (
+      match List.rev (name :: path) with
+      | _ :: rest ->
+        List.rev (Name.create ~isInterface:false !compilationUnit :: rest)
+      | [] -> [])
   in
   Hashtbl.add declarations exceptionPath loc;
   name

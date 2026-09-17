@@ -136,16 +136,21 @@ function runRegressionTests() {
   for (const name of [
     "Source.Direct", "Source.Fresh", "Source.Through_nested", "Source.Deep.Used",
     "Nested.Source.Shadowed", "Nested.Source.Through_deeper",
+    "Constrained.Source.Used", "Constrained.Source.Forwarded",
   ]) {
     assertIncludes(output, `Live Exception +Exception_scoped_alias.${name}`);
     assertNotIncludes(output, `Dead Exception +Exception_scoped_alias.${name}`);
   }
   for (const name of [
     "Source.Shadowed", "Source.Unused", "Source.Deep.Unused", "Nested.Source.Unused",
+    "Constrained.Source.Unused", "Other.Source.Used", "Other.Source.Forwarded",
+    "Other.Source.Unused",
   ]) {
     assertIncludes(output, `Dead Exception +Exception_scoped_alias.${name}`);
     assertNotIncludes(output, `Live Exception +Exception_scoped_alias.${name}`);
   }
+  assertNotIncludes(output, "Rec_used is never raised");
+  assertIncludes(output, "Rec_unused is never raised");
   assertIncludes(output, "Source:src/Generated_source.ml");
   assertIncludes(output, "Live Value +Functor_argument.Ordered.+compare");
   assertIncludes(output, "Dead Value +Functor_argument.Ordered.+unused");
