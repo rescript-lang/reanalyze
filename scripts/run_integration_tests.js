@@ -985,6 +985,72 @@ function runCompilationContextTests(sharedInterface = false) {
   }
 }
 
+function runSplitInterfaceTests() {
+  if (!ocamlVersionAtLeast(5, 3)) return;
+  const fs = require("fs");
+  const cwd = fs.mkdtempSync(path.join(require("os").tmpdir(), "reanalyze-split-interface-"));
+  const fixture = path.join(__dirname, "..", "examples", "regression", "compilation_context");
+  const compile = (args) => child_process.execFileSync(
+    "ocamlc", ["-bin-annot", "-bin-annot-occurrences", ...args], { cwd }
+  );
+  try {
+    for (const dir of ["src", "api", "objects", "consumer"]) {
+      fs.mkdirSync(path.join(cwd, dir));
+    }
+    for (const name of ["Split.mli", "Split.ml", "Split_use.ml"]) {
+      fs.copyFileSync(path.join(fixture, name), path.join(cwd, "src", name));
+    }
+    compile(["-c", "-o", "api/Split.cmi", "src/Split.mli"]);
+    compile(["-intf-suffix", ".ml", "-I", "api", "-c", "-o", "objects/Split.cmo", "src/Split.ml"]);
+    compile(["-I", "api", "-I", "objects", "-c", "-o", "consumer/Split_use.cmo", "src/Split_use.ml"]);
+    const artifacts = ["api/Split.cmti", "objects/Split.cmt", "consumer/Split_use.cmt"];
+    const run = (root) => child_process.execFileSync(
+      reanalyzeFile, ["-ci", "-debug", "-dce-cmt", root],
+      { cwd, encoding: "utf8", timeout: 10000 }
+    );
+    const copyArtifacts = (root, dirs) => {
+      for (let i = 0; i < artifacts.length; i++) {
+        const dir = path.join(root, dirs[i]);
+        fs.mkdirSync(dir, { recursive: true });
+        fs.copyFileSync(path.join(cwd, artifacts[i]), path.join(dir, path.basename(artifacts[i])));
+      }
+    };
+    for (const [name, dirs, copies] of [
+      ["colocated", ["all", "all", "all"]],
+      ["separate", ["api", "objects", "consumer"]],
+      ["consumer-with-api", ["api", "objects", "api"]],
+      ["consumer-with-implementation", ["api", "objects", "objects"]],
+      ["separate-copies", ["api", "objects", "consumer"], true],
+    ]) {
+      const root = path.join(cwd, "layouts", name);
+      copyArtifacts(root, dirs);
+      if (copies) copyArtifacts(root, dirs.map((dir) => path.join("install", dir)));
+      console.log(`${cwd}: reanalyze split interface layout ${name}`);
+      const output = run(root);
+      assertIncludes(output, "Live Value +Split.Used.+g");
+      assertIncludes(output, "Dead Value +Split.Unused.+g");
+      assertIncludes(output, "optional argument split of function Used.+g is always supplied (1 calls)");
+      assertNotIncludes(output, "Dead Value +Split.Used.+g");
+    }
+    // A second distinct implementation of the same API is still ambiguous:
+    // do not arbitrarily pick one just because a split pair is now allowed.
+    fs.copyFileSync(path.join(fixture, "Split.ml"), path.join(cwd, "src", "Split_other.ml"));
+    const ambiguous = path.join(cwd, "layouts", "ambiguous");
+    copyArtifacts(ambiguous, ["api", "objects", "consumer"]);
+    fs.mkdirSync(path.join(ambiguous, "other"));
+    compile(["-intf-suffix", ".ml", "-I", "api", "-c", "-o",
+      path.join(ambiguous, "other", "Split.cmo"), "src/Split_other.ml"]);
+    console.log(`${cwd}: reanalyze ambiguous split implementations`);
+    const conservative = run(ambiguous);
+    for (const unit of ["Split", "Split_other"]) {
+      assertIncludes(conservative, `Live Value +${unit}.Used.+g`);
+      assertIncludes(conservative, `Live Value +${unit}.Unused.+g`);
+    }
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
 function runFunctorScanOrderTest(providerName, consumerName, assertions) {
   if (!ocamlVersionAtLeast(5, 3)) return;
   const fs = require("fs");
@@ -1118,6 +1184,7 @@ function main() {
     runDuplicateContextTest();
     runCompilationContextTests();
     runCompilationContextTests(true);
+    runSplitInterfaceTests();
     runFunctorScanOrderTest("Nested_arguments_packed", "Nested_arguments", [
       "optional argument foreign_nested of function Actual.N.+g is always supplied (1 calls)",
       "optional argument foreign_nested of function Unrelated.N.+g is never used",

@@ -435,6 +435,24 @@ let candidateFilesForUnit ~currentCmtFile comp_unit =
   in
   (indexed @ siblings) |> List.filter Sys.file_exists |> List.sort_uniq compare
 
+(* Prefer local candidates within each artifact kind. An interface beside
+   the consumer must not hide its implementation in another directory, or
+   vice versa. Call only after selecting the recorded interface digest. *)
+let preferSiblingUnitFiles ~currentCmtFile files =
+  let implementations, interfaces =
+    List.partition (fun path -> Filename.check_suffix path ".cmt") files
+  in
+  let prefer files =
+    match
+      List.filter
+        (fun path -> Filename.dirname path = Filename.dirname currentCmtFile)
+        files
+    with
+    | [] -> files
+    | siblings -> siblings
+  in
+  prefer implementations @ prefer interfaces
+
 (* Source/typing identity is only the initial partition. Identical clients
    may link different implementations of the same interface. Refine that
    partition by their resolved dependency contexts, transitively. This also
@@ -485,14 +503,7 @@ let compilationContext ~cmtFilePath infos =
                       ~allowUnmatched:false digest candidates
                   in
                   let candidates =
-                    match
-                      List.filter
-                        (fun candidate ->
-                          Filename.dirname candidate = Filename.dirname path)
-                        candidates
-                    with
-                    | [] -> candidates
-                    | siblings -> siblings
+                    preferSiblingUnitFiles ~currentCmtFile:path candidates
                   in
                   (* An implementation supplies shapes; a sibling interface
                    does not create a second implementation context. *)
@@ -605,19 +616,16 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
       (* Prefer siblings only after selecting the recorded import digest:
          a same-named sibling must not hide the actual dependency elsewhere. *)
       let selected =
-        match selected |> List.filter (fun p -> Filename.dirname p = dir) with
-        | [] -> selected
-        | sameDir -> sameDir
+        preferSiblingUnitFiles ~currentCmtFile selected
       in
       let loaded =
         loaded |> List.filter (fun (path, _) -> List.mem path selected)
       in
       (* Copies of one compiled source (e.g. a library's objects and its
          _build/install copy, or byte and native objects) are one unit: keep
-         the first of each. Candidates that are still distinct sources in
-         several build directories (same name and same interface) cannot be
-         told apart: resolve nothing rather than redirect into the wrong
-         target. *)
+         the first of each. Distinct candidates of the same artifact kind
+         remain ambiguous, but a matching interface/implementation pair may
+         legitimately be stored in two different directories. *)
       let loaded =
         let seen = Hashtbl.create 4 in
         loaded
@@ -631,11 +639,13 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
                  true))
       in
       let loaded =
-        match
-          loaded |> List.map (fun (p, _) -> Filename.dirname p)
-          |> List.sort_uniq compare
-        with
-        | _ :: _ :: _ -> []
+        let implementations, interfaces =
+          List.partition
+            (fun (path, _) -> Filename.check_suffix path ".cmt")
+            loaded
+        in
+        match (implementations, interfaces) with
+        | _ :: _ :: _, _ | _, _ :: _ :: _ -> []
         | _ -> loaded
       in
       let uidToDecl = Shape.Uid.Tbl.create 64 in
