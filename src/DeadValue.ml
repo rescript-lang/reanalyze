@@ -191,13 +191,22 @@ let nextApplicationId = ref 0
    [argIndex], under [bindings]. *)
 let applicationsOf ~bindings functorDef argIndex =
   !delayedApplications
-  |> List.filter (fun {applicationId; appliedFunctor; argIndex = index} ->
+  |> List.filter (fun {applicationId; appliedFunctor; argIndex = index;
+                      bindings = own} ->
          appliedFunctor = Key (functorDef, 0)
          && index = argIndex
-         &&
-         match List.assoc_opt functorDef bindings with
-         | Some id -> id = applicationId
-         | None -> true)
+         && (match List.assoc_opt functorDef bindings with
+            | Some id -> id = applicationId
+            | None -> true)
+         (* A template instantiated through different enclosing applications
+            retains its source ID. Its inherited context must agree too,
+            before the caller prepends [own] to the requested bindings. *)
+         && List.for_all
+              (fun (def, id) ->
+                match List.assoc_opt def bindings with
+                | Some requested -> id = requested
+                | None -> true)
+              own)
 
 (* Functors whose applications cannot all be seen: packed as first-class
    modules that flow somewhere other than a direct [(val p)], or passed to

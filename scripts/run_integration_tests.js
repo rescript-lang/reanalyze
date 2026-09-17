@@ -541,6 +541,12 @@ function runRegressionTests() {
         `optional argument y of function ${name}.+g is always supplied (1 calls)`
       );
     }
+    // The two indirect applications share a source application ID but not
+    // an enclosing context: C's omitted argument must not mix with B's call.
+    assertIncludes(
+      output,
+      "optional argument y of function Fixpoint_c.+g is never used"
+    );
     // A packed higher-order argument exported through an .mli resolves to
     // the implementation binding where its functor was registered.
     assertIncludes(
