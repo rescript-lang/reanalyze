@@ -112,6 +112,28 @@ function runRegressionTests() {
   assertNotIncludes(output, "Dead Value +Local_side_effects.+_info");
   assertNotIncludes(output, "Dead Value +Local_side_effects.+process");
   assertNotIncludes(output, "Dead Value +Local_side_effects.+register");
+
+  // Two unwrapped libraries each define a `Dup_sig` compilation unit. The
+  // functor result constraints in dup_a and dup_b must resolve to their own
+  // Dup_sig, not to whichever one happens to be indexed first.
+  console.log(`${cwd}: reanalyze duplicate compilation unit assertions`);
+  const dupOutput = child_process.execFileSync(
+    reanalyzeFile,
+    ["-ci", "-debug", "-native-build-target", ".", "-dce-cmt", "_build/default"],
+    {
+      cwd,
+      encoding: "utf8",
+    }
+  );
+
+  assertIncludes(dupOutput, "Live Value +Dup_a_impl.Make.+f");
+  assertIncludes(dupOutput, "Dead Value +Dup_a_impl.Make.+g");
+  assertIncludes(dupOutput, "Dead Value +Dup_b_impl.Make.+f");
+  assertIncludes(dupOutput, "Live Value +Dup_b_impl.Make.+g");
+  assertIncludes(dupOutput, "Dead Value +Dup_b_impl.Make.+h");
+
+  assertNotIncludes(dupOutput, "Dead Value +Dup_a_impl.Make.+f");
+  assertNotIncludes(dupOutput, "Dead Value +Dup_b_impl.Make.+g");
 }
 
 function checkSetup() {
