@@ -61,6 +61,28 @@ module.exports = function testExceptionIdentity(reanalyzeFile) {
     }
     analyze(interfaceOnly, interfaceScan, ["source.Used"], ["source.Unused"]);
 
+    // A matching interface and implementation can live in separate directories.
+    // A sibling of one kind must not hide the other, including install copies.
+    for (const [name, consumerDir, copies] of [
+      ["separate", "consumer", false],
+      ["with-interface", "api", false],
+      ["with-implementation", "objects", false],
+      ["separate-copies", "consumer", true],
+    ]) {
+      const scanRoot = path.join(interfaceOnly, name);
+      for (const prefix of copies ? ["", "install"] : [""]) {
+        for (const [filename, dir] of [
+          ["wrapper.cmti", "api"], ["wrapper.cmt", "objects"],
+          ["source.cmt", consumerDir], ["use.cmt", consumerDir],
+        ]) {
+          const target = path.join(scanRoot, prefix, dir);
+          fs.mkdirSync(target, { recursive: true });
+          fs.copyFileSync(path.join(interfaceOnly, filename), path.join(target, filename));
+        }
+      }
+      analyze(interfaceOnly, scanRoot, ["source.Used"], ["source.Unused"]);
+    }
+
     // Unwrapped identifiers can infer forwarding children before a constraint
     // exposes more specific aliases. Retain those aliases without the provider.
     const unwrappedInclude = path.join(root, "unwrapped-include");
