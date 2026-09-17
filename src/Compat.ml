@@ -1178,12 +1178,12 @@ let rec makeResolver ~cmtFilePath
          else
            match (unwrap definition).mod_desc with
            | Tmod_apply _ | Tmod_apply_unit _ | Tmod_ident _ -> (
+             (* An unresolved alias is not a new functor definition. Giving
+                it its own key would bypass the unknown-head escape. *)
              match resolver with
-             | Some (resolver : identResolutions) -> (
-               match resolver.headKey visited definition with
-               | Some head -> Some head
-               | None -> Some (loc, 0))
-             | None -> Some (loc, 0))
+             | Some (resolver : identResolutions) ->
+               resolver.headKey visited definition
+             | None -> None)
            | Tmod_unpack _ ->
              (* A first-class module: the functor it holds is not known
                 here. *)

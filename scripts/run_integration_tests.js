@@ -574,6 +574,7 @@ function runRegressionTests() {
     for (const name of [
       "Direct.Open_arg", "Local.Local_open_arg", "Open_struct.Open_struct_arg",
       "Include_struct.Include_struct_arg", "Cross_unit.Cross_open_arg",
+      "Mixed_open.Used_arg",
     ]) {
       assertIncludes(
         output,
@@ -584,6 +585,24 @@ function runRegressionTests() {
       output,
       "optional argument unrelated of function Unrelated.Unrelated_arg.+g is never used"
     );
+    for (const name of [
+      "Unused_import.Victim", "Unused_import.Called_victim", "Mixed_open.Victim",
+    ]) {
+      assertIncludes(
+        output,
+        `optional argument unused_open of function ${name}.+g is never used`
+      );
+    }
+    for (const [name, argument] of [
+      ["Local_alias_arg", "aliased"],
+      ["Foreign_alias_arg", "foreign_alias"],
+      ["Foreign_include_arg", "foreign_include"],
+    ]) {
+      assertIncludes(
+        output,
+        `optional argument ${argument} of function Aliases.${name}.+g is always supplied (1 calls)`
+      );
+    }
     for (const [name, argument] of [
       ["Repacked.Repacked_arg", "repacked"],
       ["Projected.Projected_arg", "projected"],
@@ -920,6 +939,13 @@ function main() {
     runFunctorScanOrderTest("Attribution_sweep", "Partial_context_use", [
       "optional argument partial of function Foreign_supplied_arg.+g is always supplied (1 calls)",
       "optional argument partial of function Foreign_omitted_arg.+g is never used",
+    ]);
+    runFunctorScanOrderTest("Unpacked_unused", "Unpacked_open", [
+      "optional argument unused_open of function Unused_import.Victim.+g is never used",
+      "optional argument unused_open of function Unused_import.Called_victim.+g is never used",
+      "optional argument unused_open of function Mixed_open.Victim.+g is never used",
+      "optional argument foreign_alias of function Aliases.Foreign_alias_arg.+g is always supplied (1 calls)",
+      "optional argument foreign_include of function Aliases.Foreign_include_arg.+g is always supplied (1 calls)",
     ]);
     runImportDigestSelectionTest();
     checkDiff();

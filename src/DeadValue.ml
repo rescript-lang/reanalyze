@@ -1145,14 +1145,54 @@ let registerBindingHead ~(namePos : Lexing.position) (id : Ident.t option)
       | None -> ())
     | None -> ())
 
+type unpackedExportCandidate = {
+  exportId : Ident.t;
+  exportOrigin : Typedtree.module_expr;
+  exportResolutions : Compat.identResolutions;
+  exportScope : unpackedExportCandidate list;
+}
+
+let unpackedExportCandidates : unpackedExportCandidate list ref = ref []
+
+let addUnpackedExports resolutions scope signature moduleExpr =
+  signature
+  |> List.fold_left
+       (fun acc item ->
+         match item with
+         | Types.Sig_module _ -> (
+           match Compat.getSigModuleModtype item with
+           | Some (id, _, _) ->
+             {
+               exportId = id;
+               exportOrigin = moduleExpr;
+               exportResolutions = resolutions;
+               exportScope = scope;
+             } :: acc
+           | None -> acc)
+         | _ -> acc)
+       scope
+
+let rec unpackedCandidate candidates path components =
+  match path with
+  | Path.Pident id ->
+    List.find_opt (fun candidate -> Ident.same id candidate.exportId) candidates
+    |> Option.map (fun candidate -> (candidate, Ident.name id :: components))
+  | Path.Pdot (parent, name) ->
+    unpackedCandidate candidates parent (name :: components)
+  | _ -> None
+
 (* Opens and includes can introduce fresh identifiers whose unpacked origin
-   cannot be recovered at an application. Preserve the escape fallback for
-   unpacked exports, including bindings nested inside a structure wrapper. *)
+   cannot be recovered at an application. Follow only the demanded export:
+   an unused unpacked sibling must not make its parameter calls escape. *)
 let rec escapeUnpackedExports ?(visited = [])
-    ?(resolutions = !identResolutions) (e : Typedtree.module_expr) =
+    ?(resolutions = !identResolutions) ?(components = [])
+    ?(candidates = !unpackedExportCandidates)
+    (e : Typedtree.module_expr) =
   if not (List.memq e visited) then
     let visited = e :: visited in
-    let walk = escapeUnpackedExports ~visited ~resolutions in
+    let walk =
+      escapeUnpackedExports ~visited ~resolutions ~components ~candidates
+    in
     match e.mod_desc with
     | Tmod_unpack (packed, _) -> (
       match unpackedBinding packed with
@@ -1166,21 +1206,90 @@ let rec escapeUnpackedExports ?(visited = [])
     | Tmod_apply_unit inner -> walk inner
 #endif
     | Tmod_ident (path, _) -> (
-      match resolutions.bindingOfPath path with
-      | Some (_, definition, resolver, _) ->
-        escapeUnpackedExports ~visited
-          ~resolutions:(Option.value resolver ~default:resolutions) definition
-      | None -> ())
-    | Tmod_structure {str_items} ->
-      str_items
-      |> List.iter (fun (item : Typedtree.structure_item) ->
-             match item.str_desc with
-             | Tstr_module {mb_expr} -> walk mb_expr
-             | Tstr_recmodule bindings ->
-               List.iter (fun (mb : Typedtree.module_binding) -> walk mb.mb_expr)
-                 bindings
-             | Tstr_include {incl_mod} -> walk incl_mod
-             | _ -> ())
+      match unpackedCandidate candidates path components with
+      | Some (candidate, components) ->
+        escapeUnpackedExports ~visited ~components
+          ~resolutions:candidate.exportResolutions ~candidates:candidate.exportScope
+          candidate.exportOrigin
+      | None ->
+        let rec root path components =
+          match path with
+          | Path.Pdot (parent, name) -> root parent (name :: components)
+          | _ -> (path, components)
+        in
+        let path, components = root path components in
+        (match resolutions.bindingOfPath path with
+        | Some (_, definition, resolver, _) ->
+          let next = Option.value resolver ~default:resolutions in
+          escapeUnpackedExports ~visited ~resolutions:next ~components
+            ~candidates:(if next == resolutions then candidates else []) definition
+        | None -> ()))
+    | Tmod_structure {str_items} -> (
+      (* A foreign structure can itself alias an identifier introduced by an
+         include/open. Reconstruct that lexical scope using its own AST and
+         resolver, without mixing identifier stamps from different units. *)
+      let candidates =
+        str_items
+        |> List.fold_left
+             (fun scope (item : Typedtree.structure_item) ->
+               match item.str_desc with
+               | Tstr_include {incl_mod; incl_type} ->
+                 addUnpackedExports resolutions scope incl_type incl_mod
+               | Tstr_open {open_expr; open_bound_items} ->
+                 addUnpackedExports resolutions scope open_bound_items open_expr
+               | _ -> scope)
+             candidates
+      in
+      let walk =
+        escapeUnpackedExports ~visited ~resolutions ~components ~candidates
+      in
+      match components with
+      | [] ->
+        str_items
+        |> List.iter (fun (item : Typedtree.structure_item) ->
+               match item.str_desc with
+               | Tstr_module {mb_expr} -> walk mb_expr
+               | Tstr_recmodule bindings ->
+                 List.iter (fun (mb : Typedtree.module_binding) -> walk mb.mb_expr)
+                   bindings
+               | Tstr_include {incl_mod} -> walk incl_mod
+               | _ -> ())
+      | name :: rest ->
+        let matching (mb : Typedtree.module_binding) = mb.mb_name.txt = Some name in
+        let rec find = function
+          | [] -> ()
+          | (item : Typedtree.structure_item) :: items -> (
+            let binding =
+              match item.str_desc with
+              | Tstr_module mb when matching mb -> Some mb.mb_expr
+              | Tstr_recmodule bindings ->
+                List.find_opt matching bindings
+                |> Option.map (fun (mb : Typedtree.module_binding) -> mb.mb_expr)
+              | _ -> None
+            in
+            match binding with
+            | Some expr ->
+              escapeUnpackedExports ~visited ~resolutions ~components:rest
+                ~candidates expr
+            | None -> (
+              match item.str_desc with
+              | Tstr_include {incl_mod; incl_type}
+                when List.exists
+                       (fun item ->
+                         match Compat.getSigModuleModtype item with
+                         | Some (id, _, _) -> Ident.name id = name
+                         | None -> false)
+                       incl_type -> walk incl_mod
+              | _ -> find items))
+        in
+        find (List.rev str_items))
+
+(* Candidates are keyed by the actual identifiers introduced into scope,
+   not just their names. Registering an open alone does not escape anything. *)
+let registerUnpackedExports signature moduleExpr =
+  unpackedExportCandidates :=
+    addUnpackedExports !identResolutions !unpackedExportCandidates signature
+      moduleExpr
 
 let rec collectExpr super self (e : Typedtree.expression) =
   let locFrom = e.exp_loc in
@@ -1195,10 +1304,15 @@ let rec collectExpr super self (e : Typedtree.expression) =
   | Texp_struct_item ({str_desc = Tstr_module {mb_id; mb_expr; mb_name}}, _) ->
     registerParameterAlias mb_id mb_expr;
     registerBindingHead ~namePos:mb_name.loc.loc_start mb_id mb_expr
+  | Texp_struct_item ({str_desc = Tstr_open {open_expr; open_bound_items}}, _) ->
+    registerUnpackedExports open_bound_items open_expr
+  | Texp_struct_item ({str_desc = Tstr_include {incl_mod; incl_type}}, _) ->
+    registerUnpackedExports incl_type incl_mod
   | _ -> ());
   #else
   (match e.exp_desc with
-  | Texp_open ({open_expr}, _) -> escapeUnpackedExports open_expr
+  | Texp_open ({open_expr; open_bound_items}, _) ->
+    registerUnpackedExports open_bound_items open_expr
   | Texp_letmodule (id, name, _, moduleExpr, _) ->
     setFunctorKey moduleExpr name.loc.loc_start;
     registerParameterAlias id moduleExpr;
@@ -1956,7 +2070,9 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
         | _ -> ()
       in
       (match headExpr.mod_desc with
-      | Tmod_ident (path, _) -> escapeParent path
+      | Tmod_ident (path, _) ->
+        escapeUnpackedExports headExpr;
+        escapeParent path
       | _ -> ())
     | Some head ->
       incr nextApplicationId;
@@ -2210,7 +2326,7 @@ let traverseStructure ~doTypes ~doExternals =
                DeadType.addDeclaration ~typeId:typeDeclaration.typ_id
                  ~typeKind:typeDeclaration.typ_type.type_kind)
     | Tstr_include {incl_mod; incl_type} -> (
-      escapeUnpackedExports incl_mod;
+      registerUnpackedExports incl_type incl_mod;
       (* [include M] with [M] a functor parameter: the included identifiers
          stand for the parameter's items. *)
       (match moduleIdent incl_mod with
@@ -2256,7 +2372,8 @@ let traverseStructure ~doTypes ~doExternals =
                 ~doValues:false (* TODO: also values? *)
                 ~moduleLoc:incl_mod.mod_loc ~path:currentPath)
       | _ -> ())
-    | Tstr_open {open_expr} -> escapeUnpackedExports open_expr
+    | Tstr_open {open_expr; open_bound_items} ->
+      registerUnpackedExports open_bound_items open_expr
     | Tstr_exception _ -> (
       match structureItem.str_desc |> Compat.tstrExceptionGet with
       | Some (id, loc) ->
@@ -2420,10 +2537,12 @@ let processStructure ~cmt_value_dependencies ~cmt_ident_resolutions ~doTypes
     ~doExternals (structure : Typedtree.structure) =
   let traverseStructure = traverseStructure ~doTypes ~doExternals in
   identResolutions := cmt_ident_resolutions;
+  unpackedExportCandidates := [];
   recordedApplications := [];
   functorsByIdent := [];
   functorKeys := [];
   structure |> traverseStructure.structure traverseStructure |> ignore;
+  unpackedExportCandidates := [];
   recordedApplications := [];
   functorKeys := [];
   identResolutions := Compat.emptyIdentResolutions;
