@@ -741,9 +741,17 @@ let rec makeResolver ~cmtFilePath
   (* [Longident.last] and [flatten] are fatal on [Lapply] ([F(X).t]): such
      occurrences are not values or modules of interest here. *)
   let lidText (lid : Longident.t) =
-    match Longident.flatten lid with
-    | components -> Some (String.concat "." components)
-    | exception Misc.Fatal_error -> None
+    let rec components suffix = function
+      | Longident.Lident name -> Some (name :: suffix)
+#if OCAML_VERSION >= (5, 4, 0)
+      | Longident.Ldot ({txt = parent}, {txt = name}) ->
+        components (name :: suffix) parent
+#else
+      | Longident.Ldot (parent, name) -> components (name :: suffix) parent
+#endif
+      | Longident.Lapply _ -> None
+    in
+    components [] lid |> Option.map (String.concat ".")
   in
   (* Two occurrences with one key are the same identifier only if they are
      spelled the same and the compiler resolved them the same way (the same
