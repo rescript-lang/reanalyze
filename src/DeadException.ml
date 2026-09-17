@@ -218,57 +218,91 @@ let importedUnit unit name =
     |> Option.map (fun (cmtFilePath, infos) ->
         getCompilationUnit ~cmtFilePath infos)
 
-let rec resolvePath ~visited unit path fields =
+let rootModule unit root =
+  if Ident.persistent root then
+    importedUnit unit (Ident.name root)
+    |> Option.map (fun provider -> (provider, provider.root))
+  else
+    match Ident.find_same root unit.bindings with
+    | node -> Some (unit, node)
+    | exception Not_found -> None
+
+(* Resolve the alias target separately from the caller's remaining fields.
+   Only alias dependencies still being followed belong on the cycle stack:
+   revisiting an ordinary wrapper through another field is valid. *)
+let rec modulePath ~visited unit path =
   match CompilerPath.flatten path with
   | `Contains_apply -> None
-  | `Ok (root, suffix) -> (
-    let fields = suffix @ fields in
-    if Ident.persistent root then
-      importedUnit unit (Ident.name root)
-      |> Option.fold ~none:None ~some:(fun provider ->
-          resolveNode ~visited provider provider.root fields)
-    else
-      match Ident.find_same root unit.bindings with
-      | node -> resolveNode ~visited unit node fields
-      | exception Not_found -> None)
+  | `Ok (root, fields) ->
+    rootModule unit root
+    |> Option.fold ~none:None ~some:(fun (unit, node) ->
+        moduleFields ~visited unit node fields)
 
-and resolveNode ~visited unit node fields =
-  (* Re-entering a wrapper through a different field is not a cycle. A
-     repeated node with the same (or an expanding) suffix is. *)
-  let rec isSuffix suffix fields =
-    suffix = fields
-    || match fields with _ :: rest -> isSuffix suffix rest | [] -> false
-  in
-  if
-    List.exists
-      (fun (id, suffix) -> id = node.id && isSuffix suffix fields)
-      visited
-  then None
-  else
-    let visited = (node.id, fields) :: visited in
-    let direct =
-      match fields with
-      | [name] ->
-        Hashtbl.find_opt node.exceptions name
-        |> Option.fold ~none:None ~some:(fun loc ->
-            PosHash.find_opt unit.declarations loc.Location.loc_start)
-      | name :: rest ->
+and moduleFields ~visited unit node fields =
+  match fields with
+  | [] -> Some (unit, node)
+  | name :: rest ->
+    let rec lookup ~aliases unit node =
+      let direct =
         Hashtbl.find_opt node.modules name
         |> Option.fold ~none:None ~some:(fun child ->
-            resolveNode ~visited unit child rest)
-      | [] -> None
+            (* This field has been consumed. Alias lookups needed to select it
+               are complete; only the enclosing target's dependencies remain. *)
+            moduleFields ~visited unit child rest)
+      in
+      match direct with
+      | Some _ -> direct
+      | None ->
+        aliasTarget ~visited:aliases unit node
+        |> Option.fold ~none:None ~some:(fun (aliases, unit, target) ->
+            lookup ~aliases unit target)
     in
-    match (direct, node.alias) with
-    | Some _, _ -> direct
-    | None, Some target -> resolvePath ~visited unit target fields
-    | None, None -> None
+    lookup ~aliases:visited unit node
+
+and aliasTarget ~visited unit node =
+  match node.alias with
+  | None -> None
+  | Some _ when List.mem node.id visited -> None
+  | Some path ->
+    let visited = node.id :: visited in
+    modulePath ~visited unit path
+    |> Option.map (fun (unit, target) -> (visited, unit, target))
+
+let rec resolveNode ~visited unit node fields =
+  let direct =
+    match fields with
+    | [name] ->
+      Hashtbl.find_opt node.exceptions name
+      |> Option.fold ~none:None ~some:(fun loc ->
+          PosHash.find_opt unit.declarations loc.Location.loc_start)
+    | name :: rest ->
+      Hashtbl.find_opt node.modules name
+      |> Option.fold ~none:None ~some:(fun child ->
+          (* Consuming a requested field completes the preceding alias lookup. *)
+          resolveNode ~visited:[] unit child rest)
+    | [] -> None
+  in
+  match direct with
+  | Some _ -> direct
+  | None ->
+    aliasTarget ~visited unit node
+    |> Option.fold ~none:None ~some:(fun (visited, unit, target) ->
+        resolveNode ~visited unit target fields)
+
+let resolvePath unit path =
+  match CompilerPath.flatten path with
+  | `Contains_apply -> None
+  | `Ok (root, fields) ->
+    rootModule unit root
+    |> Option.fold ~none:None ~some:(fun (unit, node) ->
+        resolveNode ~visited:[] unit node fields)
 
 let forceDelayedItems () =
   let items = !delayedItems |> List.rev in
   delayedItems := [];
   items
   |> List.iter (fun {exceptionPath; unit; locFrom} ->
-      match resolvePath ~visited:[] unit exceptionPath [] with
+      match resolvePath unit exceptionPath with
       | None -> ()
       | Some locTo ->
         addValueReference ~addFileReference:true ~locFrom ~locTo;

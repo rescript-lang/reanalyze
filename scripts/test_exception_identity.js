@@ -75,6 +75,21 @@ module.exports = function testExceptionIdentity(reanalyzeFile) {
     }
     analyze(unwrappedInclude, includeScan, ["exn.Used"], ["exn.Unused"]);
 
+    // Re-entering a wrapper through B.A.X after A.X is finite, even though
+    // the new field list ends with the entire previous field list.
+    const growingWrapper = path.join(root, "growing-wrapper");
+    fs.mkdirSync(growingWrapper);
+    for (const [filename, source] of [
+      ["dune-project", "(lang dune 2.0)\n(name growing_exception_wrapper)"],
+      ["dune", "(executable (name main) (flags (:standard -w -a)))"],
+      ["b.ml", "module A = struct module X = struct exception Used = Not_found exception Unused = Not_found end end"],
+      ["a.ml", "module X = B.A.X"],
+      ["main.ml", "let () = try raise A.X.Used with _ -> ()"],
+    ]) fs.writeFileSync(path.join(growingWrapper, filename), source);
+    child_process.execFileSync("dune", ["build", "--root", ".", "@check"],
+      { cwd: growingWrapper, stdio: "pipe" });
+    analyze(growingWrapper, "_build/default", ["b.A.X.Used"], ["b.A.X.Unused"]);
+
     // The consumer imports one Foo, and Foo in turn imports its own Target.
     // A same-named sibling with a conflicting digest must never win, even
     // when the matching provider is absent from the scan.
