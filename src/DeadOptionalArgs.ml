@@ -92,16 +92,28 @@ let settleDelayedItems () =
 (* Calls recorded against a signature item that is not a declaration (e.g. a
    [val] inside a named module type) are re-attributed to the implementation.
    Must run before [forceDelayedItems]. *)
-let forwardDelayedItems ~(posFrom : Lexing.position) ~(posTo : Lexing.position)
-    =
-  let forwarded =
+let forwardDelayedItems dependencies =
+  (* Traverse each original call independently. A diamond or cycle in the
+     signature graph must not multiply a call, while distinct calls with the
+     same argument labels must remain distinct. Declarations are endpoints:
+     ordinary function references handle their optional-argument state. *)
+  delayedItems :=
     !delayedItems
-    |> List.filter_map (fun item ->
-           if item.posTo = posFrom then
-             Some {item with posTo}
-           else None)
-  in
-  delayedItems := forwarded @ !delayedItems
+    |> List.concat_map (fun item ->
+        let rec visit seen pos =
+          if PosSet.mem pos seen then seen
+          else
+            let seen = PosSet.add pos seen in
+            if PosHash.mem decls pos then seen
+            else
+              PosSet.fold
+                (fun target seen -> visit seen target)
+                (PosHash.findSet dependencies pos)
+                seen
+        in
+        visit PosSet.empty item.posTo
+        |> PosSet.elements
+        |> List.map (fun posTo -> {item with posTo}))
 
 let forceDelayedItems () =
   let items = !delayedItems |> List.rev in

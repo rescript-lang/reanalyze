@@ -12,14 +12,8 @@ let loadCmtFile ~cmtRoot cmtFilePath =
      those contexts, but not the byte/native distinction: [cmt_imports]
      records the reused self-interface in both artifacts, whereas
      [cmt_interface_digest] can be absent from the native artifact. *)
-  let imports = List.sort_uniq compare cmt_infos.cmt_imports in
   let unitKey =
-    ( cmt_infos.cmt_modname,
-      cmt_infos.cmt_sourcefile,
-      cmt_infos.cmt_builddir,
-      cmt_infos.cmt_source_digest,
-      imports,
-      Filename.check_suffix cmtFilePath ".cmti" )
+    (Compat.compilationContext cmt_infos, Filename.check_suffix cmtFilePath ".cmti")
   in
   if Hashtbl.mem scannedUnits unitKey then ()
   else

@@ -99,9 +99,27 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
   Current.lastBinding := oldLastBinding;
   r
 
+(* Implementation locations and compilation identities resolved through
+   shapes. See [Compat.resolveIdentOccurrences]. *)
+let identResolutions = ref Compat.emptyIdentResolutions
+
+type definitionKey = Compat.definitionKey
+
+let definitionKey ?(resolutions = !identResolutions) pos =
+  (pos, resolutions.Compat.context)
+
+let keyToString (pos, _) = posToString pos
+
+module DefinitionSet = Set.Make (struct
+  type t = definitionKey
+  let compare = compare
+end)
+
+type definitionRange = definitionKey * Lexing.position
+
 type functorParameter = {
   paramId : Ident.t;
-  functorDef : Lexing.position;
+  functorDef : definitionKey;
       (** position of the name of the module binding defining the functor *)
   paramIndex : int;  (** position of the parameter, for curried functors *)
   prefix : string list;
@@ -135,30 +153,30 @@ type parameterCall = {
 }
 
 let parameterCalls :
-    (Lexing.position * int * string list, parameterCall list) Hashtbl.t =
+    (definitionKey * int * string list, parameterCall list) Hashtbl.t =
   Hashtbl.create 16
 
 type argumentResolver =
   | Direct of (string list -> Location.t option)
       (** implementation of a value of the actual argument, by path *)
-  | ViaParameter of Lexing.position * int * string list
+  | ViaParameter of definitionKey * int * string list
       (** the argument is (a submodule of) a parameter of the enclosing
           functor: resolved through that functor's own applications *)
 
 (* The functor an application chain applies. *)
 type functorHead =
-  | Key of Lexing.position * int
+  | Key of definitionKey * int
       (** a functor's key, and the arguments partial applications already
           consumed, as in [module G = F (A)] followed by [G (B)] *)
-  | Partial of Lexing.position * functorHead
+  | Partial of definitionKey * functorHead
       (** application expression supplying the already consumed arguments;
           retained so separate partial bindings keep their own context *)
-  | ParamHead of Lexing.position * int * string list * int
+  | ParamHead of definitionKey * int * string list * int
       (** (a submodule of) a parameter of the enclosing functor, applied in
           its body: the functor's key, the parameter's index, the path within
           the parameter, and the arguments already consumed. Which functors it
           stands for is known once all applications are recorded. *)
-  | Packed of Lexing.position * int
+  | Packed of definitionKey * int
       (** a first-class module unpacked from a value, [(val packed : FT)]:
           the position of the value's binding, and the arguments consumed.
           Resolved once all files are scanned, through [packedModules]. *)
@@ -174,23 +192,23 @@ type delayedApplication = {
   argHead : string list -> functorHead option;
       (** the functor (a submodule of) the argument denotes, when the
           argument is passed on to a higher-order functor parameter *)
-  bindings : (Lexing.position * int) list;
+  bindings : (definitionKey * int) list;
       (** for an application derived from a parameter-headed one ([F (M)] in
           the body of [Outer (F) (M)]): the application of each enclosing
           functor the head came through, by the functor's key. A parameter
           of such a functor then resolves through that application only,
           so that [M] pairs with the [F] of the same application. *)
-  argRange : (Lexing.position * Lexing.position) list;
+  argRange : definitionRange list;
       (** source ranges of the argument's definition, see [escapedRanges] *)
 }
 
 let delayedApplications : delayedApplication list ref = ref []
 let nextApplicationId = ref 0
 
-let applicationIdsByPosition : (Lexing.position, int list) Hashtbl.t =
+let applicationIdsByPosition : (definitionKey, int list) Hashtbl.t =
   Hashtbl.create 16
 
-let applicationPrefixes : (int, Lexing.position list) Hashtbl.t =
+let applicationPrefixes : (int, definitionKey list) Hashtbl.t =
   Hashtbl.create 16
 
 (* Unit-only applications have no argument record but can still extend a
@@ -268,34 +286,34 @@ let applicationsOf ~bindings functorDef argIndex =
    covered by source ranges rather than keys. *)
 let escapedHeads : functorHead list ref = ref []
 
-let escapedRanges : (Lexing.position * Lexing.position) list ref = ref []
+let escapedRanges : definitionRange list ref = ref []
 
 (* Positions of the value expressions that are the operand of a
    [(val e : S)], and the values (by binding position) used anywhere else:
    a packed module used only through direct unpacks is followed precisely,
    any other use makes it escape. *)
 let unpackOperands = ref PosSet.empty
-let usedOutsideUnpack = ref PosSet.empty
+let usedOutsideUnpack = ref DefinitionSet.empty
 
-let inRanges (pos : Lexing.position) ranges =
+let inRanges ((pos : Lexing.position), context) ranges =
   ranges
-  |> List.exists (fun ((start : Lexing.position), (stop : Lexing.position)) ->
-         start.pos_fname = pos.pos_fname
+  |> List.exists (fun (((start : Lexing.position), rangeContext), (stop : Lexing.position)) ->
+         context = rangeContext && start.pos_fname = pos.pos_fname
          && start.pos_cnum <= pos.pos_cnum
          && pos.pos_cnum <= stop.pos_cnum)
 
 let rec functorHeadToString head =
   match head with
-  | Key (pos, consumed) -> Printf.sprintf "%s+%d" (pos |> posToString) consumed
+  | Key (pos, consumed) -> Printf.sprintf "%s+%d" (pos |> keyToString) consumed
   | Partial (pos, head) ->
-    Printf.sprintf "partial(%s,%s)" (pos |> posToString)
+    Printf.sprintf "partial(%s,%s)" (pos |> keyToString)
       (functorHeadToString head)
   | ParamHead (def, index, components, consumed) ->
-    Printf.sprintf "param(%s,%d,%s)+%d" (def |> posToString) index
+    Printf.sprintf "param(%s,%d,%s)+%d" (def |> keyToString) index
       (String.concat "." components)
       consumed
   | Packed (pos, consumed) ->
-    Printf.sprintf "packed(%s)+%d" (pos |> posToString) consumed
+    Printf.sprintf "packed(%s)+%d" (pos |> keyToString) consumed
 
 (* [let packed = (module M : S)]: what the first-class value holds, by the
    position of its binding, for [(val packed : S)] used as a functor or as an
@@ -306,11 +324,11 @@ type packedModule = {
   packedHead : functorHead option;
   packedShape : Compat.moduleShape option;
   packedConcrete : Types.module_type option;
-  packedRange : (Lexing.position * Lexing.position) list;
+  packedRange : definitionRange list;
   packedExpr : Typedtree.module_expr;
 }
 
-let packedModules : (Lexing.position, packedModule) Hashtbl.t =
+let packedModules : (definitionKey, packedModule) Hashtbl.t =
   Hashtbl.create 4
 
 (* Whether a packed module expression is the right-hand side of a value
@@ -321,9 +339,9 @@ let isRegisteredPack (moduleExpr : Typedtree.module_expr) =
     packedModules false
 
 (* The binding a [(val e : S)] unpacks, when [e] names a value. *)
-let unpackedBinding (e : Typedtree.expression) =
+let unpackedBinding ?(resolutions = !identResolutions) (e : Typedtree.expression) =
   match e.exp_desc with
-  | Texp_ident (_, _, {val_loc}) -> Some val_loc.loc_start
+  | Texp_ident (_, _, vd) -> Some (resolutions.Compat.valueKey vd)
   | _ -> None
 
 (* Implementations of a value of the argument at [argIndex] of every
@@ -387,13 +405,13 @@ let rec resolvePackedHead ~sigToImpl ?(visited = []) head =
 (* The functors (a submodule of) the argument at [argIndex] of the
    applications of [functorDef] denotes: their keys, the arguments they
    consumed, and the applications they came through. *)
-let rec resolveHeads ~sigToImpl ~visited ~bindings functorDef argIndex
+let rec resolveHeads ?(onUnresolved = fun _ -> ()) ~sigToImpl ~visited ~bindings functorDef argIndex
     components =
   if List.mem (functorDef, argIndex, components) visited then []
   else
     let visited = (functorDef, argIndex, components) :: visited in
     applicationsOf ~bindings functorDef argIndex
-    |> List.concat_map (fun {applicationId; argHead; bindings = own} ->
+    |> List.concat_map (fun ({applicationId; argHead; bindings = own} as application) ->
            let here =
              mergeBindings (((functorDef, applicationId) :: own) @ bindings)
            in
@@ -410,12 +428,14 @@ let rec resolveHeads ~sigToImpl ~visited ~bindings functorDef argIndex
            | Some (Key (pos, consumed), sources) ->
              withPrefixes sources (pos, consumed, here)
            | Some (ParamHead (def, index, prefix, consumed), sources) ->
-             resolveHeads ~sigToImpl ~visited ~bindings:here def index
+             resolveHeads ~onUnresolved ~sigToImpl ~visited ~bindings:here def index
                prefix
              |> List.map (fun (pos, consumed', bindings) ->
                     (pos, consumed + consumed', bindings))
              |> List.concat_map (withPrefixes sources)
-           | Some ((Packed _ | Partial _), _) | None -> [])
+           | Some ((Packed _ | Partial _), _) | None ->
+             onUnresolved application;
+             [])
 
 (* Applications headed by a functor parameter stand for the applications of
    the functors passed for it. Resolved to a fixed point, as an argument may
@@ -492,14 +512,25 @@ let resolveParameterHeadedApplications ~sigToImpl =
       loop ())
   in
   loop ();
-  (* Only genuinely unresolved templates escape; retaining resolved ones
-     here would unnecessarily forward precisely attributed calls. *)
+  (* One resolved branch does not prove that all applications resolved.
+     Escape the unknown arguments, not their precisely resolved siblings. *)
+  let escapeArgument {argRange; argHead} =
+    escapedRanges := argRange @ !escapedRanges;
+    match argHead [] with
+    | Some head -> escapedHeads := head :: !escapedHeads
+    | None -> ()
+  in
   delayedApplications :=
     !delayedApplications
     |> List.filter (fun application ->
            match application.appliedFunctor with
            | ParamHead (def, index, components, _) ->
-             heads application def index components = []
+             let onUnresolved argument =
+               escapeArgument argument;
+               escapeArgument application
+             in
+             resolveHeads ~onUnresolved ~sigToImpl ~visited:[]
+               ~bindings:application.bindings def index components = []
            | Key _ | Packed _ | Partial _ -> true);
   !delayedApplications
   |> List.iter (fun {appliedFunctor; argIndex; argHead; argRange} ->
@@ -561,14 +592,14 @@ let escapePackedModulesUsedElsewhere ~sigToImpl =
   let usedElsewhere = ref !usedOutsideUnpack in
   Hashtbl.iter
     (fun sigPos implPos ->
-      if PosSet.mem sigPos !usedOutsideUnpack then
-        usedElsewhere := PosSet.add implPos !usedElsewhere)
+      if DefinitionSet.mem sigPos !usedOutsideUnpack then
+        usedElsewhere := DefinitionSet.add implPos !usedElsewhere)
     sigToImpl;
   Hashtbl.iter
     (fun pos {packedHead; packedRange} ->
-      if PosSet.mem pos !usedElsewhere then (
+      if DefinitionSet.mem pos !usedElsewhere then (
         if !Common.Cli.debug then
-          Log_.item "packedEscapes %s@." (pos |> posToString);
+          Log_.item "packedEscapes %s@." (pos |> keyToString);
         escapedRanges := packedRange @ !escapedRanges;
         match packedHead with
         | Some head -> escapedHeads := head :: !escapedHeads
@@ -579,7 +610,7 @@ let escapePackedModulesUsedElsewhere ~sigToImpl =
    [module Outer (M : S) = Inner (M)]: credited to the arguments of the
    enclosing functor's applications, once all files are scanned. *)
 type parameterCoercion = {
-  outerFunctor : Lexing.position;
+  outerFunctor : definitionKey;
   outerIndex : int;
   itemPath : string list;
   coercionFrom : Location.t;
@@ -607,13 +638,13 @@ let rec moduleIdent (moduleExpr : Typedtree.module_expr) =
    Functors not listed (inline applications) are keyed by their own position.
    A list rather than a single slot, as the mapper may visit a binding's body
    (and the bindings nested in it) before its module expression. *)
-let functorKeys : (Typedtree.module_expr * Lexing.position) list ref = ref []
+let functorKeys : (Typedtree.module_expr * definitionKey) list ref = ref []
 
 let setFunctorKey (moduleExpr : Typedtree.module_expr) pos =
   functorKeys := (moduleExpr, pos) :: !functorKeys
 
-(* Keys are positions, since applications only learn a definition through
-   its declaration's location (possibly in another file). Two distinct
+(* Keys pair positions with compilation contexts, since applications learn a
+   definition through its declaration in the defining unit. Two distinct
    definitions a ppx emitted at one position therefore share a key: the
    calls through either's parameters are credited to the arguments of every
    application of that key, which is tighter than forwarding to every
@@ -634,7 +665,7 @@ let functorsByIdent : (Ident.t * functorHead) list ref = ref []
    in the body of [functor (F : FT) -> ...], [module G = (val packed)]),
    by the position of the binding's name: the resolver of occurrences cannot
    see through those. *)
-let headsByBinding : (Lexing.position, functorHead) Hashtbl.t =
+let headsByBinding : (definitionKey, functorHead) Hashtbl.t =
   Hashtbl.create 4
 
 let rec pathComponents (path : Path.t) =
@@ -714,7 +745,7 @@ let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
       if !Common.Cli.debug then
         Log_.item "parameterCall %s functor:%s index:%d@."
           (String.concat "." components)
-          (functorDef |> posToString)
+          (functorDef |> keyToString)
           paramIndex;
       let calls =
         match Hashtbl.find_opt parameterCalls key with
@@ -732,10 +763,6 @@ let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
     if parameter = None || not Compat.shapeResolutionAvailable then
       call
       |> DeadOptionalArgs.addReferences ~locFrom ~locTo ?locToImpl ~path)
-
-(* Implementation locations of identifier occurrences resolved through
-   shapes. See [Compat.resolveIdentOccurrences]. *)
-let identResolutions = ref Compat.emptyIdentResolutions
 
 (* References whose target may be redirected to a shape-resolved
    implementation. Decided in [forceDelayedItems], once every declaration is
@@ -912,7 +939,7 @@ let rec definitionRange ?(visited = []) ?(resolutions = !identResolutions)
     (e : Typedtree.module_expr) =
   let own =
     if e.mod_loc.loc_ghost then []
-    else [(e.mod_loc.loc_start, e.mod_loc.loc_end)]
+    else [(definitionKey ~resolutions e.mod_loc.loc_start, e.mod_loc.loc_end)]
   in
   if List.memq e visited then []
   else
@@ -944,7 +971,7 @@ let rec definitionRange ?(visited = []) ?(resolutions = !identResolutions)
       definitionRange ~visited ~resolutions functorExpr
 #endif
     | Tmod_unpack (packed, _) -> (
-      match unpackedBinding packed with
+      match unpackedBinding ~resolutions packed with
       | Some pos -> (
         match Hashtbl.find_opt packedModules pos with
         | Some {packedRange} -> packedRange
@@ -959,7 +986,7 @@ and definitionRangeOfPath ?(visited = []) ?(resolutions = !identResolutions)
     (* A named functor is keyed at its binding name, which precedes the
        module expression's range. Aliases must retain that key as well. *)
     let bindingRange =
-      if loc.loc_ghost then [] else [(loc.loc_start, loc.loc_end)]
+      if loc.loc_ghost then [] else [(definitionKey ~resolutions loc.loc_start, loc.loc_end)]
     in
     bindingRange @ definitionRange ~visited ~resolutions definition
   | None -> []
@@ -984,15 +1011,15 @@ let packedHeadOfPath resolutions path =
         ofExpr visited resolutions inner consumed
       | Tmod_apply (inner, _, _) ->
         ofExpr visited resolutions inner (consumed + 1)
-        |> Option.map (fun head -> Partial (e.mod_loc.loc_start, head))
+        |> Option.map (fun head -> Partial (definitionKey ~resolutions e.mod_loc.loc_start, head))
 #if OCAML_VERSION >= (5, 1, 0)
       | Tmod_apply_unit inner ->
         ofExpr visited resolutions inner (consumed + 1)
-        |> Option.map (fun head -> Partial (e.mod_loc.loc_start, head))
+        |> Option.map (fun head -> Partial (definitionKey ~resolutions e.mod_loc.loc_start, head))
 #endif
       | Tmod_ident (path, _) -> ofPath visited resolutions path consumed
       | Tmod_unpack (packed, _) ->
-        unpackedBinding packed |> Option.map (fun pos -> Packed (pos, consumed))
+        unpackedBinding ~resolutions packed |> Option.map (fun pos -> Packed (pos, consumed))
       | _ -> None
   in
   ofPath [] resolutions path 0
@@ -1011,9 +1038,9 @@ let partialHeadOfPath resolutions path head =
     else
       let visited = e :: visited in
       match e.mod_desc with
-      | Tmod_apply _ -> Some e.mod_loc.loc_start
+      | Tmod_apply _ -> Some (definitionKey ~resolutions e.mod_loc.loc_start)
 #if OCAML_VERSION >= (5, 1, 0)
-      | Tmod_apply_unit _ -> Some e.mod_loc.loc_start
+      | Tmod_apply_unit _ -> Some (definitionKey ~resolutions e.mod_loc.loc_start)
 #endif
       | Tmod_constraint (inner, _, _, _) -> ofExpr visited resolutions inner
       | Tmod_ident (path, _) -> ofPath visited resolutions path
@@ -1045,7 +1072,7 @@ let rec functorHeadOf (e : Typedtree.module_expr) : functorHead option =
   in
   let applied inner =
     consume (functorHeadOf inner)
-    |> Option.map (fun head -> Partial (e.mod_loc.loc_start, head))
+    |> Option.map (fun head -> Partial (definitionKey e.mod_loc.loc_start, head))
   in
   match e.mod_desc with
   | Tmod_apply (functorExpr, _, _) -> applied functorExpr
@@ -1057,7 +1084,7 @@ let rec functorHeadOf (e : Typedtree.module_expr) : functorHead option =
   | Tmod_constraint (inner, _, _, _) -> functorHeadOf inner
   | Tmod_functor _ ->
     (* Inline functor: keyed by its own position, see [functorKeys]. *)
-    Some (Key (e.mod_loc.loc_start, 0))
+    Some (Key (definitionKey e.mod_loc.loc_start, 0))
   | Tmod_unpack (packed, _) -> (
     match unpackedBinding packed with
     | Some pos -> Some (Packed (pos, 0))
@@ -1082,8 +1109,8 @@ and headOfPath ?lid (path : Path.t) components : functorHead option =
   let byBinding () =
     match (lid, components) with
     | Some (lid : Longident.t Location.loc), [] -> (
-      match !identResolutions.moduleDefLoc lid.loc (Path.last path) with
-      | Some (loc : Location.t) -> Hashtbl.find_opt headsByBinding loc.loc_start
+      match !identResolutions.moduleDefKey lid.loc (Path.last path) with
+      | Some key -> Hashtbl.find_opt headsByBinding key
       | None -> None)
     | _ -> None
   in
@@ -1110,10 +1137,10 @@ and headOfPath ?lid (path : Path.t) components : functorHead option =
       | _ -> !identResolutions.headKeyOfPath extended
     in
     match key with
-    | Some ((nameLoc : Location.t), consumed) ->
+    | Some (key, consumed) ->
       Some
         (partialHeadOfPath !identResolutions extended
-           (Key (nameLoc.loc_start, consumed)))
+           (Key (key, consumed)))
     | None -> None
   in
   let rec first = function
@@ -1139,7 +1166,7 @@ let registerBindingHead ~(namePos : Lexing.position) (id : Ident.t option)
   | _ -> (
     match functorHeadOf moduleExpr with
     | Some head ->
-      Hashtbl.replace headsByBinding namePos head;
+      Hashtbl.replace headsByBinding (definitionKey namePos) head;
       (match id with
       | Some id -> functorsByIdent := (id, head) :: !functorsByIdent
       | None -> ())
@@ -1195,7 +1222,7 @@ let rec escapeUnpackedExports ?(visited = [])
     in
     match e.mod_desc with
     | Tmod_unpack (packed, _) -> (
-      match unpackedBinding packed with
+      match unpackedBinding ~resolutions packed with
       | Some pos -> escapedHeads := Packed (pos, 0) :: !escapedHeads
       | None -> ())
     | Tmod_constraint (inner, _, _, _) | Tmod_functor (_, inner) -> walk inner
@@ -1314,21 +1341,27 @@ let rec collectExpr super self (e : Typedtree.expression) =
   | Texp_open ({open_expr; open_bound_items}, _) ->
     registerUnpackedExports open_bound_items open_expr
   | Texp_letmodule (id, name, _, moduleExpr, _) ->
-    setFunctorKey moduleExpr name.loc.loc_start;
+    setFunctorKey moduleExpr (definitionKey name.loc.loc_start);
     registerParameterAlias id moduleExpr;
+    (match id with
+    | Some exportId ->
+      unpackedExportCandidates :=
+        {exportId; exportOrigin = moduleExpr;
+         exportResolutions = !identResolutions;
+         exportScope = !unpackedExportCandidates} :: !unpackedExportCandidates
+    | None -> ());
     (match id with
     | Some id ->
       (* [let module G = F in] or [let module G = F (A) in]: G stands for
          F's key, with the arguments already consumed. *)
       let key =
         match (unwrapConstraints moduleExpr).mod_desc with
-        | Tmod_functor _ -> Key (name.loc.loc_start, 0)
-        | _ -> (
-          match functorHeadOf moduleExpr with
-          | Some key -> key
-          | None -> Key (name.loc.loc_start, 0))
+        | Tmod_functor _ -> Some (Key (definitionKey name.loc.loc_start, 0))
+        | _ -> functorHeadOf moduleExpr
       in
-      functorsByIdent := (id, key) :: !functorsByIdent
+      (match key with
+      | Some key -> functorsByIdent := (id, key) :: !functorsByIdent
+      | None -> ())
     | None -> ())
   | _ -> ());
   #endif
@@ -1340,9 +1373,10 @@ let rec collectExpr super self (e : Typedtree.expression) =
     match functorHeadOf moduleExpr with
     | Some head -> escapedHeads := head :: !escapedHeads
     | None -> ())
-  | Texp_ident (_, _, {val_loc})
+  | Texp_ident (_, _, vd)
     when not (PosSet.mem e.exp_loc.loc_start !unpackOperands) ->
-    usedOutsideUnpack := PosSet.add val_loc.loc_start !usedOutsideUnpack
+    usedOutsideUnpack :=
+      DefinitionSet.add (!identResolutions.valueKey vd) !usedOutsideUnpack
   | _ -> ());
   (match e.exp_desc with
   | Texp_ident (_path, _, {Types.val_loc = {loc_ghost = false; _} as locTo})
@@ -1880,7 +1914,7 @@ let registerPackedModule (vb : Typedtree.value_binding) =
         let moduleType = expandModuleType moduleExpr.mod_type in
         match getSignature moduleType with [] -> None | _ -> Some moduleType)
     in
-    Hashtbl.replace packedModules loc.loc_start
+    Hashtbl.replace packedModules (definitionKey loc.loc_start)
       {
         packedHead = functorHeadOf moduleExpr;
         packedShape = moduleShapeOfExpr moduleExpr;
@@ -1969,6 +2003,98 @@ let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
    by node identity (a ppx may emit distinct applications at one position). *)
 let recordedApplications : Typedtree.module_expr list ref = ref []
 
+(* A holder argument need not have a path: [Apply (struct module F ... end)].
+   Capture its lexical member resolvers now, before the traversal leaves the
+   enclosing parameter scope. Includes and aliases retain that same scope. *)
+let argumentHeadResolver argumentExpr =
+  let resolutions = !identResolutions in
+  let rec ofExpr env ?namePos (e : Typedtree.module_expr) =
+    match e.mod_desc with
+    | Tmod_constraint (inner, _, _, _) -> ofExpr env ?namePos inner
+    | Tmod_structure {str_items} -> (
+      let _, members =
+        List.fold_left
+          (fun (env, members) (item : Typedtree.structure_item) ->
+            let bind (env, members) (mb : Typedtree.module_binding) =
+              let resolve =
+                ofExpr env ~namePos:mb.mb_name.loc.loc_start mb.mb_expr
+              in
+              let env =
+                match mb.mb_id with
+                | Some id -> (id, resolve) :: env
+                | None -> env
+              in
+              let members =
+                match mb.mb_name.txt with
+                | Some name -> (name, resolve) :: members
+                | None -> members
+              in
+              (env, members)
+            in
+            match item.str_desc with
+            | Tstr_module mb -> bind (env, members) mb
+            | Tstr_recmodule mbs -> List.fold_left bind (env, members) mbs
+            | Tstr_include {incl_mod; incl_type} ->
+              let resolve = ofExpr env incl_mod in
+              List.fold_left
+                (fun (env, members) item ->
+                  match Compat.getSigModuleModtype item with
+                  | Some (id, _, _) ->
+                    let name = Ident.name id in
+                    let member rest = resolve (name :: rest) in
+                    ((id, member) :: env, (name, member) :: members)
+                  | None -> (env, members))
+                (env, members) incl_type
+            | _ -> (env, members))
+          (env, []) str_items
+      in
+      function
+      | name :: rest ->
+        Option.bind (List.assoc_opt name members) (fun f -> f rest)
+      | [] -> None)
+    | Tmod_ident (path, _) -> (
+      let direct = functorHeadOf e in
+      let parameter = findFunctorParameter path in
+      let rec local path components =
+        match path with
+        | Path.Pident id ->
+          List.find_opt (fun (other, _) -> Ident.same id other) env
+          |> Option.map (fun (_, resolve) -> (resolve, components))
+        | Path.Pdot (parent, name) -> local parent (name :: components)
+        | _ -> None
+      in
+      let local = local path [] in
+      fun components ->
+        match (local, parameter, pathComponents path) with
+        | Some (resolve, prefix), _, _ -> resolve (prefix @ components)
+        | _, Some p, Some prefix ->
+          Some
+            (ParamHead
+               (p.functorDef, p.paramIndex, p.prefix @ prefix @ components, 0))
+        | _ -> (
+          let extended =
+            List.fold_left (fun p name -> Path.Pdot (p, name)) path components
+          in
+          if components = [] && direct <> None then direct
+          else
+            match packedHeadOfPath resolutions extended with
+            | Some head -> Some head
+            | None ->
+              resolutions.headKeyOfPath extended
+              |> Option.map (fun (key, consumed) ->
+                  partialHeadOfPath resolutions extended (Key (key, consumed))))
+      )
+    | Tmod_functor _ -> (
+      let pos = Option.value namePos ~default:e.mod_loc.loc_start in
+      function
+      | [] -> Some (Key (definitionKey ~resolutions pos, 0))
+      | _ -> None)
+    | _ -> (
+      let direct = functorHeadOf e in
+      function [] -> direct | _ -> None)
+  in
+  ofExpr [] argumentExpr
+
 (* [F (A) (B)] is [Tmod_apply (Tmod_apply (F, A), B)]: collect the functor and
    the arguments in order, and defer crediting the calls made through each
    parameter to the corresponding argument. *)
@@ -2001,47 +2127,6 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
         | Some head -> functorHeadToString head
         | None -> "none")
         (List.length args);
-    (* The functor (a submodule of) an argument denotes, for higher-order
-       parameters. Computed now: the resolver and the parameters in scope
-       are those of this file and this point of the traversal. *)
-    let argHead (argumentExpr : Typedtree.module_expr) =
-      let direct = functorHeadOf argumentExpr in
-      let resolutions = !identResolutions in
-      let ident = moduleIdent argumentExpr in
-      let parameter =
-        match ident with
-        | Some (path, _) -> (
-          match (findFunctorParameter path, pathComponents path) with
-          | Some p, Some pathComponents -> Some (p, pathComponents)
-          | _ -> None)
-        | None -> None
-      in
-      fun components ->
-        match (components, parameter, ident) with
-        | [], _, _ -> direct
-        | _, Some (p, pathComponents), _ ->
-          Some
-            (ParamHead
-               ( p.functorDef,
-                 p.paramIndex,
-                 p.prefix @ pathComponents @ components,
-                 0 ))
-        | _, None, Some (path, _) -> (
-          let extended =
-            components
-            |> List.fold_left (fun p name -> Path.Pdot (p, name)) path
-          in
-          match packedHeadOfPath resolutions extended with
-          | Some head -> Some head
-          | None -> (
-            match resolutions.headKeyOfPath extended with
-            | Some ((loc : Location.t), consumed) ->
-              Some
-                (partialHeadOfPath resolutions extended
-                   (Key (loc.loc_start, consumed)))
-            | None -> None))
-        | _, None, None -> None
-    in
     match head with
     | None ->
       (* The functors passed to an application whose head cannot be chased
@@ -2080,7 +2165,7 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
       Hashtbl.replace applicationHeads applicationId head;
       !chain
       |> List.iter (fun (e : Typedtree.module_expr) ->
-             let pos = e.mod_loc.loc_start in
+             let pos = definitionKey e.mod_loc.loc_start in
              let ids =
                Option.value (Hashtbl.find_opt applicationIdsByPosition pos)
                  ~default:[]
@@ -2098,7 +2183,7 @@ let recordFunctorApplication (moduleExpr : Typedtree.module_expr) =
                    appliedFunctor = head;
                    argIndex = i;
                    resolver = argumentItemResolver argumentExpr;
-                   argHead = argHead argumentExpr;
+                   argHead = argumentHeadResolver argumentExpr;
                    argRange = definitionRange argumentExpr;
                  }
                  :: !delayedApplications
@@ -2121,7 +2206,7 @@ let traverseStructure ~doTypes ~doExternals =
       let functorDef =
         match findFunctorKey moduleExpr with
         | Some pos -> pos
-        | None -> moduleExpr.mod_loc.loc_start
+        | None -> definitionKey moduleExpr.mod_loc.loc_start
       in
       setFunctorKey body functorDef;
       let paramIndex =
@@ -2222,7 +2307,7 @@ let traverseStructure ~doTypes ~doExternals =
     let oldModulePath = ModulePath.getCurrent () in
     (match structureItem.str_desc with
     | Tstr_module {mb_expr; mb_id; mb_loc; mb_name} -> (
-      setFunctorKey mb_expr mb_name.loc.loc_start;
+      setFunctorKey mb_expr (definitionKey mb_name.loc.loc_start);
       registerParameterAlias mb_id mb_expr;
       registerBindingHead ~namePos:mb_name.loc.loc_start mb_id mb_expr;
       let hasInterface =
@@ -2249,13 +2334,13 @@ let traverseStructure ~doTypes ~doExternals =
     | Tstr_recmodule moduleBindings ->
       moduleBindings
       |> List.iter (fun (mb : Typedtree.module_binding) ->
-             setFunctorKey mb.mb_expr mb.mb_name.loc.loc_start;
+             setFunctorKey mb.mb_expr (definitionKey mb.mb_name.loc.loc_start);
              registerParameterAlias mb.mb_id mb.mb_expr;
-             match mb.mb_id with
-             | Some id ->
+             match (mb.mb_id, (unwrapConstraints mb.mb_expr).mod_desc) with
+             | Some id, Tmod_functor _ ->
                functorsByIdent :=
-                 (id, Key (mb.mb_name.loc.loc_start, 0)) :: !functorsByIdent
-             | None -> ());
+                 (id, Key (definitionKey mb.mb_name.loc.loc_start, 0)) :: !functorsByIdent
+             | _ -> ());
       (* [module rec G : T = H and H : T = F]: an alias or partial
          application stands for the functor's key; a forward alias resolves
          once the later binding has, so iterate to a fixed point. *)
@@ -2265,7 +2350,7 @@ let traverseStructure ~doTypes ~doExternals =
              (fun changed (mb : Typedtree.module_binding) ->
                match (mb.mb_id, (unwrapConstraints mb.mb_expr).mod_desc) with
                | ( Some id,
-                   ( Tmod_apply _ | Tmod_ident _
+                   ( Tmod_apply _ | Tmod_ident _ | Tmod_unpack _
 #if OCAML_VERSION >= (5, 1, 0)
                    | Tmod_apply_unit _
 #endif
@@ -2408,7 +2493,6 @@ let processValueDependency
          through shapes already point at the implementation and are not in
          this set; this is the conservative fallback for the rest, and keeps
          every implementation of the item live. *)
-      DeadOptionalArgs.forwardDelayedItems ~posFrom ~posTo;
       ValueReferences.find posFrom
       |> PosSet.iter (fun posRef ->
              if
@@ -2433,6 +2517,55 @@ let processValueDependency
 (* Value dependencies are processed once all files have been scanned, so that
    declarations and references from every file are known. *)
 let delayedValueDependencies = ref []
+let packedValueDependencies = ref []
+
+let processValueDependencies dependencies =
+  let targets = PosHash.create 64 in
+  let locations = PosHash.create 64 in
+  let declarationEdges = ref [] in
+  dependencies
+  |> List.iter (fun ((locTo : Location.t), (locFrom : Location.t)) ->
+      if
+        (not (locTo.loc_ghost || locFrom.loc_ghost))
+        && locTo.loc_start <> locFrom.loc_start
+      then (
+        if
+          PosHash.mem decls locFrom.loc_start
+          && not
+               (PosSet.mem locTo.loc_start
+                  (PosHash.findSet targets locFrom.loc_start))
+        then declarationEdges := (locTo, locFrom) :: !declarationEdges;
+        PosHash.addSet targets locFrom.loc_start locTo.loc_start;
+        PosHash.replace locations locFrom.loc_start locFrom;
+        PosHash.replace locations locTo.loc_start locTo));
+  let pending = Queue.create () in
+  let queued = ref PosSet.empty in
+  let enqueue pos =
+    if not (PosHash.mem decls pos || PosSet.mem pos !queued) then (
+      queued := PosSet.add pos !queued;
+      Queue.add pos pending)
+  in
+  let forward posFrom posTo =
+    processValueDependency
+      (PosHash.find locations posTo, PosHash.find locations posFrom)
+  in
+  (* Declaration edges add real references exactly once. Signature-only
+     nodes then forward to a fixed point, regardless of dependency order. *)
+  (* Preserve the compiler's declaration-edge order for ordinary function
+     references; only signature forwarding needs the work queue. *)
+  List.rev !declarationEdges |> List.iter processValueDependency;
+  PosHash.iter (fun posFrom _ -> enqueue posFrom) targets;
+  while not (Queue.is_empty pending) do
+    let posFrom = Queue.take pending in
+    queued := PosSet.remove posFrom !queued;
+    PosHash.findSet targets posFrom
+    |> PosSet.iter (fun posTo ->
+        let before = ValueReferences.find posTo in
+        forward posFrom posTo;
+        if not (PosSet.equal before (ValueReferences.find posTo)) then
+          enqueue posTo)
+  done;
+  DeadOptionalArgs.forwardDelayedItems targets
 
 let forceDelayedItems () =
   let redirects = List.rev !delayedRedirects in
@@ -2455,10 +2588,11 @@ let forceDelayedItems () =
   (* Interface items stand for their implementations (value dependencies
      pair an implementation with the item it satisfies). *)
   let sigToImpl = Hashtbl.create 16 in
-  !delayedValueDependencies
-  |> List.iter (fun ((locTo : Location.t), (locFrom : Location.t)) ->
+  !packedValueDependencies
+  |> List.iter (fun (context, ((locTo : Location.t), (locFrom : Location.t))) ->
          if not (locTo.loc_ghost || locFrom.loc_ghost) then
-           Hashtbl.replace sigToImpl locFrom.loc_start locTo.loc_start);
+           Hashtbl.replace sigToImpl (locFrom.loc_start, context) (locTo.loc_start, context));
+  packedValueDependencies := [];
   resolveParameterHeadedApplications ~sigToImpl;
   escapePackedModulesUsedElsewhere ~sigToImpl;
   let keys, ranges = escapedKeysAndRanges ~sigToImpl in
@@ -2467,7 +2601,7 @@ let forceDelayedItems () =
     (fun (def, index, components) calls ->
       let calls = List.rev calls in
       if !Common.Cli.debug then
-        Log_.item "parameterCalls %s index:%d %s: %s@." (def |> posToString)
+        Log_.item "parameterCalls %s index:%d %s: %s@." (def |> keyToString)
           index
           (String.concat "." components)
           (if isEscaped def then "escaped"
@@ -2537,7 +2671,7 @@ let forceDelayedItems () =
   DeadOptionalArgs.settleDelayedItems ();
   let dependencies = List.rev !delayedValueDependencies in
   delayedValueDependencies := [];
-  dependencies |> List.iter processValueDependency
+  processValueDependencies dependencies
 
 let processStructure ~cmt_value_dependencies ~cmt_ident_resolutions ~doTypes
     ~doExternals (structure : Typedtree.structure) =
@@ -2553,5 +2687,9 @@ let processStructure ~cmt_value_dependencies ~cmt_ident_resolutions ~doTypes
   functorKeys := [];
   identResolutions := Compat.emptyIdentResolutions;
   let valueDependencies = cmt_value_dependencies |> List.rev in
+  packedValueDependencies :=
+    List.rev_append
+      (List.map (fun dep -> (cmt_ident_resolutions.Compat.context, dep)) valueDependencies)
+      !packedValueDependencies;
   delayedValueDependencies :=
     List.rev_append valueDependencies !delayedValueDependencies

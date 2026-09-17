@@ -22,6 +22,43 @@ let filter_map f =
   aux []
 #endif
 
+(* The interface reused by a native compilation can be recorded only as a
+   self-import: its .cmt has no direct interface digest or sibling .cmti. *)
+let interfaceDigest (infos : Cmt_format.cmt_infos) =
+  match infos.cmt_interface_digest with
+  | Some _ as digest -> digest
+  | None -> Option.join (List.assoc_opt infos.cmt_modname infos.cmt_imports)
+
+(* Output paths, backend options, and -I directories do not identify a typed
+   compilation: byte/native and install copies must share it. Imports identify
+   the resolved interfaces, but not ordered implicit opens or preprocessing.
+   Retain those source/typing options in command-line order. *)
+let compilationContext (infos : Cmt_format.cmt_infos) =
+  let rec typingArgs = function
+    | (("-open" | "-pp" | "-ppx" | "-for-pack" | "-keywords") as flag)
+      :: value :: rest ->
+      flag :: value :: typingArgs rest
+    | (( "-principal" | "-no-principal" | "-rectypes" | "-no-rectypes"
+       | "-labels" | "-nolabels" | "-modern" | "-app-funct" | "-no-app-funct"
+       | "-alias-deps" | "-no-alias-deps" | "-opaque" | "-noassert" | "-unsafe"
+       | "-nopervasives" | "-safe-string" | "-unsafe-string"
+       | "-strict-sequence" | "-no-strict-sequence" | "-strict-formats"
+       | "-no-strict-formats" | "-unboxed-types" | "-no-unboxed-types"
+       | "-keep-docs" | "-no-keep-docs" | "-keep-locs" | "-no-keep-locs" ) as
+       flag)
+      :: rest ->
+      flag :: typingArgs rest
+    | _ :: rest -> typingArgs rest
+    | [] -> []
+  in
+  ( infos.cmt_modname,
+    infos.cmt_sourcefile,
+    infos.cmt_builddir,
+    infos.cmt_source_digest,
+    List.sort_uniq compare infos.cmt_imports,
+    typingArgs (Array.to_list infos.cmt_args) )
+  |> fun key -> Digest.to_hex (Digest.string (Marshal.to_string key []))
+
 let getStringValue const = match const with
 #if OCAML_VERSION >= (4, 11, 0)
   | Parsetree.Pconst_string(s, _, _) -> s
@@ -342,6 +379,7 @@ let registerCmtFile path =
    .cmt), and the uid -> declaration table (merged from .cmt and .cmti).
    Loaded on demand. *)
 type unitInfo = {
+  context : string;
   shape : Shape.t option;
   structure : Typedtree.structure option;
   uidToDecl : Typedtree.item_declaration Shape.Uid.Tbl.t;
@@ -420,10 +458,10 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
       let loaded = files |> List.filter_map read in
       let interfaceDigest path =
         match List.assoc_opt path loaded with
-        | Some infos -> infos.Cmt_format.cmt_interface_digest
+        | Some infos -> interfaceDigest infos
         | None -> (
           match read path with
-          | Some (_, infos) -> infos.Cmt_format.cmt_interface_digest
+          | Some (_, infos) -> interfaceDigest infos
           | None -> None)
       in
       let selected =
@@ -450,9 +488,7 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
         loaded
         |> List.filter (fun (_, (cmt_infos : Cmt_format.cmt_infos)) ->
                let key =
-                 ( cmt_infos.cmt_sourcefile,
-                   cmt_infos.cmt_builddir,
-                   cmt_infos.cmt_impl_shape <> None )
+                 (compilationContext cmt_infos, cmt_infos.cmt_impl_shape <> None)
                in
                if Hashtbl.mem seen key then false
                else (
@@ -482,7 +518,7 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
                shape := cmt_infos.cmt_impl_shape;
                implementation := Some (path, cmt_infos)
              | _ -> ());
-      let cmtPath, unitImports, occurrences, structure =
+      let cmtPath, unitImports, occurrences, structure, context =
         match (!implementation, loaded) with
         | Some (path, cmt_infos), _ | None, (path, cmt_infos) :: _ ->
           let structure =
@@ -490,11 +526,12 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
             | Implementation structure -> Some structure
             | _ -> None
           in
-          (path, cmt_infos.cmt_imports, cmt_infos.cmt_ident_occurrences, structure)
-        | None, [] -> ("", [], [], None)
+          (path, cmt_infos.cmt_imports, cmt_infos.cmt_ident_occurrences, structure,
+           compilationContext cmt_infos)
+        | None, [] -> ("", [], [], None, "")
       in
       let info =
-        {shape = !shape; structure; uidToDecl; cmtPath; unitImports; occurrences}
+        {shape = !shape; structure; uidToDecl; cmtPath; unitImports; occurrences; context}
       in
       Hashtbl.replace unitInfoCache cacheKey info;
       Some info)
@@ -581,7 +618,7 @@ let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
   in
   let interface_digest_of_file path =
     match read_cmt path with
-    | Some infos -> infos.cmt_interface_digest
+    | Some infos -> interfaceDigest infos
     | None -> None
   in
   let loadedUnits : (string, Typedtree.item_declaration UidTbl.t list) Hashtbl.t
@@ -692,7 +729,13 @@ let noHeadVisited : headVisited =
   ()
 #endif
 
+(* Source positions remain diagnostic locations, but are not identities when
+   the same source is compiled in different dependency/typing contexts. *)
+type definitionKey = Lexing.position * string
+
 type identResolutions = {
+  context : string;
+  valueKey : Types.value_description -> definitionKey;
   valueImpl : Location.t -> string -> Location.t option;
       (** occurrence location, last name -> implementation location *)
   moduleShape : Location.t -> string -> moduleShape option;
@@ -701,8 +744,8 @@ type identResolutions = {
       (** implementation of a value item of a module shape *)
   projModule : moduleShape -> string -> moduleShape option;
       (** shape of a module item of a module shape *)
-  moduleDefLoc : Location.t -> string -> Location.t option;
-      (** occurrence location, last name -> location of the module binding's
+  moduleDefKey : Location.t -> string -> definitionKey option;
+      (** occurrence location, last name -> key of the module binding's
           name, for a module (e.g. a functor) defined with [module X = ...] *)
   moduleTypeOf : Location.t -> string -> Types.module_type option;
       (** occurrence location, last name -> the module type a
@@ -717,13 +760,13 @@ type identResolutions = {
     (Location.t * Typedtree.module_expr * identResolutions option * int) option;
       (** the binding a module path denotes, structurally, with the resolver
           of its unit and the number of functor layers the path applied *)
-  headKeyOfPath : Path.t -> (Location.t * int) option;
-      (** the binding name location of the functor a module path denotes,
+  headKeyOfPath : Path.t -> (definitionKey * int) option;
+      (** the binding key of the functor a module path denotes,
           found structurally, and the arguments consumed *)
   headKey :
-    headVisited -> Typedtree.module_expr -> (Location.t * int) option;
+    headVisited -> Typedtree.module_expr -> (definitionKey * int) option;
       (** visited bindings (start with [noHeadVisited]), module expression ->
-          the binding name location of the functor it stands for, through
+          the binding key of the functor it stands for, through
           aliases and partial applications (possibly bound in other units,
           resolved with those units' own occurrence data), and the number of
           arguments those partial applications consumed; inline functors are
@@ -735,11 +778,13 @@ type identResolutions = {
 
 let emptyIdentResolutions =
   {
+    context = "";
+    valueKey = (fun vd -> (vd.Types.val_loc.loc_start, ""));
     valueImpl = (fun _ _ -> None);
     moduleShape = (fun _ _ -> None);
     projValue = (fun _ _ -> None);
     projModule = (fun _ _ -> None);
-    moduleDefLoc = (fun _ _ -> None);
+    moduleDefKey = (fun _ _ -> None);
     moduleTypeOf = (fun _ _ -> None);
     moduleTypeOfPath = (fun _ -> None);
     shapeValueItems = (fun _ -> []);
@@ -815,7 +860,7 @@ let applyUnitShape (functorShape : moduleShape) : moduleShape =
    there (aliases and partial applications of functors). *)
 let resolverCache : (string, identResolutions) Hashtbl.t = Hashtbl.create 16
 
-let rec makeResolver ~cmtFilePath
+let rec makeResolver ~cmtFilePath ~context
     ~(local : Typedtree.item_declaration Shape.Uid.Tbl.t)
     ~(imports : Misc.crcs) ~(implShape : Shape.t option)
     ~(occurrences : (Longident.t Location.loc * Shape_reduce.result) list) :
@@ -939,7 +984,7 @@ let rec makeResolver ~cmtFilePath
     | None -> None
   in
   let selfRef = ref emptyIdentResolutions in
-  let headKeyOfPathRef = ref (fun (_ : Path.t) -> (None : (Location.t * int) option)) in
+  let headKeyOfPathRef = ref (fun (_ : Path.t) -> (None : (definitionKey * int) option)) in
   let moduleTypeOfPathRef = ref (fun (_ : Path.t) -> (None : Types.module_type option)) in
   let bindingOfUid =
     moduleBindingOfUid ~currentCmtFile:cmtFilePath ~imports ~local
@@ -1098,6 +1143,13 @@ let rec makeResolver ~cmtFilePath
     | _ -> None
   in
   let self : identResolutions = {
+    context;
+    valueKey = (fun vd ->
+      let context = match resolverOfUid vd.Types.val_uid with
+        | Some resolver -> resolver.context
+        | None -> context
+      in
+      (vd.val_loc.loc_start, context));
     valueImpl =
       (fun loc name ->
         match Hashtbl.find_opt values (key loc name) with
@@ -1112,7 +1164,7 @@ let rec makeResolver ~cmtFilePath
     projModule =
       (fun shape name ->
         Some (Shape.proj shape (Shape.Item.make name Module)));
-    moduleDefLoc =
+    moduleDefKey =
       (fun loc name ->
         match Hashtbl.find_opt moduleUids (key loc name) with
         | Some uid -> (
@@ -1121,6 +1173,12 @@ let rec makeResolver ~cmtFilePath
             moduleBindingLocOfUid ~currentCmtFile:cmtFilePath ~imports ~local
               uid
             |> nonGhost
+            |> Option.map (fun loc ->
+                   let context = match resolverOfUid uid with
+                     | Some resolver -> resolver.context
+                     | None -> context
+                   in
+                   (loc.Location.loc_start, context))
           | None -> None)
         | None -> None);
     moduleTypeOf =
@@ -1188,7 +1246,12 @@ let rec makeResolver ~cmtFilePath
              (* A first-class module: the functor it holds is not known
                 here. *)
              None
-           | _ -> Some (loc, 0)
+           | _ ->
+             let context = match resolver with
+               | Some resolver -> resolver.context
+               | None -> context
+             in
+             Some ((loc.loc_start, context), 0)
        in
        headKeyOfPathRef :=
          (fun path ->
@@ -1205,7 +1268,7 @@ let rec makeResolver ~cmtFilePath
            | Some (loc, consumed) -> Some (loc, consumed + 1)
            | None -> None)
          | Tmod_constraint (inner, _, _, _) -> headKey visited inner
-         | Tmod_functor _ -> Some (e.mod_loc, 0)
+         | Tmod_functor _ -> Some ((e.mod_loc.loc_start, context), 0)
          | Tmod_ident (path, lid) -> (
            let byOccurrence =
              match Longident.last lid.txt with
@@ -1385,7 +1448,7 @@ and resolverForUnit ~currentCmtFile ~imports comp_unit =
     | Some resolver -> Some resolver
     | None ->
       let resolver =
-        makeResolver ~cmtFilePath:info.cmtPath ~local:info.uidToDecl
+        makeResolver ~cmtFilePath:info.cmtPath ~context:info.context ~local:info.uidToDecl
           ~imports:info.unitImports ~implShape:info.shape
           ~occurrences:info.occurrences
       in
@@ -1397,7 +1460,8 @@ and resolverForUnit ~currentCmtFile ~imports comp_unit =
 let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
     identResolutions =
 #if OCAML_VERSION >= (5, 3, 0)
-  makeResolver ~cmtFilePath ~local:cmt_infos.cmt_uid_to_decl
+  makeResolver ~cmtFilePath ~context:(compilationContext cmt_infos)
+    ~local:cmt_infos.cmt_uid_to_decl
     ~imports:cmt_infos.cmt_imports ~implShape:cmt_infos.cmt_impl_shape
     ~occurrences:cmt_infos.cmt_ident_occurrences
 #else

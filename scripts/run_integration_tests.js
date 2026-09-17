@@ -675,6 +675,18 @@ function runRegressionTests() {
     assertIncludes(output, "Dead Value +Escaped_coercion.Known_only.Unrelated_arg.+needed");
     assertIncludes(output, "Live Value +Escaped_coercion.Nested_stored.Possible_arg.N.+needed");
     assertIncludes(output, "Dead Value +Escaped_coercion.Nested_stored.Possible_arg.N.+unused");
+    for (const name of ["Known_arg", "Anonymous_arg", "Included_arg"]) {
+      assertIncludes(output, `optional argument mixed of function Mixed_holders.${name}.+g is always supplied (1 calls)`);
+    }
+    for (const name of ["Omitted_arg", "Unrelated_arg"]) {
+      assertIncludes(output, `optional argument mixed of function Mixed_holders.${name}.+g is never used`);
+    }
+    assertIncludes(output, "Live Value +Review_round.Partial_result.F.+run");
+    assertNotIncludes(output, "Dead Value +Review_round.Partial_result.F.+run");
+    assertIncludes(output, "Dead Value +Review_round.Partial_result.F.+unused");
+    assertIncludes(output, "optional argument result of function Partial_result.F.+run is always supplied (2 calls)");
+    assertIncludes(output, "optional argument local_alias of function Local_alias.Arg.+g is always supplied (1 calls)");
+    assertIncludes(output, "optional argument recursive_alias of function Recursive_alias.Arg.+g is always supplied (1 calls)");
   }
 
   assertNotIncludes(output, "Parent is a dead module");
@@ -863,6 +875,94 @@ function runDuplicateContextTest() {
   }
 }
 
+function runCompilationContextTests() {
+  if (!ocamlVersionAtLeast(5, 3)) return;
+  const fs = require("fs");
+  const cwd = fs.mkdtempSync(path.join(require("os").tmpdir(), "reanalyze-typing-context-"));
+  const fixture = path.join(__dirname, "..", "examples", "regression", "compilation_context");
+  const copy = (name) => fs.copyFileSync(path.join(fixture, name), path.join(cwd, name));
+  const compile = (args, compiler = "ocamlc") => child_process.execFileSync(
+    compiler, ["-bin-annot", "-bin-annot-occurrences", ...args], { cwd }
+  );
+  const run = (root, debug = false) => child_process.execFileSync(
+    reanalyzeFile, ["-ci", ...(debug ? ["-debug"] : []), "-dce-cmt", root],
+    { cwd, encoding: "utf8" }
+  );
+  try {
+    for (const dir of ["a", "b", "native_layout/byte", "native_layout/native"]) {
+      fs.mkdirSync(path.join(cwd, dir), { recursive: true });
+    }
+    copy("Shared.ml");
+    for (const dir of ["a", "b"]) {
+      for (const file of ["Provider.ml", `Use_${dir}.ml`]) copy(`${dir}/${file}`);
+      compile(["-c", `${dir}/Provider.ml`]);
+      compile(["-I", dir, "-c", "-o", `${dir}/Shared.cmo`, "Shared.ml"]);
+      compile(["-I", dir, "-c", `${dir}/Use_${dir}.ml`]);
+    }
+    console.log(`${cwd}: reanalyze functor identity in separate compilation contexts`);
+    const supplied = "optional argument context of function Arg.+g is always supplied (1 calls)";
+    const omitted = "optional argument context of function Arg.+g is never used";
+    assertIncludes(run("a"), supplied);
+    assertIncludes(run("b"), omitted);
+    const assertContexts = (output) => {
+      assertIncludes(output, supplied);
+      assertIncludes(output, omitted);
+      for (const name of ["Partial_arg", "Packed_arg"]) {
+        assertIncludes(output, `optional argument context of function ${name}.+g is always supplied (1 calls)`);
+        assertIncludes(output, `optional argument context of function ${name}.+g is never used`);
+      }
+      if ((output.match(/Scanning .*Shared\.cmt /g) || []).length !== 2) {
+        throw new Error("Both Shared functor contexts must be scanned exactly once");
+      }
+    };
+    assertContexts(run(".", true));
+
+    for (const name of ["First", "Second", "Opened"]) copy(`${name}.ml`);
+    compile(["-c", "First.ml"]);
+    compile(["-c", "Second.ml"]);
+    compile(["-open", "First", "-open", "Second", "-c", "-o", "a/Opened.cmo", "Opened.ml"]);
+    compile(["-open", "Second", "-open", "First", "-c", "-o", "b/Opened.cmo", "Opened.ml"]);
+    const assertOpens = (output) => {
+      for (const name of ["First", "Second"]) {
+        assertIncludes(output, `Live Value +${name}.+g`);
+        assertNotIncludes(output, `Dead Value +${name}.+g`);
+      }
+      if ((output.match(/Scanning .*Opened\.cmt /g) || []).length !== 2 ||
+          (output.match(/optional argument opened of function \+g is always supplied \(1 calls\)/g) || []).length !== 2) {
+        throw new Error("Ordered -open contexts must each contribute one call");
+      }
+    };
+    console.log(`${cwd}: reanalyze ordered implicit opens`);
+    assertOpens(run(".", true));
+    for (const dir of ["a", "b"]) {
+      fs.mkdirSync(path.join(cwd, dir, "install"));
+      for (const file of fs.readdirSync(path.join(cwd, dir)).filter((f) => f.endsWith(".cmt"))) {
+        fs.copyFileSync(path.join(cwd, dir, file), path.join(cwd, dir, "install", file));
+      }
+    }
+    const copies = run(".", true);
+    assertContexts(copies);
+    assertOpens(copies);
+
+    for (const name of ["Native_provider", "Native_use"]) {
+      copy(`${name}.ml`);
+      compile(["-I", "native_layout/byte", "-c", "-o", `native_layout/byte/${name}.cmo`, `${name}.ml`]);
+    }
+    for (const name of ["Native_provider", "Native_use"]) {
+      compile(["-intf-suffix", ".ml", "-I", "native_layout/byte", "-I", "native_layout/native",
+        "-c", "-o", `native_layout/native/${name}.cmx`, `${name}.ml`], "ocamlopt");
+    }
+    console.log(`${cwd}: reanalyze native-only cross-unit functor imports`);
+    const byte = run("native_layout/byte");
+    assertIncludes(byte, "optional argument native of function Arg.+g is always supplied (1 calls)");
+    for (const root of ["native_layout/native", "native_layout"]) {
+      if (run(root) !== byte) throw new Error(`Cross-unit attribution changed for ${root}`);
+    }
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
 function runFunctorScanOrderTest(providerName, consumerName, assertions) {
   if (!ocamlVersionAtLeast(5, 3)) return;
   const fs = require("fs");
@@ -994,6 +1094,7 @@ function main() {
     runDuplicateLayoutTest();
     runByteNativeDuplicateTest();
     runDuplicateContextTest();
+    runCompilationContextTests();
     runFunctorScanOrderTest("Unpacked_functor", "Unpacked_functor_use", [
       "optional argument x of function Unpacked_arg.+g is always supplied (1 calls)",
       "optional argument x of function Unpacked_unused.+g is never used",
