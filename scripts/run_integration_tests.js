@@ -687,6 +687,12 @@ function runRegressionTests() {
     assertIncludes(output, "optional argument result of function Partial_result.F.+run is always supplied (2 calls)");
     assertIncludes(output, "optional argument local_alias of function Local_alias.Arg.+g is always supplied (1 calls)");
     assertIncludes(output, "optional argument recursive_alias of function Recursive_alias.Arg.+g is always supplied (1 calls)");
+    for (const name of ["Known.N", "B.N", "C.Actual", "D.N", "Packed_arg.N"]) {
+      assertIncludes(output, `optional argument nested_arg of function ${name}.+g is always supplied (1 calls)`);
+    }
+    assertIncludes(output, "optional argument nested_arg of function Unrelated.N.+g is never used");
+    assertIncludes(output, "optional argument foreign_nested of function Actual.N.+g is always supplied (1 calls)");
+    assertIncludes(output, "optional argument foreign_nested of function Unrelated.N.+g is never used");
   }
 
   assertNotIncludes(output, "Parent is a dead module");
@@ -875,7 +881,7 @@ function runDuplicateContextTest() {
   }
 }
 
-function runCompilationContextTests() {
+function runCompilationContextTests(sharedInterface = false) {
   if (!ocamlVersionAtLeast(5, 3)) return;
   const fs = require("fs");
   const cwd = fs.mkdtempSync(path.join(require("os").tmpdir(), "reanalyze-typing-context-"));
@@ -886,20 +892,29 @@ function runCompilationContextTests() {
   );
   const run = (root, debug = false) => child_process.execFileSync(
     reanalyzeFile, ["-ci", ...(debug ? ["-debug"] : []), "-dce-cmt", root],
-    { cwd, encoding: "utf8" }
+    { cwd, encoding: "utf8", timeout: 10000 }
   );
   try {
     for (const dir of ["a", "b", "native_layout/byte", "native_layout/native"]) {
       fs.mkdirSync(path.join(cwd, dir), { recursive: true });
     }
     copy("Shared.ml");
+    copy("Relay.ml");
+    const apiArgs = sharedInterface ? ["-I", "api"] : [];
+    if (sharedInterface) {
+      fs.mkdirSync(path.join(cwd, "api"));
+      copy("Provider.mli");
+      compile(["-c", "-o", "api/Provider.cmi", "Provider.mli"]);
+    }
     for (const dir of ["a", "b"]) {
       for (const file of ["Provider.ml", `Use_${dir}.ml`]) copy(`${dir}/${file}`);
-      compile(["-c", `${dir}/Provider.ml`]);
-      compile(["-I", dir, "-c", "-o", `${dir}/Shared.cmo`, "Shared.ml"]);
-      compile(["-I", dir, "-c", `${dir}/Use_${dir}.ml`]);
+      compile([...(sharedInterface ? ["-intf-suffix", ".ml", ...apiArgs] : []), "-c", `${dir}/Provider.ml`]);
+      for (const name of ["Shared", "Relay"]) {
+        compile(["-I", dir, ...apiArgs, "-c", "-o", `${dir}/${name}.cmo`, `${name}.ml`]);
+      }
+      compile(["-I", dir, ...apiArgs, "-c", `${dir}/Use_${dir}.ml`]);
     }
-    console.log(`${cwd}: reanalyze functor identity in separate compilation contexts`);
+    console.log(`${cwd}: reanalyze functor identity with ${sharedInterface ? "shared" : "distinct"} dependency interfaces`);
     const supplied = "optional argument context of function Arg.+g is always supplied (1 calls)";
     const omitted = "optional argument context of function Arg.+g is never used";
     assertIncludes(run("a"), supplied);
@@ -907,7 +922,7 @@ function runCompilationContextTests() {
     const assertContexts = (output) => {
       assertIncludes(output, supplied);
       assertIncludes(output, omitted);
-      for (const name of ["Partial_arg", "Packed_arg"]) {
+      for (const name of ["Partial_arg", "Packed_arg", "Relayed_arg"]) {
         assertIncludes(output, `optional argument context of function ${name}.+g is always supplied (1 calls)`);
         assertIncludes(output, `optional argument context of function ${name}.+g is never used`);
       }
@@ -957,6 +972,13 @@ function runCompilationContextTests() {
     assertIncludes(byte, "optional argument native of function Arg.+g is always supplied (1 calls)");
     for (const root of ["native_layout/native", "native_layout"]) {
       if (run(root) !== byte) throw new Error(`Cross-unit attribution changed for ${root}`);
+    }
+    for (const name of ["Safe_alias", "Nested_alias"]) {
+      copy(`${name}.ml`);
+      compile(["-o", `${name}.exe`, `${name}.ml`]);
+      child_process.execFileSync(path.join(cwd, `${name}.exe`), [], { cwd, timeout: 10000 });
+      console.log(`${cwd}: bounded analysis of ${name}`);
+      assertIncludes(run(`${name}.cmt`), "Analysis reported 0 issues");
     }
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
@@ -1095,6 +1117,11 @@ function main() {
     runByteNativeDuplicateTest();
     runDuplicateContextTest();
     runCompilationContextTests();
+    runCompilationContextTests(true);
+    runFunctorScanOrderTest("Nested_arguments_packed", "Nested_arguments", [
+      "optional argument foreign_nested of function Actual.N.+g is always supplied (1 calls)",
+      "optional argument foreign_nested of function Unrelated.N.+g is never used",
+    ]);
     runFunctorScanOrderTest("Unpacked_functor", "Unpacked_functor_use", [
       "optional argument x of function Unpacked_arg.+g is always supplied (1 calls)",
       "optional argument x of function Unpacked_unused.+g is never used",

@@ -8,12 +8,11 @@ let scannedUnits = Hashtbl.create 256
 
 let loadCmtFile ~cmtRoot cmtFilePath =
   let cmt_infos = Cmt_format.read_cmt cmtFilePath in
-  (* Identical source can be compiled against different interfaces. Preserve
-     those contexts, but not the byte/native distinction: [cmt_imports]
-     records the reused self-interface in both artifacts, whereas
-     [cmt_interface_digest] can be absent from the native artifact. *)
+  (* Identical source can use different dependency implementations, even
+     through the same interface. Preserve the full resolved context without
+     distinguishing actual byte/native/install copies. *)
   let unitKey =
-    (Compat.compilationContext cmt_infos, Filename.check_suffix cmtFilePath ".cmti")
+    (Compat.compilationContext ~cmtFilePath cmt_infos, Filename.check_suffix cmtFilePath ".cmti")
   in
   if Hashtbl.mem scannedUnits unitKey then ()
   else

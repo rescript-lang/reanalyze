@@ -2,6 +2,7 @@ let definitely_dead () = ()
 
 let () =
   Review_round.run ();
+  Nested_arguments.run ();
   Attribution_sweep.run ();
   Escaped_coercion.run ();
   Partial_context_use.run ();

@@ -4,6 +4,13 @@ end
 
 module Applied = Shared.Apply (Arg)
 
+module Relayed_arg : Shared.S = struct
+  let g ?(context = 0) () = context
+end
+
+module Relayed = Relay.Apply (Relayed_arg)
+
+let () = ignore (Relayed.run ())
 let () = ignore (Applied.run ())
 
 module Partial_arg : Shared.S = struct

@@ -132,9 +132,9 @@ type functorParameter = {
 
 let functorParameters : functorParameter list ref = ref []
 
-let findFunctorParameter (path : Path.t) =
+let findFunctorParameter ?(parameters = !functorParameters) (path : Path.t) =
   match Path.head path with
-  | head -> List.find_opt (fun p -> Ident.same p.paramId head) !functorParameters
+  | head -> List.find_opt (fun p -> Ident.same p.paramId head) parameters
   | exception _ -> None
 
 let isFunctorParameterPath path = findFunctorParameter path <> None
@@ -324,6 +324,7 @@ type packedModule = {
   packedHead : functorHead option;
   packedShape : Compat.moduleShape option;
   packedConcrete : Types.module_type option;
+  packedResolveValue : string list -> Location.t option;
   packedRange : definitionRange list;
   packedExpr : Typedtree.module_expr;
 }
@@ -345,21 +346,29 @@ let unpackedBinding ?(resolutions = !identResolutions) (e : Typedtree.expression
   | _ -> None
 
 (* Implementations of a value of the argument at [argIndex] of every
-   application of the functor keyed [functorDef] (under [bindings]). *)
+   application of the functor keyed [functorDef] (under [bindings]). Retain
+   [None] for each unresolved branch: a resolved sibling cannot erase it. *)
 let rec resolveArgumentItems ~visited ~bindings functorDef argIndex components
     =
-  if List.mem (functorDef, argIndex) visited then []
+  if List.mem (functorDef, argIndex) visited then [None]
   else
     let visited = (functorDef, argIndex) :: visited in
     applicationsOf ~bindings functorDef argIndex
     |> List.concat_map (fun {resolver; bindings = own} ->
            match resolver with
-           | Direct resolve -> (
-             match resolve components with Some loc -> [loc] | None -> [])
+           | Direct resolve ->
+             let resolved = resolve components in
+             if resolved = None && !Common.Cli.debug then
+               Log_.item "unresolvedArgument %s index:%d %s@."
+                 (keyToString functorDef) argIndex (String.concat "." components);
+             [resolved]
            | ViaParameter (outerDef, outerIndex, prefix) ->
-             resolveArgumentItems ~visited
-               ~bindings:(mergeBindings (own @ bindings)) outerDef outerIndex
-               (prefix @ components))
+             let resolved =
+               resolveArgumentItems ~visited
+                 ~bindings:(mergeBindings (own @ bindings)) outerDef outerIndex
+                 (prefix @ components)
+             in
+             if resolved = [] then [None] else resolved)
 
 (* Whether the functor keyed [functorDef] has an application supplying its
    parameter [argIndex]. *)
@@ -1564,21 +1573,27 @@ let findSignatureItem name signature =
 (* Module type expansion, also for module types rooted at a functor
    parameter in scope ([module type T = M.T], [M.Sub.T2]): those are found in
    the parameter's declared module type. *)
-let rec expandModuleType ?(visited = []) (moduleType : Types.module_type) =
-  let expanded = !identResolutions.expandModuleType moduleType in
+let rec expandModuleType ?(visited = []) ?(resolutions = !identResolutions)
+    ?(parameters = !functorParameters) (moduleType : Types.module_type) =
+  let expanded = resolutions.Compat.expandModuleType moduleType in
   match expanded with
   | Mty_ident path when not (List.exists (Path.same path) visited) -> (
     let visited = path :: visited in
-    match moduleTypeViaParameter ~visited path with
-    | Some moduleType -> expandModuleType ~visited moduleType
+    match moduleTypeViaParameter ~visited ~resolutions ~parameters path with
+    | Some moduleType ->
+      expandModuleType ~visited ~resolutions ~parameters moduleType
     | None -> expanded)
   | _ -> expanded
 
-and moduleTypeViaParameter ~visited (path : Path.t) =
-  match (findFunctorParameter path, pathComponents path) with
-  | Some {paramType = Some paramType; prefix}, Some components -> (
+and moduleTypeViaParameter ~visited ~resolutions ~parameters (path : Path.t) =
+  match (findFunctorParameter ~parameters path, pathComponents path) with
+  | Some {paramType = Some paramType; prefix}, Some components ->
     let rec walk (moduleType : Types.module_type) components =
-      let signature = moduleType |> expandModuleType ~visited |> getSignature in
+      let signature =
+        moduleType
+        |> expandModuleType ~visited ~resolutions ~parameters
+        |> getSignature
+      in
       match components with
       | [] -> None
       | [name] -> (
@@ -1596,7 +1611,7 @@ and moduleTypeViaParameter ~visited (path : Path.t) =
           | None -> None)
         | _ -> None)
     in
-    walk paramType (prefix @ components))
+    walk paramType (prefix @ components)
   | _ -> None
 
 (* Signature of a module type, with aliases of named module types expanded
@@ -1607,8 +1622,9 @@ let expandedSignature (moduleType : Types.module_type) =
   moduleType |> expandModuleType |> getSignature
 
 (* The location of a value in a module type, by path of names. *)
-let rec findValueInModuleType (moduleType : Types.module_type) components =
-  let signature = moduleType |> expandedSignature in
+let rec findValueInModuleType ?(expand = fun mt -> expandModuleType mt)
+    (moduleType : Types.module_type) components =
+  let signature = moduleType |> expand |> getSignature in
   match components with
   | [] -> None
   | [name] -> (
@@ -1621,7 +1637,8 @@ let rec findValueInModuleType (moduleType : Types.module_type) components =
     match signature |> findSignatureItem m with
     | Some (Types.Sig_module _ as item) -> (
       match item |> Compat.getSigModuleModtype with
-      | Some (_id, moduleType, _loc) -> findValueInModuleType moduleType rest
+      | Some (_id, moduleType, _loc) ->
+        findValueInModuleType ~expand moduleType rest
       | None -> None)
     | _ -> None)
 
@@ -1895,6 +1912,68 @@ let rec concreteArgumentType ?(env = []) (argumentExpr : Typedtree.module_expr)
     | None -> None)
   | _ -> None
 
+let rec valueInShape ~resolutions shape components =
+  match components with
+  | [] -> None
+  | [name] -> resolutions.Compat.projValue shape name
+  | name :: rest ->
+    Option.bind (resolutions.projModule shape name) (fun shape ->
+        valueInShape ~resolutions shape rest)
+
+(* Resolve anonymous members underneath their constraints, retaining the
+   defining scope for any named types reached after traversal has finished. *)
+let rec argumentValue ~resolutions ~parameters ?(visited = [])
+    (e : Typedtree.module_expr) components =
+  if List.memq e visited then None
+  else
+    let visited = e :: visited in
+    let resolve = argumentValue ~resolutions ~parameters ~visited in
+    let fromType () =
+      findValueInModuleType
+        ~expand:(fun mt -> expandModuleType ~resolutions ~parameters mt)
+        e.mod_type components
+    in
+    match e.mod_desc with
+    | Tmod_constraint (inner, _, _, _) -> resolve inner components
+    | Tmod_structure {str_items} -> (
+      match components with
+      | name :: (_ :: _ as rest) ->
+        let rec member = function
+          | [] -> None
+          | (item : Typedtree.structure_item) :: items -> (
+            let matching (mb : Typedtree.module_binding) =
+              mb.mb_name.txt = Some name
+            in
+            let binding =
+              match item.str_desc with
+              | Tstr_module mb when matching mb -> Some mb
+              | Tstr_recmodule mbs -> List.find_opt matching mbs
+              | _ -> None
+            in
+            match binding with
+            | Some mb -> resolve mb.mb_expr rest
+            | None -> (
+              match item.str_desc with
+              | Tstr_include {incl_mod; incl_type}
+                when List.exists
+                       (fun item -> signatureItemName item = Some name)
+                       incl_type ->
+                resolve incl_mod components
+              | _ -> member items))
+        in
+        member (List.rev str_items)
+      | _ -> fromType ())
+    | Tmod_ident (path, _) -> (
+      match resolutions.Compat.bindingOfPath path with
+      | Some (_, definition, resolver, 0) ->
+        let next = Option.value resolver ~default:resolutions in
+        argumentValue ~resolutions:next
+          ~parameters:
+            (if next.context = resolutions.context then parameters else [])
+          ~visited definition components
+      | _ -> None)
+    | _ -> None
+
 let registerPackedModule (vb : Typedtree.value_binding) =
   let packed =
     match vb.vb_expr.exp_desc with
@@ -1914,16 +1993,34 @@ let registerPackedModule (vb : Typedtree.value_binding) =
         let moduleType = expandModuleType moduleExpr.mod_type in
         match getSignature moduleType with [] -> None | _ -> Some moduleType)
     in
+    let resolutions = !identResolutions in
+    let parameters = !functorParameters in
+    let shape = moduleShapeOfExpr moduleExpr in
+    let resolveValue components =
+      match
+        Option.bind shape (fun shape ->
+            valueInShape ~resolutions shape components)
+      with
+      | Some _ as loc -> loc
+      | None -> (
+        match argumentValue ~resolutions ~parameters moduleExpr components with
+        | Some _ as loc -> loc
+        | None ->
+          Option.bind concrete (fun mt ->
+            findValueInModuleType
+              ~expand:(fun mt -> expandModuleType ~resolutions ~parameters mt)
+              mt components))
+    in
     Hashtbl.replace packedModules (definitionKey loc.loc_start)
       {
         packedHead = functorHeadOf moduleExpr;
-        packedShape = moduleShapeOfExpr moduleExpr;
+        packedShape = shape;
         packedConcrete = concrete;
+        packedResolveValue = resolveValue;
         packedRange = definitionRange moduleExpr;
         packedExpr = moduleExpr;
       }
   | _ -> ()
-
 
 let () = registerPackedModuleRef := registerPackedModule
 
@@ -1948,15 +2045,8 @@ let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
     match packedPos with None -> moduleShapeOfExpr argumentExpr | Some _ -> None
   in
   let resolutions = !identResolutions in
-  let rec viaShape shape components =
-    match components with
-    | [] -> None
-    | [name] -> resolutions.projValue shape name
-    | m :: rest -> (
-      match resolutions.projModule shape m with
-      | Some shape -> viaShape shape rest
-      | None -> None)
-  in
+  let parameters = !functorParameters in
+  let expand mt = expandModuleType ~resolutions ~parameters mt in
   let declared = argumentModuleType argumentExpr in
   let concrete =
     match packedPos with
@@ -1969,12 +2059,12 @@ let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
     | None -> None
   in
   let shape () =
-    match packed () with Some {packedShape} -> packedShape | None -> shape
+    (* A pack's shape and named types belong to its defining resolver, not
+       the unit unpacking it. Its stored closure handles both together. *)
+    match packed () with Some _ -> None | None -> shape
   in
   let concrete () =
-    match packed () with
-    | Some {packedConcrete} -> packedConcrete
-    | None -> concrete
+    match packed () with Some _ -> None | None -> concrete
   in
   (* By shape, then by name in the concrete type, then in the declared
      one (a shared module type item, forwarded to its implementations). *)
@@ -1990,13 +2080,17 @@ let argumentItemResolver (argumentExpr : Typedtree.module_expr) =
        [
          (fun components ->
            match shape () with
-           | Some shape -> viaShape shape components
+           | Some shape -> valueInShape ~resolutions shape components
            | None -> None);
          (fun components ->
+           match packed () with
+           | Some {packedResolveValue} -> packedResolveValue components
+           | None -> argumentValue ~resolutions ~parameters argumentExpr components);
+         (fun components ->
            match concrete () with
-           | Some concrete -> findValueInModuleType concrete components
+           | Some concrete -> findValueInModuleType ~expand concrete components
            | None -> None);
-         findValueInModuleType declared;
+         findValueInModuleType ~expand declared;
        ])
 
 (* Applications already recorded as part of an outer curried application,
@@ -2627,9 +2721,18 @@ let forceDelayedItems () =
                    ~posTo:callTo.loc_start call)
         | locs ->
           locs
-          |> List.iter (fun (locTo : Location.t) ->
+          |> List.iter (fun locTo ->
                  calls
-                 |> List.iter (fun {call} ->
+                 |> List.iter (fun {call; callTo; callFrom} ->
+                        (* Resolution can become possible only after the
+                           argument's pack was scanned. The actual call is
+                           a use even when its coercion could not resolve it. *)
+                        Option.iter
+                          (fun locTo ->
+                            addValueReference ~addFileReference:true
+                              ~locFrom:callFrom ~locTo)
+                          locTo;
+                        let locTo = Option.value locTo ~default:callTo in
                         DeadOptionalArgs.addCallToImplementation
                           ~posTo:locTo.loc_start call))
       else ())
@@ -2659,6 +2762,7 @@ let forceDelayedItems () =
            | _ ->
              resolved
              |> List.iter (fun locTo ->
+                    let locTo = Option.value locTo ~default:coercionTo in
                     addValueReference ~addFileReference:true
                       ~locFrom:coercionFrom ~locTo));
   parameterCoercions := [];

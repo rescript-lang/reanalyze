@@ -18,6 +18,8 @@
   Local_side_effects
   Main
   Nested_module_type
+  Nested_arguments
+  Nested_arguments_packed
   Ocaml_compiler_compat
   Packed_interface
   Packed_interface_use

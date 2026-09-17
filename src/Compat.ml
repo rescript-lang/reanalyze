@@ -33,7 +33,7 @@ let interfaceDigest (infos : Cmt_format.cmt_infos) =
    compilation: byte/native and install copies must share it. Imports identify
    the resolved interfaces, but not ordered implicit opens or preprocessing.
    Retain those source/typing options in command-line order. *)
-let compilationContext (infos : Cmt_format.cmt_infos) =
+let sourceContext (infos : Cmt_format.cmt_infos) =
   let rec typingArgs = function
     | (("-open" | "-pp" | "-ppx" | "-for-pack" | "-keywords") as flag)
       :: value :: rest ->
@@ -359,6 +359,8 @@ let applyArgOfExpression e =
    module type defined in another file) can be resolved regardless of
    processing order. *)
 let cmtFilesByUnit : (string, string list) Hashtbl.t = Hashtbl.create 256
+let compilationContexts : (string, string) Hashtbl.t = Hashtbl.create 256
+let compilationContextsReady = ref false
 
 let unitNameOfCmtFile path =
   path |> Filename.basename |> Filename.remove_extension
@@ -371,8 +373,10 @@ let registerCmtFile path =
     | Some paths -> paths
     | None -> []
   in
-  if not (List.mem path existing) then
-    Hashtbl.replace cmtFilesByUnit unit (path :: existing)
+  if not (List.mem path existing) then (
+    Hashtbl.replace cmtFilesByUnit unit (path :: existing);
+    Hashtbl.reset compilationContexts;
+    compilationContextsReady := false)
 
 #if OCAML_VERSION >= (5, 3, 0)
 (* Per compilation unit: the implementation shape and structure (from the
@@ -431,6 +435,137 @@ let candidateFilesForUnit ~currentCmtFile comp_unit =
   in
   (indexed @ siblings) |> List.filter Sys.file_exists |> List.sort_uniq compare
 
+(* Source/typing identity is only the initial partition. Identical clients
+   may link different implementations of the same interface. Refine that
+   partition by their resolved dependency contexts, transitively. This also
+   handles dependency cycles without recursive fingerprints or directory IDs:
+   actual byte/native/install copies keep the same class. *)
+let compilationContext ~cmtFilePath infos =
+  if not !compilationContextsReady then (
+    let metadata = Hashtbl.create 256 in
+    let read path =
+      match Hashtbl.find_opt metadata path with
+      | Some entry -> entry
+      | None ->
+        let entry =
+          try
+            let info = Cmt_format.read_cmt path in
+            Some
+              ( sourceContext info,
+                info.cmt_modname,
+                info.cmt_imports,
+                interfaceDigest info )
+          with _ -> None
+        in
+        Hashtbl.add metadata path entry;
+        entry
+    in
+    let graph = Hashtbl.create 256 in
+    let rec collect path =
+      if not (Hashtbl.mem graph path) then
+        match read path with
+        | None -> ()
+        | Some (source, unitName, imports, _) ->
+          Hashtbl.add graph path (source, []);
+          let dependencies =
+            imports
+            |> List.filter_map (fun (name, digest) ->
+                if name = unitName then None
+                else
+                  let candidates =
+                    candidateFilesForUnit ~currentCmtFile:path name
+                  in
+                  let interfaceDigest path =
+                    match read path with
+                    | Some (_, _, _, digest) -> digest
+                    | None -> None
+                  in
+                  let candidates =
+                    selectUnitFilesByDigest ~interfaceDigest
+                      ~allowUnmatched:false digest candidates
+                  in
+                  let candidates =
+                    match
+                      List.filter
+                        (fun candidate ->
+                          Filename.dirname candidate = Filename.dirname path)
+                        candidates
+                    with
+                    | [] -> candidates
+                    | siblings -> siblings
+                  in
+                  (* An implementation supplies shapes; a sibling interface
+                   does not create a second implementation context. *)
+                  let candidates =
+                    match
+                      List.filter
+                        (fun p -> Filename.check_suffix p ".cmt")
+                        candidates
+                    with
+                    | [] -> candidates
+                    | implementations -> implementations
+                  in
+                  let candidates =
+                    List.filter (fun p -> read p <> None) candidates
+                  in
+                  List.iter collect candidates;
+                  Some (name, candidates))
+          in
+          Hashtbl.replace graph path (source, dependencies)
+    in
+    Hashtbl.iter (fun _ files -> List.iter collect files) cmtFilesByUnit;
+    collect cmtFilePath;
+    let nodes =
+      Hashtbl.fold (fun path node acc -> (path, node) :: acc) graph []
+    in
+    let partition signatures =
+      let classes = Hashtbl.create 256 in
+      signatures |> List.map snd |> List.sort_uniq compare
+      |> List.iteri (fun index signature -> Hashtbl.add classes signature index);
+      let colors = Hashtbl.create 256 in
+      List.iter
+        (fun (path, signature) ->
+          Hashtbl.add colors path (Hashtbl.find classes signature))
+        signatures;
+      (colors, Hashtbl.length classes)
+    in
+    let initial, count =
+      partition (List.map (fun (path, (source, _)) -> (path, source)) nodes)
+    in
+    let rec refine colors count =
+      let next, nextCount =
+        partition
+          (List.map
+             (fun (path, (_, dependencies)) ->
+               let dependencies =
+                 List.map
+                   (fun (name, paths) ->
+                     ( name,
+                       List.map (Hashtbl.find colors) paths
+                       |> List.sort_uniq compare ))
+                   dependencies
+                 |> List.sort_uniq compare
+               in
+               (path, (Hashtbl.find colors path, dependencies)))
+             nodes)
+      in
+      (* Refinement cannot merge classes, so an unchanged count is stable. *)
+      if nextCount = count then next else refine next nextCount
+    in
+    let colors = refine initial count in
+    Hashtbl.iter
+      (fun path color ->
+        Hashtbl.replace compilationContexts path
+          ("context:" ^ string_of_int color))
+      colors;
+    compilationContextsReady := true);
+  match Hashtbl.find_opt compilationContexts cmtFilePath with
+  | Some context -> context
+  | None ->
+    (* A resolver reached an unindexed artifact outside the import graph.
+       Its equivalence is unproved: keep it separate rather than merging. *)
+    sourceContext infos ^ ":unindexed:" ^ cmtFilePath
+
 (* [imports] are the consumer's recorded imports: when the same unit name
    exists in several build directories, the candidate whose interface digest
    matches the one the consumer was compiled against is the actual
@@ -486,9 +621,9 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
       let loaded =
         let seen = Hashtbl.create 4 in
         loaded
-        |> List.filter (fun (_, (cmt_infos : Cmt_format.cmt_infos)) ->
+        |> List.filter (fun (path, (cmt_infos : Cmt_format.cmt_infos)) ->
                let key =
-                 (compilationContext cmt_infos, cmt_infos.cmt_impl_shape <> None)
+                 (compilationContext ~cmtFilePath:path cmt_infos, cmt_infos.cmt_impl_shape <> None)
                in
                if Hashtbl.mem seen key then false
                else (
@@ -527,7 +662,7 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
             | _ -> None
           in
           (path, cmt_infos.cmt_imports, cmt_infos.cmt_ident_occurrences, structure,
-           compilationContext cmt_infos)
+           compilationContext ~cmtFilePath:path cmt_infos)
         | None, [] -> ("", [], [], None, "")
       in
       let info =
@@ -714,25 +849,25 @@ type moduleShape =
   unit
 #endif
 
-(* Bindings already chased when resolving a functor head, to break cycles. *)
+type definitionKey = Lexing.position * string
+
+(* Both occurrence and structural lookup must remember visited bindings. *)
 type headVisited =
 #if OCAML_VERSION >= (5, 3, 0)
-  Shape.Uid.t list
+  Shape.Uid.t list * definitionKey list
 #else
   unit
 #endif
 
 let noHeadVisited : headVisited =
 #if OCAML_VERSION >= (5, 3, 0)
-  []
+  ([], [])
 #else
   ()
 #endif
 
 (* Source positions remain diagnostic locations, but are not identities when
    the same source is compiled in different dependency/typing contexts. *)
-type definitionKey = Lexing.position * string
-
 type identResolutions = {
   context : string;
   valueKey : Types.value_description -> definitionKey;
@@ -1013,7 +1148,16 @@ let rec makeResolver ~cmtFilePath ~context
      local bindings, and the bodies of applied functors, as in
      [Outer (A).Inner]. Returns the binding, the resolver of its unit,
      and the number of functor layers the path applied. *)
-  let rec bindingOfPath (path : Path.t) :
+  let activeBindingPaths = ref [] in
+  let rec bindingOfPath path =
+    if List.exists (Path.same path) !activeBindingPaths then None
+    else
+      let previous = !activeBindingPaths in
+      activeBindingPaths := path :: previous;
+      Fun.protect
+        ~finally:(fun () -> activeBindingPaths := previous)
+        (fun () -> bindingOfPathUnchecked path)
+  and bindingOfPathUnchecked (path : Path.t) :
       (Location.t * Typedtree.module_expr * identResolutions option * int)
       option =
     let byShape =
@@ -1230,10 +1374,16 @@ let rec makeResolver ~cmtFilePath ~context
        (* The key of a binding found for a module expression: a functor is
           keyed by the binding; an alias or a partial application is chased
           with the resolver of the unit binding it. *)
-       let keyOfBinding visited (loc : Location.t)
+       let keyOfBinding (uids, bindings) (loc : Location.t)
            (definition : Typedtree.module_expr) resolver =
-         if loc.loc_ghost then None
+         let context = match resolver with
+           | Some (resolver : identResolutions) -> resolver.context
+           | None -> context
+         in
+         let key = (loc.loc_start, context) in
+         if loc.loc_ghost || List.mem key bindings then None
          else
+           let visited = (uids, key :: bindings) in
            match (unwrap definition).mod_desc with
            | Tmod_apply _ | Tmod_apply_unit _ | Tmod_ident _ -> (
              (* An unresolved alias is not a new functor definition. Giving
@@ -1246,18 +1396,13 @@ let rec makeResolver ~cmtFilePath ~context
              (* A first-class module: the functor it holds is not known
                 here. *)
              None
-           | _ ->
-             let context = match resolver with
-               | Some resolver -> resolver.context
-               | None -> context
-             in
-             Some ((loc.loc_start, context), 0)
+           | _ -> Some (key, 0)
        in
        headKeyOfPathRef :=
          (fun path ->
            match bindingOfPath path with
            | Some (loc, definition, resolver, applied) -> (
-             match keyOfBinding [] loc definition resolver with
+             match keyOfBinding noHeadVisited loc definition resolver with
              | Some (loc, consumed) -> Some (loc, consumed + applied)
              | None -> None)
            | None -> None);
@@ -1277,17 +1422,18 @@ let rec makeResolver ~cmtFilePath ~context
                match Hashtbl.find_opt moduleUids (key lid.loc name) with
                | Some uid -> (
                  match Lazy.force uid with
-                 | Some uid when not (List.mem uid visited) -> (
+                 | Some uid when List.mem uid (fst visited) -> Some None
+                 | Some uid -> (
                    match bindingOfUid uid with
                    | Some (loc, definition) ->
-                     keyOfBinding (uid :: visited) loc definition
-                       (resolverOfUid uid)
+                     Some (keyOfBinding (uid :: fst visited, snd visited) loc definition
+                       (resolverOfUid uid))
                    | None -> None)
                  | _ -> None)
                | None -> None)
            in
            match byOccurrence with
-           | Some head -> Some head
+           | Some head -> head
            | None -> (
              (* No usable occurrence (e.g. [Outer (A).Inner]): structurally. *)
              match bindingOfPath path with
@@ -1460,11 +1606,15 @@ and resolverForUnit ~currentCmtFile ~imports comp_unit =
 let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
     identResolutions =
 #if OCAML_VERSION >= (5, 3, 0)
-  makeResolver ~cmtFilePath ~context:(compilationContext cmt_infos)
+  makeResolver ~cmtFilePath ~context:(compilationContext ~cmtFilePath cmt_infos)
     ~local:cmt_infos.cmt_uid_to_decl
     ~imports:cmt_infos.cmt_imports ~implShape:cmt_infos.cmt_impl_shape
     ~occurrences:cmt_infos.cmt_ident_occurrences
 #else
   let _ = (cmtFilePath, cmt_infos) in
   emptyIdentResolutions
+#endif
+
+#if OCAML_VERSION < (5, 3, 0)
+let compilationContext ~cmtFilePath:_ infos = sourceContext infos
 #endif
