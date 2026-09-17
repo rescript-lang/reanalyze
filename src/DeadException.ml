@@ -1,3 +1,5 @@
+module CompilerPath = Path
+
 open DeadCommon
 open Common
 
@@ -26,11 +28,13 @@ let registerCompilationUnit (infos : Cmt_format.cmt_infos) =
          match item with
          | Sig_module _ -> (
            match Compat.getSigModuleModtype item with
-           | Some (id, Mty_alias (Pident target), _)
-             when Ident.persistent target ->
-             Hashtbl.replace moduleAliases
-               [Name.create (Ident.name id); unitName]
-               [Name.create ~isInterface:false (Ident.name target)]
+           | Some (id, Mty_alias target, _) -> (
+             match CompilerPath.flatten target with
+             | `Ok (root, _) when Ident.persistent root ->
+               Hashtbl.replace moduleAliases
+                 [Name.create (Ident.name id); unitName]
+                 (target |> Path.fromPathT |> Path.moduleToImplementation)
+             | _ -> ())
            | _ -> ())
          | _ -> ())
 
@@ -46,18 +50,29 @@ let add ~path ~loc ~(strLoc : Location.t) name =
   |> addDeclaration_ ~posEnd:strLoc.loc_end ~posStart:strLoc.loc_start
        ~declKind:Exception ~moduleLoc:(ModulePath.getCurrent ()).loc ~path ~loc
 
-let rec resolveModuleAliases path =
-  match Hashtbl.find_opt moduleAliases path with
-  | Some target -> target
-  | None -> (
-    match path with
-    | name :: rest -> name :: resolveModuleAliases rest
-    | [] -> [])
+(* Resolve outer modules before looking up an alias inside them: a Dune
+   wrapper may first expose the unit containing [module X = B.Y]. Resolve
+   the target as well, since B or Y can themselves be aliases. *)
+let rec resolveModuleAliases ~visited path =
+  match path with
+  | [] -> Some []
+  | name :: rest -> (
+    match resolveModuleAliases ~visited rest with
+    | None -> None
+    | Some rest ->
+      let path = name :: rest in
+      match Hashtbl.find_opt moduleAliases path with
+      | None -> Some path
+      | Some target ->
+        if List.mem path visited then None
+        else resolveModuleAliases ~visited:(path :: visited) target)
 
 let findDeclaration exceptionPath =
   match exceptionPath |> Path.moduleToImplementation with
-  | name :: modulePath ->
-    Hashtbl.find_opt declarations (name :: resolveModuleAliases modulePath)
+  | name :: modulePath -> (
+    match resolveModuleAliases ~visited:[] modulePath with
+    | Some modulePath -> Hashtbl.find_opt declarations (name :: modulePath)
+    | None -> None)
   | [] -> None
 
 let forceDelayedItems () =
