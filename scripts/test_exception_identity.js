@@ -27,6 +27,7 @@ module.exports = function testExceptionIdentity(reanalyzeFile) {
         if (output.includes(opposite)) throw new Error(`${scanRoot}: ${opposite}\n${output}`);
       }
     }
+    return output;
   };
   try {
     const cases = [
@@ -89,6 +90,37 @@ module.exports = function testExceptionIdentity(reanalyzeFile) {
     child_process.execFileSync("dune", ["build", "--root", ".", "@check"],
       { cwd: growingWrapper, stdio: "pipe" });
     analyze(growingWrapper, "_build/default", ["b.A.X.Used"], ["b.A.X.Unused"]);
+
+    // The scanner distinguishes identical sources built against different
+    // dependencies. Exception resolution must retain both consumer contexts.
+    const contexts = path.join(root, "contexts");
+    compile(contexts, "left.ml", "exception Used = Not_found\nexception Unused = Not_found");
+    compile(contexts, "right.ml", "exception Used = Not_found\nexception Unused = Not_found");
+    compile(path.join(contexts, "a"), "provider.ml", "module Alias = Left", [contexts]);
+    compile(path.join(contexts, "b"), "provider.ml", "module Alias = Right", [contexts]);
+    const shared = path.join(contexts, "shared.ml");
+    fs.writeFileSync(shared, "let () = raise Provider.Alias.Used");
+    for (const dir of ["a", "b"]) {
+      child_process.execFileSync("ocamlc", [
+        "-bin-annot", "-I", dir, "-c", "-o", `${dir}/shared.cmo`, shared,
+      ], { cwd: contexts, stdio: "pipe" });
+    }
+    const assertContexts = () => {
+      const output = analyze(contexts, ".", ["left.Used", "right.Used"],
+        ["left.Unused", "right.Unused"]);
+      if ((output.match(/Scanning .*shared\.cmt /g) || []).length !== 2) {
+        throw new Error(`Expected each exception consumer context once:\n${output}`);
+      }
+    };
+    assertContexts();
+    for (const dir of ["a", "b"]) {
+      fs.mkdirSync(path.join(contexts, dir, "install"));
+      for (const file of ["provider.cmt", "shared.cmt"]) {
+        fs.copyFileSync(path.join(contexts, dir, file),
+          path.join(contexts, dir, "install", file));
+      }
+    }
+    assertContexts();
 
     // The consumer imports one Foo, and Foo in turn imports its own Target.
     // A same-named sibling with a conflicting digest must never win, even

@@ -50,10 +50,14 @@ let copyModule node =
   }
 
 let getCompilationUnit ~cmtFilePath (infos : Cmt_format.cmt_infos) =
+  (* Match the scanner's source and dependency identity: the same source can
+     be compiled against different imports in one build directory. *)
   let key =
-    ( infos.cmt_sourcefile,
+    ( infos.cmt_modname,
+      infos.cmt_sourcefile,
       infos.cmt_builddir,
       infos.cmt_source_digest,
+      List.sort_uniq compare infos.cmt_imports,
       match infos.cmt_annots with Interface _ -> true | _ -> false )
   in
   match Hashtbl.find_opt units key with
