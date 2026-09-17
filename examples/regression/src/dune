@@ -5,9 +5,11 @@
   Cross_alias_use
   Cross_c
   Cross_include
+  Escape_exports
   Functor_argument
   Generated_source
   Higher_order
+  Higher_order_fixpoint
   Higher_order_more
   Included_sig
   Live_ancestors
@@ -15,6 +17,10 @@
   Main
   Nested_module_type
   Ocaml_compiler_compat
+  Packed_interface
+  Packed_interface_use
+  Packed_types
+  Reference_order
   Shared_signature
   Shared_signature_arg
   Shared_signature_unused

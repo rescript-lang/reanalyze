@@ -46,10 +46,12 @@ module type Escaped_holder_type = sig
   end
 end
 
+module Escaped_inner (M : Escaped_arg) = struct
+  let run () = M.k ~cross:1 ()
+end
+
 module Escaped_holder = struct
-  module Inner (M : Escaped_arg) = struct
-    let run () = M.k ~cross:1 ()
-  end
+  module Inner = Escaped_inner
 end
 
 module Escaped_alias = Escaped_holder

@@ -54,4 +54,8 @@ let () =
   Higher_order_more.run ();
   Higher_order_more.run_anon ();
   Higher_order_more.run_nested ();
-  Higher_order_more.run_both ()
+  Higher_order_more.run_both ();
+  Reference_order.run ();
+  Higher_order_fixpoint.run ();
+  Packed_interface_use.run ();
+  Escape_exports.run ()

@@ -125,6 +125,12 @@ function runRegressionTests() {
   assertNotIncludes(output, "Dead Value +Shared_signature_arg.Chosen.+f");
   assertIncludes(output, "Live Value +Shared_signature_arg.Local_used.+f");
   assertNotIncludes(output, "Dead Value +Shared_signature_arg.Local_used.+f");
+  // A parameter access must not suppress an ordinary access from the same
+  // binding, regardless of which occurrence the mapper visits first.
+  for (const order of ["Parameter_first", "Ordinary_first"]) {
+    assertIncludes(output, `Live Value +Reference_order.${order}.Used.+f`);
+    assertNotIncludes(output, `Dead Value +Reference_order.${order}.Used.+f`);
+  }
   // A call through a functor parameter is credited to the actual argument
   // (conservatively, to every implementation of the item, before OCaml 5.3):
   // x must never be reported unused.
@@ -527,6 +533,32 @@ function runRegressionTests() {
     );
     assertNotIncludes(output, "P4_b.+u is never used");
     assertNotIncludes(output, "P4_a.+u is never used");
+    // New enclosing applications discovered on later fixed-point rounds
+    // still instantiate the original parameter-headed application.
+    for (const name of ["Fixpoint_a", "Fixpoint_b"]) {
+      assertIncludes(
+        output,
+        `optional argument y of function ${name}.+g is always supplied (1 calls)`
+      );
+    }
+    // A packed higher-order argument exported through an .mli resolves to
+    // the implementation binding where its functor was registered.
+    assertIncludes(
+      output,
+      "optional argument x of function Packed_arg.+g is always supplied (1 calls)"
+    );
+    // Escaping holders also expose functors defined outside their lexical
+    // range through module aliases and includes.
+    for (const [name, argument] of [
+      ["Escaped_alias_arg", "alias"],
+      ["Escaped_include_arg", "included"],
+    ]) {
+      assertIncludes(
+        output,
+        `optional argument ${argument} of function ${name}.+g is always supplied`
+      );
+      assertNotIncludes(output, `${name}.+g is never used`);
+    }
   }
 
   assertNotIncludes(output, "Parent is a dead module");
