@@ -1,7 +1,22 @@
 open Common
 
+(* Compiled units already scanned, by source and dependency context: a broad
+   root may hold copies of the same artifact (a library's objects and its
+   _build/install copy, byte and native objects), which must not be scanned
+   twice. *)
+let scannedUnits = Hashtbl.create 256
+
 let loadCmtFile ~cmtRoot cmtFilePath =
   let cmt_infos = Cmt_format.read_cmt cmtFilePath in
+  (* Identical source can use different dependency implementations, even
+     through the same interface. Preserve the full resolved context without
+     distinguishing actual byte/native/install copies. *)
+  let unitKey =
+    (Compat.compilationContext ~cmtFilePath cmt_infos, Filename.check_suffix cmtFilePath ".cmti")
+  in
+  if Hashtbl.mem scannedUnits unitKey then ()
+  else
+  let () = Hashtbl.replace scannedUnits unitKey () in
   let excludePath sourceFile =
     !Cli.excludePaths
     |> List.exists (fun prefix_ ->

@@ -1,10 +1,42 @@
 (library
  (name regression_fixture)
  (modules
+  Attribution_sweep
+  Cross_alias
+  Cross_alias_use
+  Cross_c
+  Cross_include
+  Escape_exports
+  Escaped_coercion
   Functor_argument
   Generated_source
+  Higher_order
+  Higher_order_fixpoint
+  Higher_order_more
+  Included_sig
   Live_ancestors
   Local_side_effects
   Main
-  Ocaml_compiler_compat)
+  Nested_module_type
+  Nested_arguments
+  Nested_arguments_packed
+  Ocaml_compiler_compat
+  Packed_interface
+  Packed_interface_use
+  Packed_types
+  Partial_context_use
+  Reference_order
+  Review_round
+  Shared_signature
+  Shared_signature_arg
+  Shared_signature_unused
+  Shared_signature_use
+  Shared_signature_used
+  Unpacked_functor
+  Unpacked_functor_use
+  Unpacked_include
+  Unpacked_open
+  Unpacked_open_provider
+  Unpacked_open_types
+  Unpacked_unused)
  (flags :standard -w -27-32-34-37-39 -bin-annot))

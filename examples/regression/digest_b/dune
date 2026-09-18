@@ -1,6 +1,6 @@
 (library
- (name dup_a)
+ (name digest_b)
  (wrapped false)
  (modes byte)
- (modules Dup_sig Dup_shape Dup_a_impl Dup_a_use)
+ (modules Collision)
  (flags :standard -w -27-32-34-37-39 -bin-annot))

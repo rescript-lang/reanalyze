@@ -22,6 +22,43 @@ let filter_map f =
   aux []
 #endif
 
+(* The interface reused by a native compilation can be recorded only as a
+   self-import: its .cmt has no direct interface digest or sibling .cmti. *)
+let interfaceDigest (infos : Cmt_format.cmt_infos) =
+  match infos.cmt_interface_digest with
+  | Some _ as digest -> digest
+  | None -> Option.join (List.assoc_opt infos.cmt_modname infos.cmt_imports)
+
+(* Output paths, backend options, and -I directories do not identify a typed
+   compilation: byte/native and install copies must share it. Imports identify
+   the resolved interfaces, but not ordered implicit opens or preprocessing.
+   Retain those source/typing options in command-line order. *)
+let sourceContext (infos : Cmt_format.cmt_infos) =
+  let rec typingArgs = function
+    | (("-open" | "-pp" | "-ppx" | "-for-pack" | "-keywords") as flag)
+      :: value :: rest ->
+      flag :: value :: typingArgs rest
+    | (( "-principal" | "-no-principal" | "-rectypes" | "-no-rectypes"
+       | "-labels" | "-nolabels" | "-modern" | "-app-funct" | "-no-app-funct"
+       | "-alias-deps" | "-no-alias-deps" | "-opaque" | "-noassert" | "-unsafe"
+       | "-nopervasives" | "-safe-string" | "-unsafe-string"
+       | "-strict-sequence" | "-no-strict-sequence" | "-strict-formats"
+       | "-no-strict-formats" | "-unboxed-types" | "-no-unboxed-types"
+       | "-keep-docs" | "-no-keep-docs" | "-keep-locs" | "-no-keep-locs" ) as
+       flag)
+      :: rest ->
+      flag :: typingArgs rest
+    | _ :: rest -> typingArgs rest
+    | [] -> []
+  in
+  ( infos.cmt_modname,
+    infos.cmt_sourcefile,
+    infos.cmt_builddir,
+    infos.cmt_source_digest,
+    List.sort_uniq compare infos.cmt_imports,
+    typingArgs (Array.to_list infos.cmt_args) )
+  |> fun key -> Digest.to_hex (Digest.string (Marshal.to_string key []))
+
 let getStringValue const = match const with
 #if OCAML_VERSION >= (4, 11, 0)
   | Parsetree.Pconst_string(s, _, _) -> s
@@ -148,6 +185,19 @@ let getTypeVariant (tk: ('a, 'b) type_kind) = match tk with
   | Type_variant l -> l
 #endif
   | _ -> assert false
+
+(* Whether a signature item occupies a runtime slot, as the positions of a
+   [Tcoerce_structure] count them: values (not primitives), extension
+   constructors, present modules and classes. *)
+let isRuntimeField (si : Types.signature_item) =
+  match si with
+  | Types.Sig_value (_, {val_kind = Val_prim _}, _) -> false
+  | Types.Sig_value _ -> true
+  | Types.Sig_typext _ -> true
+  | Types.Sig_module (_, Mp_present, _, _, _) -> true
+  | Types.Sig_module (_, Mp_absent, _, _, _) -> false
+  | Types.Sig_class _ -> true
+  | _ -> false
 
 let getSigModuleModtype si = match si with
 #if OCAML_VERSION >= (4, 08, 0)
@@ -304,10 +354,13 @@ let applyArgOfExpression e =
 #endif
 
 (* Index of the .cmt/.cmti files under analysis, keyed by compilation unit
-   name. Populated before processing so declaration dependencies pointing at
-   other units (e.g. a functor result constrained by a module type defined in
-   another file) can be resolved regardless of processing order. *)
+   name. Populated before processing so declaration dependencies and identifier
+   occurrences pointing at other units (e.g. a functor result constrained by a
+   module type defined in another file) can be resolved regardless of
+   processing order. *)
 let cmtFilesByUnit : (string, string list) Hashtbl.t = Hashtbl.create 256
+let compilationContexts : (string, string) Hashtbl.t = Hashtbl.create 256
+let compilationContextsReady = ref false
 
 let unitNameOfCmtFile path =
   path |> Filename.basename |> Filename.remove_extension
@@ -320,8 +373,352 @@ let registerCmtFile path =
     | Some paths -> paths
     | None -> []
   in
-  if not (List.mem path existing) then
-    Hashtbl.replace cmtFilesByUnit unit (path :: existing)
+  if not (List.mem path existing) then (
+    Hashtbl.replace cmtFilesByUnit unit (path :: existing);
+    Hashtbl.reset compilationContexts;
+    compilationContextsReady := false)
+
+#if OCAML_VERSION >= (5, 3, 0)
+(* Per compilation unit: the implementation shape and structure (from the
+   .cmt), and the uid -> declaration table (merged from .cmt and .cmti).
+   Loaded on demand. *)
+type unitInfo = {
+  context : string;
+  shape : Shape.t option;
+  structure : Typedtree.structure option;
+  uidToDecl : Typedtree.item_declaration Shape.Uid.Tbl.t;
+  cmtPath : string;  (** the .cmt (or, failing that, the first file) loaded *)
+  unitImports : Misc.crcs;
+  occurrences : (Longident.t Location.loc * Shape_reduce.result) list;
+}
+
+(* Keyed by the list of files a unit is loaded from, so that same-named units
+   in different build targets (e.g. two unwrapped libraries each defining
+   [Config]) do not share an entry. *)
+let unitInfoCache : (string list * string option * string, unitInfo) Hashtbl.t =
+  Hashtbl.create 64
+
+(* An implementation compiled against an interface gets its digest from
+   the sibling .cmti. Retain both files of every matching unit, for shapes
+   as well as declaration dependencies. Only dependency extraction may fan
+   out to unmatched candidates; shape resolution must not choose one. *)
+let selectUnitFilesByDigest ~interfaceDigest ~allowUnmatched digest files =
+  match digest with
+  | None -> files
+  | Some digest ->
+    let stem = Filename.remove_extension in
+    let matchingStems =
+      files |> List.map stem |> List.sort_uniq compare
+      |> List.filter (fun base ->
+             [".cmt"; ".cmti"]
+             |> List.exists (fun ext -> interfaceDigest (base ^ ext) = Some digest))
+    in
+    match matchingStems with
+    | [] when allowUnmatched -> files
+    | _ -> List.filter (fun path -> List.mem (stem path) matchingStems) files
+
+let candidateFilesForUnit ~currentCmtFile comp_unit =
+  let dir = Filename.dirname currentCmtFile in
+  let indexed =
+    match Hashtbl.find_opt cmtFilesByUnit comp_unit with
+    | Some paths -> paths
+    | None -> []
+  in
+  (* Fall back to sibling files, for callers that did not register. *)
+  let siblings =
+    [".cmt"; ".cmti"]
+    |> List.concat_map (fun ext ->
+           [
+             Filename.concat dir (comp_unit ^ ext);
+             Filename.concat dir (String.uncapitalize_ascii comp_unit ^ ext);
+           ])
+  in
+  (indexed @ siblings) |> List.filter Sys.file_exists |> List.sort_uniq compare
+
+(* Prefer local candidates within each artifact kind. An interface beside
+   the consumer must not hide its implementation in another directory, or
+   vice versa. Call only after selecting the recorded interface digest. *)
+let preferSiblingUnitFiles ~currentCmtFile files =
+  let implementations, interfaces =
+    List.partition (fun path -> Filename.check_suffix path ".cmt") files
+  in
+  let prefer files =
+    match
+      List.filter
+        (fun path -> Filename.dirname path = Filename.dirname currentCmtFile)
+        files
+    with
+    | [] -> files
+    | siblings -> siblings
+  in
+  prefer implementations @ prefer interfaces
+
+(* Source/typing identity is only the initial partition. Identical clients
+   may link different implementations of the same interface. Refine that
+   partition by their resolved dependency contexts, transitively. This also
+   handles dependency cycles without recursive fingerprints or directory IDs:
+   actual byte/native/install copies keep the same class. *)
+let compilationContext ~cmtFilePath infos =
+  if not !compilationContextsReady then (
+    let metadata = Hashtbl.create 256 in
+    let read path =
+      match Hashtbl.find_opt metadata path with
+      | Some entry -> entry
+      | None ->
+        let entry =
+          try
+            let info = Cmt_format.read_cmt path in
+            Some
+              ( sourceContext info,
+                info.cmt_modname,
+                info.cmt_imports,
+                interfaceDigest info )
+          with _ -> None
+        in
+        Hashtbl.add metadata path entry;
+        entry
+    in
+    let graph = Hashtbl.create 256 in
+    let rec collect path =
+      if not (Hashtbl.mem graph path) then
+        match read path with
+        | None -> ()
+        | Some (source, unitName, imports, _) ->
+          Hashtbl.add graph path (source, []);
+          let dependencies =
+            imports
+            |> List.filter_map (fun (name, digest) ->
+                if name = unitName then None
+                else
+                  let candidates =
+                    candidateFilesForUnit ~currentCmtFile:path name
+                  in
+                  let interfaceDigest path =
+                    match read path with
+                    | Some (_, _, _, digest) -> digest
+                    | None -> None
+                  in
+                  let candidates =
+                    selectUnitFilesByDigest ~interfaceDigest
+                      ~allowUnmatched:false digest candidates
+                  in
+                  let candidates =
+                    preferSiblingUnitFiles ~currentCmtFile:path candidates
+                  in
+                  (* An implementation supplies shapes; a sibling interface
+                   does not create a second implementation context. *)
+                  let candidates =
+                    match
+                      List.filter
+                        (fun p -> Filename.check_suffix p ".cmt")
+                        candidates
+                    with
+                    | [] -> candidates
+                    | implementations -> implementations
+                  in
+                  let candidates =
+                    List.filter (fun p -> read p <> None) candidates
+                  in
+                  List.iter collect candidates;
+                  Some (name, candidates))
+          in
+          Hashtbl.replace graph path (source, dependencies)
+    in
+    Hashtbl.iter (fun _ files -> List.iter collect files) cmtFilesByUnit;
+    collect cmtFilePath;
+    let nodes =
+      Hashtbl.fold (fun path node acc -> (path, node) :: acc) graph []
+    in
+    let partition signatures =
+      let classes = Hashtbl.create 256 in
+      signatures |> List.map snd |> List.sort_uniq compare
+      |> List.iteri (fun index signature -> Hashtbl.add classes signature index);
+      let colors = Hashtbl.create 256 in
+      List.iter
+        (fun (path, signature) ->
+          Hashtbl.add colors path (Hashtbl.find classes signature))
+        signatures;
+      (colors, Hashtbl.length classes)
+    in
+    let initial, count =
+      partition (List.map (fun (path, (source, _)) -> (path, source)) nodes)
+    in
+    let rec refine colors count =
+      let next, nextCount =
+        partition
+          (List.map
+             (fun (path, (_, dependencies)) ->
+               let dependencies =
+                 List.map
+                   (fun (name, paths) ->
+                     ( name,
+                       List.map (Hashtbl.find colors) paths
+                       |> List.sort_uniq compare ))
+                   dependencies
+                 |> List.sort_uniq compare
+               in
+               (path, (Hashtbl.find colors path, dependencies)))
+             nodes)
+      in
+      (* Refinement cannot merge classes, so an unchanged count is stable. *)
+      if nextCount = count then next else refine next nextCount
+    in
+    let colors = refine initial count in
+    Hashtbl.iter
+      (fun path color ->
+        Hashtbl.replace compilationContexts path
+          ("context:" ^ string_of_int color))
+      colors;
+    compilationContextsReady := true);
+  match Hashtbl.find_opt compilationContexts cmtFilePath with
+  | Some context -> context
+  | None ->
+    (* A resolver reached an unindexed artifact outside the import graph.
+       Its equivalence is unproved: keep it separate rather than merging. *)
+    sourceContext infos ^ ":unindexed:" ^ cmtFilePath
+
+(* [imports] are the consumer's recorded imports: when the same unit name
+   exists in several build directories, the candidate whose interface digest
+   matches the one the consumer was compiled against is the actual
+   dependency. *)
+let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
+  let files = candidateFilesForUnit ~currentCmtFile comp_unit in
+  let digest =
+    match List.assoc_opt comp_unit imports with
+    | Some (Some digest) -> Some digest
+    | _ -> None
+  in
+  (* Both the import digest and the later sibling preference affect which
+     same-named unit a consumer can resolve. *)
+  let dir = Filename.dirname currentCmtFile in
+  let cacheKey = (files, Option.map Digest.to_hex digest, dir) in
+  match Hashtbl.find_opt unitInfoCache cacheKey with
+  | Some info -> Some info
+  | None -> (
+    match files with
+    | [] -> None
+    | _ ->
+      let read path =
+        try Some (path, Cmt_format.read_cmt path) with _ -> None
+      in
+      let loaded = files |> List.filter_map read in
+      let interfaceDigest path =
+        match List.assoc_opt path loaded with
+        | Some infos -> interfaceDigest infos
+        | None -> (
+          match read path with
+          | Some (_, infos) -> interfaceDigest infos
+          | None -> None)
+      in
+      let selected =
+        selectUnitFilesByDigest ~interfaceDigest ~allowUnmatched:false digest files
+      in
+      (* Prefer siblings only after selecting the recorded import digest:
+         a same-named sibling must not hide the actual dependency elsewhere. *)
+      let selected =
+        preferSiblingUnitFiles ~currentCmtFile selected
+      in
+      let loaded =
+        loaded |> List.filter (fun (path, _) -> List.mem path selected)
+      in
+      (* Copies of one compiled source (e.g. a library's objects and its
+         _build/install copy, or byte and native objects) are one unit: keep
+         the first of each. Distinct candidates of the same artifact kind
+         remain ambiguous, but a matching interface/implementation pair may
+         legitimately be stored in two different directories. *)
+      let loaded =
+        let seen = Hashtbl.create 4 in
+        loaded
+        |> List.filter (fun (path, (cmt_infos : Cmt_format.cmt_infos)) ->
+               let key =
+                 (compilationContext ~cmtFilePath:path cmt_infos, cmt_infos.cmt_impl_shape <> None)
+               in
+               if Hashtbl.mem seen key then false
+               else (
+                 Hashtbl.replace seen key ();
+                 true))
+      in
+      let loaded =
+        let implementations, interfaces =
+          List.partition
+            (fun (path, _) -> Filename.check_suffix path ".cmt")
+            loaded
+        in
+        match (implementations, interfaces) with
+        | _ :: _ :: _, _ | _, _ :: _ :: _ -> []
+        | _ -> loaded
+      in
+      let uidToDecl = Shape.Uid.Tbl.create 64 in
+      let shape = ref None in
+      let implementation = ref None in
+      loaded
+      |> List.iter (fun (path, (cmt_infos : Cmt_format.cmt_infos)) ->
+             Shape.Uid.Tbl.iter
+               (fun uid decl ->
+                 if not (Shape.Uid.Tbl.mem uidToDecl uid) then
+                   Shape.Uid.Tbl.replace uidToDecl uid decl)
+               cmt_infos.cmt_uid_to_decl;
+             match (!shape, cmt_infos.cmt_impl_shape) with
+             | None, Some _ ->
+               shape := cmt_infos.cmt_impl_shape;
+               implementation := Some (path, cmt_infos)
+             | _ -> ());
+      let cmtPath, unitImports, occurrences, structure, context =
+        match (!implementation, loaded) with
+        | Some (path, cmt_infos), _ | None, (path, cmt_infos) :: _ ->
+          let structure =
+            match cmt_infos.cmt_annots with
+            | Implementation structure -> Some structure
+            | _ -> None
+          in
+          (path, cmt_infos.cmt_imports, cmt_infos.cmt_ident_occurrences, structure,
+           compilationContext ~cmtFilePath:path cmt_infos)
+        | None, [] -> ("", [], [], None, "")
+      in
+      let info =
+        {shape = !shape; structure; uidToDecl; cmtPath; unitImports; occurrences; context}
+      in
+      Hashtbl.replace unitInfoCache cacheKey info;
+      Some info)
+
+let locOfItemDeclaration = function
+  | Typedtree.Value {val_loc; _} -> Some val_loc
+  | Typedtree.Value_binding {vb_pat = {pat_loc; _}; _} -> Some pat_loc
+  | _ -> None
+
+let declOfUid ~currentCmtFile ~imports
+    ~(local : Typedtree.item_declaration Shape.Uid.Tbl.t) uid =
+  match Shape.Uid.Tbl.find_opt local uid with
+  | Some decl -> Some decl
+  | None -> (
+    match uid with
+    | Shape.Uid.Item {comp_unit; _} -> (
+      match loadUnitInfo ~currentCmtFile ~imports comp_unit with
+      | Some {uidToDecl} -> Shape.Uid.Tbl.find_opt uidToDecl uid
+      | None -> None)
+    | _ -> None)
+
+let locOfUid ~currentCmtFile ~imports ~local uid =
+  match declOfUid ~currentCmtFile ~imports ~local uid with
+  | Some decl -> locOfItemDeclaration decl
+  | None -> None
+
+let moduleBindingOfUid ~currentCmtFile ~imports ~local uid =
+  match declOfUid ~currentCmtFile ~imports ~local uid with
+  | Some (Typedtree.Module_binding {mb_name = {loc}; mb_expr}) ->
+    Some (loc, mb_expr)
+  | _ -> None
+
+let moduleBindingLocOfUid ~currentCmtFile ~imports ~local uid =
+  match moduleBindingOfUid ~currentCmtFile ~imports ~local uid with
+  | Some (loc, _) -> Some loc
+  | None -> None
+
+let moduleTypeOfUid ~currentCmtFile ~imports ~local uid =
+  match declOfUid ~currentCmtFile ~imports ~local uid with
+  | Some (Typedtree.Module_type {mtd_type = Some {mty_type}}) -> Some mty_type
+  | _ -> None
+#endif
 
 let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
 #if OCAML_VERSION >= (5, 3, 0)
@@ -366,7 +763,7 @@ let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
   in
   let interface_digest_of_file path =
     match read_cmt path with
-    | Some infos -> infos.cmt_interface_digest
+    | Some infos -> interfaceDigest infos
     | None -> None
   in
   let loadedUnits : (string, Typedtree.item_declaration UidTbl.t list) Hashtbl.t
@@ -399,25 +796,8 @@ let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
       | Some (Some digest) -> Some digest
       | _ -> None
     in
-    match digest with
-    | None -> files
-    | Some digest -> (
-      (* A .cmt compiled against an .mli carries no interface digest: the
-         digest is in the .cmti next to it. Group by stem so the whole unit
-         is kept when either file matches. *)
-      let stem path = Filename.remove_extension path in
-      let stems = files |> List.map stem |> List.sort_uniq compare in
-      let matching_stems =
-        stems
-        |> List.filter (fun stem ->
-               [".cmt"; ".cmti"]
-               |> List.exists (fun ext ->
-                      interface_digest_of_file (stem ^ ext) = Some digest))
-      in
-      match matching_stems with
-      | [] -> files
-      | _ -> files |> List.filter (fun path -> List.mem (stem path) matching_stems)
-      )
+    selectUnitFilesByDigest ~interfaceDigest:interface_digest_of_file
+      ~allowUnmatched:true digest files
   in
   let decls_of_unit comp_unit =
     match Hashtbl.find_opt loadedUnits comp_unit with
@@ -460,4 +840,791 @@ let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
   cmt_infos.cmt_value_dependencies
   |> List.map (fun (valueTo, valueFrom) ->
          (valueTo.Types.val_loc, valueFrom.Types.val_loc))
+#endif
+
+(* Resolution of identifier occurrences to the implementation they denote.
+
+   An occurrence such as [Inst.H.find_opt], where [H] is an instance of a
+   functor constrained by a named module type, has a [val_loc] pointing at the
+   module type item. Reducing the occurrence's shape (through the shapes of the
+   other compilation units) yields the implementation instead, so references
+   land on the right definition rather than on the shared module type item.
+
+   Occurrences are keyed by their location and last name component, so that
+   distinct identifiers a ppx may emit at the same position do not collide. *)
+type moduleShape =
+#if OCAML_VERSION >= (5, 3, 0)
+  Shape.t
+#else
+  unit
+#endif
+
+type definitionKey = Lexing.position * string
+
+(* Both occurrence and structural lookup must remember visited bindings. *)
+type headVisited =
+#if OCAML_VERSION >= (5, 3, 0)
+  Shape.Uid.t list * definitionKey list
+#else
+  unit
+#endif
+
+let noHeadVisited : headVisited =
+#if OCAML_VERSION >= (5, 3, 0)
+  ([], [])
+#else
+  ()
+#endif
+
+(* Source positions remain diagnostic locations, but are not identities when
+   the same source is compiled in different dependency/typing contexts. *)
+type identResolutions = {
+  context : string;
+  valueKey : Types.value_description -> definitionKey;
+  valueImpl : Location.t -> string -> Location.t option;
+      (** occurrence location, last name -> implementation location *)
+  moduleShape : Location.t -> string -> moduleShape option;
+      (** occurrence location, last name -> shape of the module *)
+  projValue : moduleShape -> string -> Location.t option;
+      (** implementation of a value item of a module shape *)
+  projModule : moduleShape -> string -> moduleShape option;
+      (** shape of a module item of a module shape *)
+  moduleDefKey : Location.t -> string -> definitionKey option;
+      (** occurrence location, last name -> key of the module binding's
+          name, for a module (e.g. a functor) defined with [module X = ...] *)
+  moduleTypeOf : Location.t -> string -> Types.module_type option;
+      (** occurrence location, last name -> the module type a
+          [module type X = ...] declaration denotes *)
+  moduleTypeOfPath : Path.t -> Types.module_type option;
+      (** the module type a path denotes, in this unit's scope *)
+  shapeValueItems : moduleShape -> (string * Location.t) list;
+      (** the values a module shape exports, with their implementations; a
+          fallback when the module's signature cannot be expanded *)
+  bindingOfPath :
+    Path.t ->
+    (Location.t * Typedtree.module_expr * identResolutions option * int) option;
+      (** the binding a module path denotes, structurally, with the resolver
+          of its unit and the number of functor layers the path applied *)
+  headKeyOfPath : Path.t -> (definitionKey * int) option;
+      (** the binding key of the functor a module path denotes,
+          found structurally, and the arguments consumed *)
+  headKey :
+    headVisited -> Typedtree.module_expr -> (definitionKey * int) option;
+      (** visited bindings (start with [noHeadVisited]), module expression ->
+          the binding key of the functor it stands for, through
+          aliases and partial applications (possibly bound in other units,
+          resolved with those units' own occurrence data), and the number of
+          arguments those partial applications consumed; inline functors are
+          keyed by their own location *)
+  expandModuleType : Types.module_type -> Types.module_type;
+      (** follow module type aliases ([module type S = Base]) until a signature
+          or an unresolvable name is reached *)
+}
+
+let emptyIdentResolutions =
+  {
+    context = "";
+    valueKey = (fun vd -> (vd.Types.val_loc.loc_start, ""));
+    valueImpl = (fun _ _ -> None);
+    moduleShape = (fun _ _ -> None);
+    projValue = (fun _ _ -> None);
+    projModule = (fun _ _ -> None);
+    moduleDefKey = (fun _ _ -> None);
+    moduleTypeOf = (fun _ _ -> None);
+    moduleTypeOfPath = (fun _ -> None);
+    shapeValueItems = (fun _ -> []);
+    bindingOfPath = (fun _ -> None);
+    headKeyOfPath = (fun _ -> None);
+    headKey = (fun _ _ -> None);
+    expandModuleType = (fun mt -> mt);
+  }
+
+#if OCAML_VERSION >= (5, 3, 0)
+(* Find, inside the implementation shape of the current unit, the shape of the
+   item defined with [uid]. Used for modules defined locally, whose occurrences
+   the compiler resolves to a uid rather than leaving a shape. *)
+let rec findShapeByUid (shape : Shape.t) uid : Shape.t option =
+  if shape.uid = Some uid then Some shape
+  else
+    match shape.desc with
+    | Struct items ->
+      Shape.Item.Map.fold
+        (fun _item itemShape acc ->
+          match acc with
+          | Some _ -> acc
+          | None -> findShapeByUid itemShape uid)
+        items None
+    | Alias s -> findShapeByUid s uid
+    | Abs (_, body) -> findShapeByUid body uid
+    | _ -> None
+#endif
+
+(* Whether occurrences can be resolved through shapes at all. Without it,
+   references through a functor parameter can only be credited conservatively,
+   to every implementation of the module type item. *)
+let shapeResolutionAvailable =
+#if OCAML_VERSION >= (5, 3, 0)
+  true
+#else
+  false
+#endif
+
+(* The shape of a functor application, as the compiler computes it for
+   [Tmod_apply]: reducing a projection of it lands in the functor's body, or
+   in the argument for items the body re-exports. *)
+let applyShape (functorShape : moduleShape) (argumentShape : moduleShape) :
+    moduleShape =
+#if OCAML_VERSION >= (5, 3, 0)
+  Shape.app functorShape ~arg:argumentShape
+#else
+  ignore functorShape;
+  argumentShape
+#endif
+
+(* The shape standing for a functor parameter inside an application
+   ([Use (Make (P))] in the body of [functor (P : S) -> ...]): an empty
+   structure, so that a projection lands in [Make]'s body for the items it
+   defines and stays unresolved for those it takes from [P]. *)
+let parameterShape : moduleShape =
+#if OCAML_VERSION >= (5, 3, 0)
+  Shape.dummy_mod
+#else
+  ()
+#endif
+
+(* The shape of a generative application [F ()] ([Tmod_apply_unit]). *)
+let applyUnitShape (functorShape : moduleShape) : moduleShape =
+#if OCAML_VERSION >= (5, 3, 0)
+  Shape.app functorShape ~arg:Shape.dummy_mod
+#else
+  functorShape
+#endif
+
+#if OCAML_VERSION >= (5, 3, 0)
+(* Resolvers of other units, by .cmt path, for chasing definitions bound
+   there (aliases and partial applications of functors). *)
+let resolverCache : (string, identResolutions) Hashtbl.t = Hashtbl.create 16
+
+let rec makeResolver ~cmtFilePath ~context
+    ~(local : Typedtree.item_declaration Shape.Uid.Tbl.t)
+    ~(imports : Misc.crcs) ~(implShape : Shape.t option)
+    ~(occurrences : (Longident.t Location.loc * Shape_reduce.result) list) :
+    identResolutions =
+  let module Reduce = Shape_reduce.Make (struct
+    (* Bounds the reduction of recursive shapes; long alias and projection
+       chains must not be cut short by it. *)
+    let fuel = 100
+
+    let read_unit_shape ~unit_name =
+      match loadUnitInfo ~currentCmtFile:cmtFilePath ~imports unit_name with
+      | Some {shape} -> shape
+      | None -> None
+  end) in
+  let thisUnit = unitNameOfCmtFile cmtFilePath in
+  let compUnitShape name =
+    {Shape.uid = None; desc = Comp_unit name; approximated = false}
+  in
+  (* The uid of a declaration of this unit, by identifier. *)
+  let localUid (matches : Typedtree.item_declaration -> bool) =
+    Shape.Uid.Tbl.fold
+      (fun uid decl acc ->
+        match acc with
+        | Some _ -> acc
+        | None -> if matches decl then Some uid else None)
+      local None
+  in
+  let locOfUid = locOfUid ~currentCmtFile:cmtFilePath ~imports ~local in
+  let rec uidOfResult (result : Shape_reduce.result) =
+    match result with
+    | Resolved uid -> Some uid
+    | Resolved_alias (_, result) -> uidOfResult result
+    | _ -> None
+  in
+  let key (loc : Location.t) name = (loc.loc_start, loc.loc_end, name) in
+  let values = Hashtbl.create 64 in
+  let modules = Hashtbl.create 16 in
+  let moduleUids = Hashtbl.create 16 in
+  (* Occurrences sharing a key but spelled differently (distinct identifiers
+     a ppx emitted at one position, e.g. [A.f] and [B.f]) cannot be told apart
+     from the typed tree, whose paths differ from the written identifiers under
+     [open] and aliases: such keys are left unresolved, conservatively. *)
+  (* [Longident.last] and [flatten] are fatal on [Lapply] ([F(X).t]): such
+     occurrences are not values or modules of interest here. *)
+  let lidText (lid : Longident.t) =
+    let rec components suffix = function
+      | Longident.Lident name -> Some (name :: suffix)
+#if OCAML_VERSION >= (5, 4, 0)
+      | Longident.Ldot ({txt = parent}, {txt = name}) ->
+        components (name :: suffix) parent
+#else
+      | Longident.Ldot (parent, name) -> components (name :: suffix) parent
+#endif
+      | Longident.Lapply _ -> None
+    in
+    components [] lid |> Option.map (String.concat ".")
+  in
+  (* Two occurrences with one key are the same identifier only if they are
+     spelled the same and the compiler resolved them the same way (the same
+     spelling can resolve differently under distinct local opens). *)
+  let identity (lid : Longident.t) (result : Shape_reduce.result) =
+    match lidText lid with
+    | None -> None
+    | Some text ->
+      let resolution =
+        match result with
+        | Unresolved shape -> Format.asprintf "%a" Shape.print shape
+        | result -> Format.asprintf "%a" Shape_reduce.print_result result
+      in
+      Some (text ^ " " ^ resolution)
+  in
+  let spelled = Hashtbl.create 64 in
+  let ambiguous = Hashtbl.create 4 in
+  occurrences
+  |> List.iter (fun ((lid : Longident.t Location.loc), result) ->
+         if not lid.loc.loc_ghost then
+           match identity lid.txt result with
+           | None -> ()
+           | Some id -> (
+             let k = key lid.loc (Longident.last lid.txt) in
+             match Hashtbl.find_opt spelled k with
+             | Some other when other <> id -> Hashtbl.replace ambiguous k ()
+             | _ -> Hashtbl.replace spelled k id));
+  occurrences
+  |> List.iter (fun ((lid : Longident.t Location.loc), result) ->
+         if (not lid.loc.loc_ghost) && lidText lid.txt <> None then
+           let name = Longident.last lid.txt in
+           let k = key lid.loc name in
+           if Hashtbl.mem ambiguous k then ()
+           else
+           match result with
+           | Shape_reduce.Unresolved shape ->
+             (* Definition in another unit: reduce lazily, as a value and as a
+                module, depending on how the occurrence is used. *)
+             let uid =
+               lazy (Reduce.reduce_for_uid Env.empty shape |> uidOfResult)
+             in
+             Hashtbl.replace values k (lazy (
+               match Lazy.force uid with
+               | Some uid -> locOfUid uid
+               | None -> None));
+             Hashtbl.replace modules k (Some shape);
+             Hashtbl.replace moduleUids k uid
+           | _ -> (
+             match uidOfResult result with
+             | Some uid ->
+               Hashtbl.replace values k (lazy (locOfUid uid));
+               Hashtbl.replace modules k
+                 (match implShape with
+                 | Some impl -> findShapeByUid impl uid
+                 | None -> None);
+               Hashtbl.replace moduleUids k (lazy (Some uid))
+             | None -> ()));
+  let nonGhost (loc : Location.t option) =
+    match loc with Some l when not l.loc_ghost -> loc | _ -> None
+  in
+  let projValueLoc shape name =
+    let item = Shape.proj shape (Shape.Item.make name Value) in
+    match Reduce.reduce_for_uid Env.empty item |> uidOfResult with
+    | Some uid -> locOfUid uid |> nonGhost
+    | None -> None
+  in
+  let selfRef = ref emptyIdentResolutions in
+  let headKeyOfPathRef = ref (fun (_ : Path.t) -> (None : (definitionKey * int) option)) in
+  let moduleTypeOfPathRef = ref (fun (_ : Path.t) -> (None : Types.module_type option)) in
+  let bindingOfUid =
+    moduleBindingOfUid ~currentCmtFile:cmtFilePath ~imports ~local
+  in
+  (* The resolver of the unit defining [uid]: this one, or that unit's own,
+     built from its occurrence data. *)
+  let resolverOfUid (uid : Shape.Uid.t) =
+    match uid with
+    | Shape.Uid.Item {comp_unit; _} when comp_unit = thisUnit -> Some !selfRef
+    | Shape.Uid.Item {comp_unit; _} ->
+      resolverForUnit ~currentCmtFile:cmtFilePath ~imports comp_unit
+    | _ -> None
+  in
+  (* Wrapped libraries introduce aliases to compilation units, such as
+     [Library.Unit.Member]. There is no module binding for the intermediate
+     compilation unit; reduce the complete path before structural lookup. *)
+  let rec globalPathShape (path : Path.t) =
+    match path with
+    | Pident id when Ident.global id -> Some (compUnitShape (Ident.name id))
+    | Pdot (parent, name) ->
+      globalPathShape parent
+      |> Option.map (fun shape -> Shape.proj shape (Shape.Item.make name Module))
+    | _ -> None
+  in
+  (* The binding a module path denotes, structurally: through units,
+     local bindings, and the bodies of applied functors, as in
+     [Outer (A).Inner]. Returns the binding, the resolver of its unit,
+     and the number of functor layers the path applied. *)
+  let activeBindingPaths = ref [] in
+  let rec bindingOfPath path =
+    if List.exists (Path.same path) !activeBindingPaths then None
+    else
+      let previous = !activeBindingPaths in
+      activeBindingPaths := path :: previous;
+      Fun.protect
+        ~finally:(fun () -> activeBindingPaths := previous)
+        (fun () -> bindingOfPathUnchecked path)
+  and bindingOfPathUnchecked (path : Path.t) :
+      (Location.t * Typedtree.module_expr * identResolutions option * int)
+      option =
+    let byShape =
+      match globalPathShape path with
+      | Some shape -> (
+        match Reduce.reduce_for_uid Env.empty shape |> uidOfResult with
+        | Some uid -> (
+          match bindingOfUid uid with
+          | Some (loc, definition) ->
+            Some (loc, definition, resolverOfUid uid, 0)
+          | None -> None)
+        | None -> None)
+      | None -> None
+    in
+    match byShape with
+    | Some binding -> Some binding
+    | None ->
+    match path with
+    | Pident id when Ident.global id -> (
+      (* Unpacked modules have uid-less shapes. Keep the unit's structure
+         available so a projection can still find their actual binding. *)
+      let unitName = Ident.name id in
+      match loadUnitInfo ~currentCmtFile:cmtFilePath ~imports unitName with
+      | Some {structure = Some structure} ->
+        let definition : Typedtree.module_expr =
+          {
+            mod_desc = Tmod_structure structure;
+            mod_loc = Location.none;
+            mod_type = Types.Mty_signature structure.str_type;
+            mod_env = structure.str_final_env;
+            mod_attributes = [];
+          }
+        in
+        Some
+          ( Location.none,
+            definition,
+            resolverForUnit ~currentCmtFile:cmtFilePath ~imports unitName,
+            0 )
+      | _ -> None)
+    | Pident id -> (
+      let uid =
+        localUid (function
+          | Typedtree.Module_binding {mb_id = Some mbId} ->
+            Ident.same mbId id
+          | _ -> false)
+      in
+      match uid with
+      | Some uid -> (
+        match bindingOfUid uid with
+        | Some (loc, definition) -> Some (loc, definition, Some !selfRef, 0)
+        | None -> None)
+      | None -> None)
+    | Pdot (parent, name) -> (
+      match bindingOfPath parent with
+      | Some (_, definition, resolver, applied) -> (
+        (* Peel the applied functor layers, then find the member, the
+           last binding of that name (also through [include]s). *)
+        let rec memberIn ~visited ~resolver (e : Typedtree.module_expr)
+            applied =
+          if List.memq e visited then None
+          else
+          let visited = e :: visited in
+          let lookup =
+            match resolver with
+            | Some (r : identResolutions) -> r.bindingOfPath
+            | None -> bindingOfPath
+          in
+          match e.mod_desc with
+          | Tmod_constraint (inner, _, _, _) ->
+            memberIn ~visited ~resolver inner applied
+          | Tmod_functor (_, inner) when applied > 0 ->
+            memberIn ~visited ~resolver inner (applied - 1)
+          | Tmod_apply (functorExpr, _, _) ->
+            memberIn ~visited ~resolver functorExpr (applied + 1)
+          | Tmod_apply_unit functorExpr ->
+            memberIn ~visited ~resolver functorExpr (applied + 1)
+          | Tmod_ident (p, _) when applied = 0 -> (
+            (* [include Helpers] in a body: [Helpers] is local to the
+               unit defining the body, so its resolver must look it up. *)
+            match lookup (Pdot (p, name)) with
+            | Some (loc, expr, memberResolver, 0) ->
+              Some (loc, expr, memberResolver)
+            | _ -> None)
+          | Tmod_ident (p, _) -> (
+            (* An applied functor named by a path ([include Mid (A)] in a
+               body): its own definition, with the layers it consumed. *)
+            match lookup p with
+            | Some (_, definition, resolver, applied') ->
+              memberIn ~visited ~resolver definition (applied + applied')
+            | None -> None)
+          | Tmod_structure structure when applied = 0 ->
+            structure.str_items
+            |> List.fold_left
+                 (fun acc (item : Typedtree.structure_item) ->
+                   match item.str_desc with
+                   | Tstr_module ({mb_name = {txt = Some n}} as mb)
+                     when n = name ->
+                     Some (mb.mb_name.loc, mb.mb_expr, resolver)
+                   | Tstr_recmodule mbs -> (
+                     match
+                       mbs
+                       |> List.find_opt
+                            (fun (mb : Typedtree.module_binding) ->
+                              mb.mb_name.txt = Some name)
+                     with
+                     | Some mb ->
+                       Some (mb.mb_name.loc, mb.mb_expr, resolver)
+                     | None -> acc)
+                   | Tstr_include {incl_mod} -> (
+                     match memberIn ~visited ~resolver incl_mod 0 with
+                     | Some member -> Some member
+                     | None -> acc)
+                   | _ -> acc)
+                 None
+          | _ -> None
+        in
+        match memberIn ~visited:[] ~resolver definition applied with
+        | Some (loc, expr, memberResolver) ->
+          Some (loc, expr, memberResolver, 0)
+        | None -> None)
+      | None -> None)
+    | Papply (functorPath, _) -> (
+      match bindingOfPath functorPath with
+      | Some (loc, definition, resolver, applied) ->
+        Some (loc, definition, resolver, applied + 1)
+      | None -> None)
+    | _ -> None
+  in
+  let self : identResolutions = {
+    context;
+    valueKey = (fun vd ->
+      let context = match resolverOfUid vd.Types.val_uid with
+        | Some resolver -> resolver.context
+        | None -> context
+      in
+      (vd.val_loc.loc_start, context));
+    valueImpl =
+      (fun loc name ->
+        match Hashtbl.find_opt values (key loc name) with
+        | Some l -> Lazy.force l |> nonGhost
+        | None -> None);
+    moduleShape =
+      (fun loc name ->
+        match Hashtbl.find_opt modules (key loc name) with
+        | Some s -> s
+        | None -> None);
+    projValue = projValueLoc;
+    projModule =
+      (fun shape name ->
+        Some (Shape.proj shape (Shape.Item.make name Module)));
+    moduleDefKey =
+      (fun loc name ->
+        match Hashtbl.find_opt moduleUids (key loc name) with
+        | Some uid -> (
+          match Lazy.force uid with
+          | Some uid ->
+            moduleBindingLocOfUid ~currentCmtFile:cmtFilePath ~imports ~local
+              uid
+            |> nonGhost
+            |> Option.map (fun loc ->
+                   let context = match resolverOfUid uid with
+                     | Some resolver -> resolver.context
+                     | None -> context
+                   in
+                   (loc.Location.loc_start, context))
+          | None -> None)
+        | None -> None);
+    moduleTypeOf =
+      (fun loc name ->
+        match Hashtbl.find_opt moduleUids (key loc name) with
+        | Some uid -> (
+          match Lazy.force uid with
+          | Some uid ->
+            moduleTypeOfUid ~currentCmtFile:cmtFilePath ~imports ~local uid
+          | None -> None)
+        | None -> None);
+    moduleTypeOfPath = (fun path -> !moduleTypeOfPathRef path);
+    shapeValueItems =
+      (* Values at any depth of submodules; [visited] guards recursive
+         shapes. Functor members have no values to reference. *)
+      (let rec items visited (shape : Shape.t) path =
+         let reduced = Reduce.reduce Env.empty shape in
+         if List.memq reduced visited then []
+         else
+           let visited = reduced :: visited in
+           match reduced.desc with
+           | Struct fields ->
+             Shape.Item.Map.fold
+               (fun (name, kind) _ acc ->
+                 match kind with
+                 | Shape.Sig_component_kind.Value -> (
+                   match projValueLoc shape name with
+                   | Some loc -> (String.concat "." (path @ [name]), loc) :: acc
+                   | None -> acc)
+                 | Shape.Sig_component_kind.Module ->
+                   items visited
+                     (Shape.proj shape (Shape.Item.make name Module))
+                     (path @ [name])
+                   @ acc
+                 | _ -> acc)
+               fields []
+           | Alias aliased -> items visited aliased path
+           | _ -> []
+       in
+       fun shape -> items [] shape []);
+    bindingOfPath = (fun path -> bindingOfPath path);
+    headKeyOfPath = (fun path -> !headKeyOfPathRef path);
+    headKey =
+      (let rec unwrap (e : Typedtree.module_expr) =
+         match e.mod_desc with
+         | Tmod_constraint (inner, _, _, _) -> unwrap inner
+         | _ -> e
+       in
+       (* The key of a binding found for a module expression: a functor is
+          keyed by the binding; an alias or a partial application is chased
+          with the resolver of the unit binding it. *)
+       let keyOfBinding (uids, bindings) (loc : Location.t)
+           (definition : Typedtree.module_expr) resolver =
+         let context = match resolver with
+           | Some (resolver : identResolutions) -> resolver.context
+           | None -> context
+         in
+         let key = (loc.loc_start, context) in
+         if loc.loc_ghost || List.mem key bindings then None
+         else
+           let visited = (uids, key :: bindings) in
+           match (unwrap definition).mod_desc with
+           | Tmod_apply _ | Tmod_apply_unit _ | Tmod_ident _ -> (
+             (* An unresolved alias is not a new functor definition. Giving
+                it its own key would bypass the unknown-head escape. *)
+             match resolver with
+             | Some (resolver : identResolutions) ->
+               resolver.headKey visited definition
+             | None -> None)
+           | Tmod_unpack _ ->
+             (* A first-class module: the functor it holds is not known
+                here. *)
+             None
+           | _ -> Some (key, 0)
+       in
+       headKeyOfPathRef :=
+         (fun path ->
+           match bindingOfPath path with
+           | Some (loc, definition, resolver, applied) -> (
+             match keyOfBinding noHeadVisited loc definition resolver with
+             | Some (loc, consumed) -> Some (loc, consumed + applied)
+             | None -> None)
+           | None -> None);
+       let rec headKey (visited : headVisited) (e : Typedtree.module_expr) =
+         match e.mod_desc with
+         | Tmod_apply (functorExpr, _, _) | Tmod_apply_unit functorExpr -> (
+           match headKey visited functorExpr with
+           | Some (loc, consumed) -> Some (loc, consumed + 1)
+           | None -> None)
+         | Tmod_constraint (inner, _, _, _) -> headKey visited inner
+         | Tmod_functor _ -> Some ((e.mod_loc.loc_start, context), 0)
+         | Tmod_ident (path, lid) -> (
+           let byOccurrence =
+             match Longident.last lid.txt with
+             | exception Misc.Fatal_error -> None
+             | name -> (
+               match Hashtbl.find_opt moduleUids (key lid.loc name) with
+               | Some uid -> (
+                 match Lazy.force uid with
+                 | Some uid when List.mem uid (fst visited) -> Some None
+                 | Some uid -> (
+                   match bindingOfUid uid with
+                   | Some (loc, definition) ->
+                     Some (keyOfBinding (uid :: fst visited, snd visited) loc definition
+                       (resolverOfUid uid))
+                   | None -> None)
+                 | _ -> None)
+               | None -> None)
+           in
+           match byOccurrence with
+           | Some head -> head
+           | None -> (
+             (* No usable occurrence (e.g. [Outer (A).Inner]): structurally. *)
+             match bindingOfPath path with
+             | Some (loc, definition, resolver, 0) ->
+               keyOfBinding visited loc definition resolver
+             | _ -> None))
+         | _ -> None
+       in
+       headKey);
+    expandModuleType =
+      (       (* Shape of a module path rooted at a compilation unit or at a module
+          of the current unit. *)
+       let rec moduleShapeOfPath (path : Path.t) =
+         match path with
+         | Pident id when Ident.global id -> Some (compUnitShape (Ident.name id))
+         | Pident id -> (
+           let uid =
+             localUid (function
+               | Typedtree.Module_binding {mb_id = Some mbId} ->
+                 Ident.same mbId id
+               | _ -> false)
+           in
+           match (uid, implShape) with
+           | Some uid, Some impl -> findShapeByUid impl uid
+           | _ -> None)
+         | Pdot (p, name) -> (
+           match moduleShapeOfPath p with
+           | Some shape -> Some (Shape.proj shape (Shape.Item.make name Module))
+           | None -> None)
+         | Papply (functorPath, argumentPath) -> (
+           (* [Outer (A).S]: the application's shape, reduced on projection. *)
+           match
+             (moduleShapeOfPath functorPath, moduleShapeOfPath argumentPath)
+           with
+           | Some functorShape, Some argumentShape ->
+             Some (Shape.app functorShape ~arg:argumentShape)
+           | _ -> None)
+         | _ -> None
+       in
+       let moduleTypeOfUid = moduleTypeOfUid ~currentCmtFile:cmtFilePath ~imports ~local in
+       let rec hasApply (path : Path.t) =
+         match path with
+         | Papply _ -> true
+         | Pdot (p, _) -> hasApply p
+         | _ -> false
+       in
+       (* [module type S] in the body of a functor the path applies, as in
+          [Outer (A).S]: found structurally, whatever the argument. *)
+       let rec moduleTypeInBody ~visited ~resolver
+           (e : Typedtree.module_expr) applied name =
+         if List.memq e visited then None
+         else
+         let visited = e :: visited in
+         match e.mod_desc with
+         | Tmod_constraint (inner, _, _, _) ->
+           moduleTypeInBody ~visited ~resolver inner applied name
+         | Tmod_functor (_, inner) when applied > 0 ->
+           moduleTypeInBody ~visited ~resolver inner (applied - 1) name
+         | Tmod_apply (functorExpr, _, _) | Tmod_apply_unit functorExpr ->
+           moduleTypeInBody ~visited ~resolver functorExpr (applied + 1) name
+         | Tmod_ident (p, _) -> (
+           (* An aliased member ([module Alias = Holder]) or an applied one:
+              follow it in the unit defining the body. *)
+           let r : identResolutions =
+             match resolver with Some r -> r | None -> !selfRef
+           in
+           if applied = 0 then r.moduleTypeOfPath (Pdot (p, name))
+           else
+             match r.bindingOfPath p with
+             | Some (_, definition, resolver, applied') ->
+               moduleTypeInBody ~visited ~resolver definition
+                 (applied + applied') name
+             | None -> None)
+         | Tmod_structure structure when applied = 0 ->
+           structure.str_items
+           |> List.fold_left
+                (fun acc (item : Typedtree.structure_item) ->
+                  match item.str_desc with
+                  | Tstr_modtype {mtd_name; mtd_type = Some {mty_type}}
+                    when mtd_name.txt = name ->
+                    Some mty_type
+                  | Tstr_include {incl_mod} -> (
+                    match
+                      moduleTypeInBody ~visited ~resolver incl_mod 0 name
+                    with
+                    | Some mt -> Some mt
+                    | None -> acc)
+                  | _ -> acc)
+                None
+         | _ -> None
+       and moduleTypeOfPath (path : Path.t) =
+         match path with
+         | Pdot (p, name) when hasApply p -> (
+           match bindingOfPath p with
+           | Some (_, definition, resolver, applied) ->
+             moduleTypeInBody ~visited:[] ~resolver definition applied name
+           | None -> None)
+         | Pdot (p, name) -> (
+           match moduleShapeOfPath p with
+           | Some shape -> (
+             let item = Shape.proj shape (Shape.Item.make name Module_type) in
+             match Reduce.reduce_for_uid Env.empty item |> uidOfResult with
+             | Some uid -> moduleTypeOfUid uid
+             | None -> None)
+           | None -> None)
+         | Pident id ->
+           (* A module type of the current unit, by identifier identity (the
+              same name may be declared in several scopes). *)
+           Shape.Uid.Tbl.fold
+             (fun _uid decl acc ->
+               match (acc, decl) with
+               | None, Typedtree.Module_type {mtd_id; mtd_type = Some {mty_type}}
+                 when Ident.same mtd_id id ->
+                 Some mty_type
+               | _ -> acc)
+             local None
+         | _ -> None
+       in
+       (* The declared type of the module a path denotes: a strengthened
+          signature turns submodules into aliases ([module N = Arg.N]),
+          which expose no items. *)
+       let moduleTypeOfModulePath (path : Path.t) =
+         match moduleShapeOfPath path with
+         | Some shape -> (
+           match Reduce.reduce_for_uid Env.empty shape |> uidOfResult with
+           | Some uid -> (
+             match declOfUid ~currentCmtFile:cmtFilePath ~imports ~local uid with
+             | Some (Typedtree.Module_binding {mb_expr}) -> Some mb_expr.mod_type
+             | Some (Typedtree.Module {md_type}) -> Some md_type.mty_type
+             | _ -> None)
+           | None -> None)
+         | None -> None
+       in
+       (* Aliases are followed until a signature is reached; the visited
+          paths break cycles. *)
+       moduleTypeOfPathRef := moduleTypeOfPath;
+       let rec expand visited (moduleType : Types.module_type) =
+         match moduleType with
+         | Mty_ident path when not (List.exists (Path.same path) visited) -> (
+           match moduleTypeOfPath path with
+           | Some expanded -> expand (path :: visited) expanded
+           | None -> moduleType)
+         | Mty_alias path when not (List.exists (Path.same path) visited) -> (
+           match moduleTypeOfModulePath path with
+           | Some expanded -> expand (path :: visited) expanded
+           | None -> moduleType)
+         | _ -> moduleType
+       in
+       expand []);
+  } in
+  selfRef := self;
+  self
+
+and resolverForUnit ~currentCmtFile ~imports comp_unit =
+  match loadUnitInfo ~currentCmtFile ~imports comp_unit with
+  | Some info when info.cmtPath <> "" -> (
+    match Hashtbl.find_opt resolverCache info.cmtPath with
+    | Some resolver -> Some resolver
+    | None ->
+      let resolver =
+        makeResolver ~cmtFilePath:info.cmtPath ~context:info.context ~local:info.uidToDecl
+          ~imports:info.unitImports ~implShape:info.shape
+          ~occurrences:info.occurrences
+      in
+      Hashtbl.replace resolverCache info.cmtPath resolver;
+      Some resolver)
+  | _ -> None
+#endif
+
+let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
+    identResolutions =
+#if OCAML_VERSION >= (5, 3, 0)
+  makeResolver ~cmtFilePath ~context:(compilationContext ~cmtFilePath cmt_infos)
+    ~local:cmt_infos.cmt_uid_to_decl
+    ~imports:cmt_infos.cmt_imports ~implShape:cmt_infos.cmt_impl_shape
+    ~occurrences:cmt_infos.cmt_ident_occurrences
+#else
+  let _ = (cmtFilePath, cmt_infos) in
+  emptyIdentResolutions
+#endif
+
+#if OCAML_VERSION < (5, 3, 0)
+let compilationContext ~cmtFilePath:_ infos = sourceContext infos
 #endif
