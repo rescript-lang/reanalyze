@@ -289,8 +289,10 @@ end
 
 let tstrExceptionGet (x : Typedtree.structure_item_desc) = match x with
 #if OCAML_VERSION >= (4, 08, 0)
-  | Tstr_exception({tyexn_constructor= {ext_id}; tyexn_loc}) ->
-    Some((ext_id, tyexn_loc))
+  | Tstr_exception({tyexn_constructor= {ext_id; ext_loc}}) ->
+    (* Some compiler versions leave tyexn_loc ghost/empty. The constructor's
+       location identifies the declaration, including exception aliases. *)
+    Some((ext_id, ext_loc))
 #else
   | Tstr_exception({ext_id; ext_loc}) ->
     Some((ext_id, ext_loc))
@@ -353,6 +355,16 @@ let applyArgOfExpression e =
   Some e
 #endif
 
+let iterExpressionModule f (expr : Typedtree.expression) =
+  match expr.exp_desc with
+#if OCAML_VERSION >= (5, 5, 0)
+  | Texp_struct_item ({str_desc = Tstr_module {mb_id = Some id; mb_expr}}, _) ->
+    f id mb_expr
+#else
+  | Texp_letmodule (Some id, _, _, moduleExpr, _) -> f id moduleExpr
+#endif
+  | _ -> ()
+
 (* Index of the .cmt/.cmti files under analysis, keyed by compilation unit
    name. Populated before processing so declaration dependencies and identifier
    occurrences pointing at other units (e.g. a functor result constrained by a
@@ -377,26 +389,6 @@ let registerCmtFile path =
     Hashtbl.replace cmtFilesByUnit unit (path :: existing);
     Hashtbl.reset compilationContexts;
     compilationContextsReady := false)
-
-#if OCAML_VERSION >= (5, 3, 0)
-(* Per compilation unit: the implementation shape and structure (from the
-   .cmt), and the uid -> declaration table (merged from .cmt and .cmti).
-   Loaded on demand. *)
-type unitInfo = {
-  context : string;
-  shape : Shape.t option;
-  structure : Typedtree.structure option;
-  uidToDecl : Typedtree.item_declaration Shape.Uid.Tbl.t;
-  cmtPath : string;  (** the .cmt (or, failing that, the first file) loaded *)
-  unitImports : Misc.crcs;
-  occurrences : (Longident.t Location.loc * Shape_reduce.result) list;
-}
-
-(* Keyed by the list of files a unit is loaded from, so that same-named units
-   in different build targets (e.g. two unwrapped libraries each defining
-   [Config]) do not share an entry. *)
-let unitInfoCache : (string list * string option * string, unitInfo) Hashtbl.t =
-  Hashtbl.create 64
 
 (* An implementation compiled against an interface gets its digest from
    the sibling .cmti. Retain both files of every matching unit, for shapes
@@ -577,77 +569,110 @@ let compilationContext ~cmtFilePath infos =
        Its equivalence is unproved: keep it separate rather than merging. *)
     sourceContext infos ^ ":unindexed:" ^ cmtFilePath
 
+(* Scanning, provider selection, and exception graphs share the resolved
+   dependency context, while keeping interfaces and implementations separate. *)
+let cmtUnitKey ~cmtFilePath ~isInterface (infos : Cmt_format.cmt_infos) =
+  (compilationContext ~cmtFilePath infos, isInterface)
+
+let unitAnnotationsCache = Hashtbl.create 64
+
 (* [imports] are the consumer's recorded imports: when the same unit name
    exists in several build directories, the candidate whose interface digest
    matches the one the consumer was compiled against is the actual
    dependency. *)
-let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
+let selectUnitAnnotations ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
   let files = candidateFilesForUnit ~currentCmtFile comp_unit in
   let digest =
     match List.assoc_opt comp_unit imports with
     | Some (Some digest) -> Some digest
     | _ -> None
   in
-  (* Both the import digest and the later sibling preference affect which
-     same-named unit a consumer can resolve. *)
   let dir = Filename.dirname currentCmtFile in
   let cacheKey = (files, Option.map Digest.to_hex digest, dir) in
+  match Hashtbl.find_opt unitAnnotationsCache cacheKey with
+  | Some loaded -> loaded
+  | None ->
+    let read path =
+      try Some (path, Cmt_format.read_cmt path) with _ -> None
+    in
+    let loaded = files |> List.filter_map read in
+    let interfaceDigest path =
+      match List.assoc_opt path loaded with
+      | Some infos -> interfaceDigest infos
+      | None -> (
+        match read path with
+        | Some (_, infos) -> interfaceDigest infos
+        | None -> None)
+    in
+    let selected =
+      selectUnitFilesByDigest ~interfaceDigest ~allowUnmatched:false digest
+        files
+    in
+    (* Prefer siblings only after selecting the recorded import digest:
+       a same-named sibling must not hide the actual dependency elsewhere. *)
+    let selected =
+      preferSiblingUnitFiles ~currentCmtFile selected
+    in
+    let loaded =
+      loaded |> List.filter (fun (path, _) -> List.mem path selected)
+    in
+    (* Copies of one compilation context (e.g. byte/native or install copies)
+       are one unit. Distinct contexts of the same artifact kind are ambiguous,
+       but a matching interface/implementation pair may live in separate
+       directories. *)
+    let loaded =
+      let seen = Hashtbl.create 4 in
+      loaded
+      |> List.filter (fun (path, (cmt_infos : Cmt_format.cmt_infos)) ->
+          let key =
+            cmtUnitKey ~cmtFilePath:path
+              ~isInterface:(Filename.check_suffix path ".cmti") cmt_infos
+          in
+          if Hashtbl.mem seen key then false
+          else (
+            Hashtbl.replace seen key ();
+            true))
+    in
+    let loaded =
+      let implementations, interfaces =
+        List.partition
+          (fun (path, _) -> Filename.check_suffix path ".cmt")
+          loaded
+      in
+      match (implementations, interfaces) with
+      | _ :: _ :: _, _ | _, _ :: _ :: _ -> []
+      | _ -> loaded
+    in
+    Hashtbl.replace unitAnnotationsCache cacheKey loaded;
+    loaded
+
+#if OCAML_VERSION >= (5, 3, 0)
+(* Per compilation unit: the implementation shape and structure (from the
+   .cmt), and the uid -> declaration table (merged from .cmt and .cmti).
+   Loaded on demand. *)
+type unitInfo = {
+  context : string;
+  shape : Shape.t option;
+  structure : Typedtree.structure option;
+  uidToDecl : Typedtree.item_declaration Shape.Uid.Tbl.t;
+  cmtPath : string;  (** the .cmt (or, failing that, the first file) loaded *)
+  unitImports : Misc.crcs;
+  occurrences : (Longident.t Location.loc * Shape_reduce.result) list;
+}
+
+(* Keyed by the list of files a unit is loaded from, so that same-named units
+   in different build targets (e.g. two unwrapped libraries each defining
+   [Config]) do not share an entry. *)
+let unitInfoCache : (string list, unitInfo) Hashtbl.t =
+  Hashtbl.create 64
+
+let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
+  let loaded = selectUnitAnnotations ~currentCmtFile ~imports comp_unit in
+  let cacheKey = List.map fst loaded in
+  if loaded = [] then None else
   match Hashtbl.find_opt unitInfoCache cacheKey with
   | Some info -> Some info
   | None -> (
-    match files with
-    | [] -> None
-    | _ ->
-      let read path =
-        try Some (path, Cmt_format.read_cmt path) with _ -> None
-      in
-      let loaded = files |> List.filter_map read in
-      let interfaceDigest path =
-        match List.assoc_opt path loaded with
-        | Some infos -> interfaceDigest infos
-        | None -> (
-          match read path with
-          | Some (_, infos) -> interfaceDigest infos
-          | None -> None)
-      in
-      let selected =
-        selectUnitFilesByDigest ~interfaceDigest ~allowUnmatched:false digest files
-      in
-      (* Prefer siblings only after selecting the recorded import digest:
-         a same-named sibling must not hide the actual dependency elsewhere. *)
-      let selected =
-        preferSiblingUnitFiles ~currentCmtFile selected
-      in
-      let loaded =
-        loaded |> List.filter (fun (path, _) -> List.mem path selected)
-      in
-      (* Copies of one compiled source (e.g. a library's objects and its
-         _build/install copy, or byte and native objects) are one unit: keep
-         the first of each. Distinct candidates of the same artifact kind
-         remain ambiguous, but a matching interface/implementation pair may
-         legitimately be stored in two different directories. *)
-      let loaded =
-        let seen = Hashtbl.create 4 in
-        loaded
-        |> List.filter (fun (path, (cmt_infos : Cmt_format.cmt_infos)) ->
-               let key =
-                 (compilationContext ~cmtFilePath:path cmt_infos, cmt_infos.cmt_impl_shape <> None)
-               in
-               if Hashtbl.mem seen key then false
-               else (
-                 Hashtbl.replace seen key ();
-                 true))
-      in
-      let loaded =
-        let implementations, interfaces =
-          List.partition
-            (fun (path, _) -> Filename.check_suffix path ".cmt")
-            loaded
-        in
-        match (implementations, interfaces) with
-        | _ :: _ :: _, _ | _, _ :: _ :: _ -> []
-        | _ -> loaded
-      in
       let uidToDecl = Shape.Uid.Tbl.create 64 in
       let shape = ref None in
       let implementation = ref None in
@@ -1625,6 +1650,3 @@ let resolveIdentOccurrences ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) :
   emptyIdentResolutions
 #endif
 
-#if OCAML_VERSION < (5, 3, 0)
-let compilationContext ~cmtFilePath:_ infos = sourceContext infos
-#endif

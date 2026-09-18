@@ -95,6 +95,19 @@ function runRegressionTests() {
   });
 
   console.log(`${cwd}: reanalyze regression assertions`);
+  // Outer.Inner.Alias belongs to an external unit outside this analysis root.
+  // Its real namespace must not be stripped to reference the local Inner.Alias.
+  const exceptionOutput = child_process.execFileSync(
+    reanalyzeFile,
+    [
+      "-ci", "-debug", "-native-build-target", ".", "-dce-cmt",
+      "_build/default/exception_collision/.exception_collision.objs/byte",
+    ],
+    { cwd, encoding: "utf8" }
+  );
+  assertIncludes(exceptionOutput, "Dead Exception +Inner.Alias");
+  assertNotIncludes(exceptionOutput, "Live Exception +Inner.Alias");
+
   const output = child_process.execFileSync(
     reanalyzeFile,
     ["-ci", "-debug", "-native-build-target", ".", "-dce-cmt", cmtDir],
@@ -108,6 +121,44 @@ function runRegressionTests() {
   );
 
   assertIncludes(output, "+definitely_dead is never used");
+  // Exception aliases reached through nested module targets, including an
+  // alias chain and the surrounding Dune wrapper, stay live independently.
+  for (const name of [
+    "Direct", "Through_chain", "Through_nested_alias", "Through_include", "Deep.Used",
+  ]) {
+    assertIncludes(output, `Live Exception +Exception_nested_source.Inner.${name}`);
+    assertNotIncludes(output, `Dead Exception +Exception_nested_source.Inner.${name}`);
+  }
+  for (const name of ["Unused", "Deep.Unused"]) {
+    assertIncludes(output, `Dead Exception +Exception_nested_source.Inner.${name}`);
+    assertNotIncludes(output, `Live Exception +Exception_nested_source.Inner.${name}`);
+  }
+  // Local alias roots retain their lexical module identity, including
+  // aliases inside nested signatures and references to an outer scope.
+  for (const name of [
+    "Source.Direct", "Source.Fresh", "Source.Through_nested", "Source.Deep.Used",
+    "Nested.Source.Shadowed", "Nested.Source.Through_deeper",
+    "Constrained.Source.Used", "Constrained.Source.Forwarded",
+  ]) {
+    assertIncludes(output, `Live Exception +Exception_scoped_alias.${name}`);
+    assertNotIncludes(output, `Dead Exception +Exception_scoped_alias.${name}`);
+  }
+  for (const name of [
+    "Source.Shadowed", "Source.Unused", "Source.Deep.Unused", "Nested.Source.Unused",
+    "Constrained.Source.Unused", "Other.Source.Used", "Other.Source.Forwarded",
+    "Other.Source.Unused",
+  ]) {
+    assertIncludes(output, `Dead Exception +Exception_scoped_alias.${name}`);
+    assertNotIncludes(output, `Live Exception +Exception_scoped_alias.${name}`);
+  }
+  assertNotIncludes(output, "Rec_used is never raised");
+  assertIncludes(output, "Rec_unused is never raised");
+  assertIncludes(output,
+    "Live Exception +Exception_alias_exports.Local.Through_local_include");
+  assertNotIncludes(output,
+    "Dead Exception +Exception_alias_exports.Local.Through_local_include");
+  assertIncludes(output, "Dead Exception +Exception_alias_exports.Local.Unused");
+  assertNotIncludes(output, "Live Exception +Exception_alias_exports.Local.Unused");
   assertIncludes(output, "Source:src/Generated_source.ml");
   assertIncludes(output, "Live Value +Functor_argument.Ordered.+compare");
   assertIncludes(output, "Dead Value +Functor_argument.Ordered.+unused");
@@ -1147,6 +1198,39 @@ function runImportDigestSelectionTest() {
   }
 }
 
+function runExceptionAliasMissingProviderTest() {
+  const fs = require("fs");
+  const os = require("os");
+  const cwd = path.join(__dirname, "..", "examples", "regression");
+  const cmtDir = path.join(cwd, "_build/default/src/.regression_fixture.objs/byte");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "reanalyze-exception-include-"));
+  const provider = "regression_fixture__Exception_alias_exports.cmt";
+  try {
+    for (const file of fs.readdirSync(cmtDir)) {
+      if (/\.cmti?$/.test(file) && file !== provider) {
+        fs.copyFileSync(path.join(cmtDir, file), path.join(root, file));
+      }
+    }
+    console.log(`${cwd}: reanalyze wrapped exception include without provider`);
+    const output = child_process.execFileSync(
+      reanalyzeFile,
+      ["-ci", "-debug", "-native-build-target", ".", "-dce-cmt", root],
+      { cwd, encoding: "utf8", maxBuffer: 256 * 1024 * 1024 }
+    );
+    // The generated wrapper source may be absent, but its aliases must be read.
+    if (!fs.existsSync(path.join(root, "regression_fixture.cmt"))) {
+      throw new Error("Exception include regression is missing the Dune wrapper");
+    }
+    assertIncludes(output, "Scanning regression_fixture__Exception_alias_include.cmt ");
+    assertNotIncludes(output, `Scanning ${provider} `);
+    assertIncludes(output, "Live Exception +Exception_nested_source.Inner.Through_include");
+    assertNotIncludes(output, "Dead Exception +Exception_nested_source.Inner.Through_include");
+    assertIncludes(output, "Dead Exception +Exception_nested_source.Inner.Unused");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
 function checkSetup() {
   console.log("Checking if --version outputs the right version");
   let output;
@@ -1179,6 +1263,8 @@ function main() {
     checkSetup();
     cleanBuildExamples();
     runRegressionTests();
+    runExceptionAliasMissingProviderTest();
+    require("./test_exception_identity")(reanalyzeFile);
     runDuplicateLayoutTest();
     runByteNativeDuplicateTest();
     runDuplicateContextTest();

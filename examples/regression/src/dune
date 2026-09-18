@@ -8,6 +8,13 @@
   Cross_include
   Escape_exports
   Escaped_coercion
+  Exception_alias_exports
+  Exception_alias_include
+  Exception_nested_alias
+  Exception_nested_chain
+  Exception_nested_source
+  Exception_nested_use
+  Exception_scoped_alias
   Functor_argument
   Generated_source
   Higher_order
