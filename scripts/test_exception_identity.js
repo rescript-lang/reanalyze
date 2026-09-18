@@ -30,6 +30,7 @@ module.exports = function testExceptionIdentity(reanalyzeFile) {
     return output;
   };
   try {
+    require("./test_exception_includes")(root, compile, analyze);
     const cases = [
       ["local", "", "module Left = Right\nlet () = raise Left.Used", ["right.Used"], ["left.Used"]],
       ["let-local", "", "let () = let module Left = Right in raise Left.Used", ["right.Used"], ["left.Used"]],

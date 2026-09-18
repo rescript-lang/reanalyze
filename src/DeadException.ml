@@ -6,15 +6,18 @@ open DeadCommon
 type moduleNode = {
   id : int;
   modules : (string, moduleNode) Hashtbl.t;
-  exceptions : (string, Location.t) Hashtbl.t;
+  exceptions : (string, exceptionBinding) Hashtbl.t;
   mutable alias : CompilerPath.t option;
 }
+
+and exceptionBinding = Declaration of Location.t | Included of moduleNode
 
 type compilationUnit = {
   cmtFilePath : string;
   imports : Misc.crcs;
   root : moduleNode;
   mutable bindings : moduleNode Ident.tbl;
+  mutable exceptionBindings : exceptionBinding Ident.tbl;
   declarations : Location.t PosHash.t;
 }
 
@@ -65,6 +68,7 @@ let getCompilationUnit ~cmtFilePath (infos : Cmt_format.cmt_infos) =
         imports = infos.cmt_imports;
         root = newModule ();
         bindings = Ident.empty;
+        exceptionBindings = Ident.empty;
         declarations = PosHash.create 16;
       }
     in
@@ -72,6 +76,10 @@ let getCompilationUnit ~cmtFilePath (infos : Cmt_format.cmt_infos) =
     let bind parent id node =
       unit.bindings <- Ident.add id node unit.bindings;
       Hashtbl.replace parent.modules (Ident.name id) node
+    in
+    let bindException parent id binding =
+      unit.exceptionBindings <- Ident.add id binding unit.exceptionBindings;
+      Hashtbl.replace parent.exceptions (Ident.name id) binding
     in
     let rec collectSignature node signature =
       signature
@@ -91,7 +99,7 @@ let getCompilationUnit ~cmtFilePath (infos : Cmt_format.cmt_infos) =
           | Sig_typext (id, extension, Text_exception, _) ->
             let name = Ident.name id in
             if not (Hashtbl.mem node.exceptions name) then
-              Hashtbl.add node.exceptions name extension.ext_loc
+              Hashtbl.add node.exceptions name (Declaration extension.ext_loc)
           | _ -> ())
     and collectModuleType node = function
       | Types.Mty_alias target -> node.alias <- Some target
@@ -127,19 +135,15 @@ let getCompilationUnit ~cmtFilePath (infos : Cmt_format.cmt_infos) =
                     | _ -> ());
                     bind node id child
                   | None -> ())
-                | Sig_typext (id, extension, Text_exception, _) ->
-                  let name = Ident.name id in
-                  let loc =
-                    match Hashtbl.find_opt included.exceptions name with
-                    | Some loc -> loc
-                    | None -> extension.ext_loc
-                  in
-                  Hashtbl.replace node.exceptions name loc
+                | Sig_typext (id, _, Text_exception, _) ->
+                  (* Keep the source view: its aliases select the declaration's
+                     owning unit using that unit's imports and lexical bindings. *)
+                  bindException node id (Included included)
                 | _ -> ())
           | Tstr_exception _ -> (
             match Compat.tstrExceptionGet item.str_desc with
             | Some (id, loc) ->
-              Hashtbl.replace node.exceptions (Ident.name id) loc
+              bindException node id (Declaration loc)
             | None -> ())
           | _ -> ())
     and collectBinding node (binding : Typedtree.module_binding) =
@@ -273,8 +277,7 @@ let rec resolveNode ~visited unit node fields =
     match fields with
     | [name] ->
       Hashtbl.find_opt node.exceptions name
-      |> Option.fold ~none:None ~some:(fun loc ->
-          PosHash.find_opt unit.declarations loc.Location.loc_start)
+      |> Option.fold ~none:None ~some:(resolveException ~visited unit name)
     | name :: rest ->
       Hashtbl.find_opt node.modules name
       |> Option.fold ~none:None ~some:(fun child ->
@@ -289,9 +292,19 @@ let rec resolveNode ~visited unit node fields =
     |> Option.fold ~none:None ~some:(fun (visited, unit, target) ->
         resolveNode ~visited unit target fields)
 
+and resolveException ~visited unit name = function
+  | Declaration loc -> PosHash.find_opt unit.declarations loc.Location.loc_start
+  | Included source -> resolveNode ~visited unit source [name]
+
 let resolvePath unit path =
   match CompilerPath.flatten path with
   | `Contains_apply -> None
+  | `Ok (id, []) -> (
+    (* An unqualified constructor keeps the identifier introduced by its
+       declaration or include, even after another include replaces its name. *)
+    match Ident.find_same id unit.exceptionBindings with
+    | binding -> resolveException ~visited:[] unit (Ident.name id) binding
+    | exception Not_found -> None)
   | `Ok (root, fields) ->
     rootModule unit root
     |> Option.fold ~none:None ~some:(fun (unit, node) ->
