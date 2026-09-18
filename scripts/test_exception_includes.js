@@ -33,6 +33,9 @@ module.exports = function testExceptionIncludes(root, compile, analyze) {
     // Exception usage counts constructor references even in an unused function.
     ["unused-function", "include Source\nlet dead () = raise Used", "Not_found"],
     ["unused-function-qualified", "include Source\nlet dead () = raise Source.Used", "Not_found"],
+    ["variant-overload", "include Source\ntype t = Used"],
+    ["include-after-extension", "include struct type exn += Used end\ninclude Source"],
+    ["exception-after-extension", "include Source\ninclude struct type exn += Used end\nexception Used = Not_found", "Wrapper.Used", ["wrapper.Used"], ["source.Used", "other.Used"]],
   ];
   for (const [name, wrapper, use = "Wrapper.Used", live = ["source.Used"], dead = ["other.Used"]] of cases) {
     const cwd = path.join(root, "includes", name);
@@ -42,6 +45,35 @@ module.exports = function testExceptionIncludes(root, compile, analyze) {
     compile(cwd, "wrapper.ml", wrapper);
     compile(cwd, "use.ml", `let () = raise ${use}`);
     analyze(cwd, ".", live, [...dead, "source.Unused", "other.Unused"]);
+  }
+
+  // All extension constructors share exported names with exceptions. A later
+  // extension must hide the old export without changing an earlier capture.
+  for (const exceptionType of [false, true]) {
+    for (const constrained of [false, true]) {
+      for (const capture of [false, true]) {
+        for (const replacement of ["direct", "include", "rebind", "constrained-include"]) {
+          const cwd = path.join(root, "extension-shadow", `${exceptionType}-${constrained}-${capture}-${replacement}`);
+          const type = exceptionType ? "exn" : "t";
+          const extension = `${exceptionType ? "" : "type t = ..\n"}type ${type} += Used | Other`;
+          compile(cwd, "source.ml", exceptions);
+          compile(cwd, "ext.ml", extension);
+          const shadow = replacement === "direct" ? extension
+            : replacement === "include" ? "include Ext"
+            : replacement === "constrained-include" ? `include (Ext : sig ${exceptionType ? "exception Used" : "type t = .. type t += Used"} end)`
+            : `type ${exceptionType ? "exn" : "Ext.t"} += Used = Ext.Other`;
+          compile(cwd, "wrapper.ml",
+            `include ${constrained ? `(Source : ${signature})` : "Source"}\n` +
+            (capture ? "let saved () = raise Used\n" : "") + shadow);
+          compile(cwd, "bridge.ml", "module Alias = Wrapper");
+          const useType = exceptionType ? "exn" : replacement === "rebind" ? "Ext.t" : "Wrapper.t";
+          compile(cwd, "use.ml", (capture ? "let () = Wrapper.saved ()\n" : "") +
+            `let () = ignore (Wrapper.Used : ${useType}); ignore (Bridge.Alias.Used : ${useType})`);
+          analyze(cwd, ".", capture ? ["source.Used"] : [],
+            capture ? ["source.Unused"] : ["source.Used", "source.Unused"]);
+        }
+      }
+    }
   }
 
   // Dune's generated compilation-unit wrapper adds another alias hop.

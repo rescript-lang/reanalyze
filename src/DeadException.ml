@@ -10,7 +10,10 @@ type moduleNode = {
   mutable alias : CompilerPath.t option;
 }
 
-and exceptionBinding = Declaration of Location.t | Included of moduleNode
+and exceptionBinding =
+  | Declaration of Location.t
+  | Included of moduleNode
+  | OtherConstructor
 
 type compilationUnit = {
   cmtFilePath : string;
@@ -101,6 +104,8 @@ let getCompilationUnit ~cmtFilePath (infos : Cmt_format.cmt_infos) =
             let name = Ident.name id in
             if not (Hashtbl.mem node.exceptions name) then
               Hashtbl.add node.exceptions name (Declaration extension.ext_loc)
+          | Sig_typext (id, _, _, _) ->
+            Hashtbl.replace node.exceptions (Ident.name id) OtherConstructor
           | _ -> ())
     and collectModuleType node = function
       | Types.Mty_alias target -> node.alias <- Some target
@@ -140,7 +145,15 @@ let getCompilationUnit ~cmtFilePath (infos : Cmt_format.cmt_infos) =
                   (* Keep the source view: its aliases select the declaration's
                      owning unit using that unit's imports and lexical bindings. *)
                   bindException node id (Included included)
+                | Sig_typext (id, _, _, _) ->
+                  bindException node id OtherConstructor
                 | _ -> ())
+          | Tstr_typext extension ->
+            extension.tyext_constructors
+            |> List.iter (fun (constructor : Typedtree.extension_constructor) ->
+                (* Extension constructors share the exception export namespace.
+                   Keep earlier Ident bindings, but block lookup by this name. *)
+                bindException node constructor.ext_id OtherConstructor)
           | Tstr_exception _ -> (
             match Compat.tstrExceptionGet item.str_desc with
             | Some (id, loc) ->
@@ -274,6 +287,14 @@ and aliasTarget ~visited unit node =
     |> Option.map (fun (unit, target) -> (visited, unit, target))
 
 let rec resolveNode ~visited unit node fields =
+  let shadowed =
+    match fields with
+    | [name] -> (
+      match Hashtbl.find_opt node.exceptions name with
+      | Some OtherConstructor -> true
+      | _ -> false)
+    | _ -> false
+  in
   let direct =
     match fields with
     | [name] ->
@@ -288,6 +309,7 @@ let rec resolveNode ~visited unit node fields =
   in
   match direct with
   | Some _ -> direct
+  | None when shadowed -> None
   | None ->
     aliasTarget ~visited unit node
     |> Option.fold ~none:None ~some:(fun (visited, unit, target) ->
@@ -296,6 +318,7 @@ let rec resolveNode ~visited unit node fields =
 and resolveException ~visited unit name = function
   | Declaration loc -> PosHash.find_opt unit.declarations loc.Location.loc_start
   | Included source -> resolveNode ~visited unit source [name]
+  | OtherConstructor -> None
 
 let resolvePath unit path =
   match CompilerPath.flatten path with
