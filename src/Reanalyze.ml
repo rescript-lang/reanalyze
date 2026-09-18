@@ -57,7 +57,9 @@ let processCmtFiles ~root =
     else if isCmtFile absDir then [absDir]
     else []
   in
-  walkSubDirs "" |> List.iter (loadCmtFile ~cmtRoot:(Some root))
+  let cmtFilePaths = walkSubDirs "" in
+  cmtFilePaths |> List.iter Compat.registerCmtFile;
+  cmtFilePaths |> List.iter (loadCmtFile ~cmtRoot:(Some root))
 
 let runAnalysis ~root ~ppf =
   Log_.Color.setup ();
@@ -65,6 +67,7 @@ let runAnalysis ~root ~ppf =
 
   processCmtFiles ~root;
   if runConfig.dce then (
+    DeadValue.forceDelayedItems ();
     DeadException.forceDelayedItems ();
     DeadOptionalArgs.forceDelayedItems ();
     DeadCommon.reportDead ~checkOptionalArg:DeadOptionalArgs.check ppf;

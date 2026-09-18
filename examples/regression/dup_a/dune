@@ -1,0 +1,6 @@
+(library
+ (name dup_a)
+ (wrapped false)
+ (modes byte)
+ (modules Dup_sig Dup_a_impl Dup_a_use)
+ (flags :standard -w -27-32-34-37-39 -bin-annot))
