@@ -25,6 +25,7 @@ type item = {
   exceptionPath : CompilerPath.t;
   unit : compilationUnit;
   locFrom : Location.t;
+  locTo : Location.t;
 }
 
 let delayedItems = ref []
@@ -314,17 +315,21 @@ let forceDelayedItems () =
   let items = !delayedItems |> List.rev in
   delayedItems := [];
   items
-  |> List.iter (fun {exceptionPath; unit; locFrom} ->
+  |> List.iter (fun {exceptionPath; unit; locFrom; locTo = originalLoc} ->
       match resolvePath unit exceptionPath with
-      | None -> ()
-      | Some locTo ->
+      | Some locTo
+        when originalLoc.loc_ghost
+             || locTo.loc_start <> originalLoc.loc_start ->
         addValueReference ~addFileReference:true ~locFrom ~locTo;
         if !Config.analyzeTypes then
-          TypeReferences.add locTo.loc_start locFrom.loc_start)
+          TypeReferences.add locTo.loc_start locFrom.loc_start
+      | _ -> ())
 
 let markAsUsed ~(locFrom : Location.t) ~(locTo : Location.t) exceptionPath =
-  if locTo.loc_ghost then
-    !currentUnit
-    |> Option.iter (fun unit ->
-        delayedItems := {exceptionPath; unit; locFrom} :: !delayedItems)
-  else addValueReference ~addFileReference:true ~locFrom ~locTo
+  if not locTo.loc_ghost then
+    addValueReference ~addFileReference:true ~locFrom ~locTo;
+  (* A non-ghost location can belong to an include's signature constraint.
+     Retain the direct reference and also resolve the implementation declaration. *)
+  !currentUnit
+  |> Option.iter (fun unit ->
+      delayedItems := {exceptionPath; unit; locFrom; locTo} :: !delayedItems)
