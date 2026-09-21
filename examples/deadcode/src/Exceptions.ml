@@ -7,3 +7,7 @@ let catches () =
   | A -> ()
 
 let leaks () = raises ()
+
+exception Alias = A
+
+exception DeadAlias = A

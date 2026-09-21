@@ -66,4 +66,5 @@ let () =
   Escape_exports.run ();
   Unpacked_functor_use.run ();
   Unpacked_include.run ();
-  Unpacked_open.run ()
+  Unpacked_open.run ();
+  Exception_nested_use.run ()

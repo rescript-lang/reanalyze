@@ -1,0 +1,5 @@
+(library
+ (name exception_external)
+ (wrapped false)
+ (modules Outer)
+ (flags :standard -bin-annot))

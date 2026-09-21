@@ -29,6 +29,12 @@
   <-- line 9
   let leaks () = raises () [@@dead "+leaks"] 
 
+  Warning Dead Exception
+  File "Exceptions.ml", line 13, characters 0-23
+  DeadAlias is never raised or passed as value
+  <-- line 13
+  exception DeadAlias = A [@@dead "DeadAlias"] 
+
   Warning Dead Value
   File "Externals.ml", line 3, characters 0-57
   +dead_external is never used
@@ -151,4 +157,4 @@
   <-- line 4
     | LiveA [@dead "live_variant.LiveA"] 
   
-  Analysis reported 27 issues (Warning Dead Module:2, Warning Dead Type:5, Warning Dead Value:17, Warning Redundant Optional Argument:2, Warning Unused Argument:1)
+  Analysis reported 28 issues (Warning Dead Exception:1, Warning Dead Module:2, Warning Dead Type:5, Warning Dead Value:17, Warning Redundant Optional Argument:2, Warning Unused Argument:1)
