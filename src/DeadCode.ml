@@ -88,6 +88,10 @@ and moduleTypeRangesOfModuleType (moduleType : Typedtree.module_type) =
   | _ -> []
 
 let processCmt ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
+  let cmt_ident_resolutions =
+    Compat.resolveIdentOccurrences ~cmtFilePath cmt_infos
+  in
+  DeadValue.identResolutions := cmt_ident_resolutions;
   (match cmt_infos.cmt_annots with
   | Interface signature ->
     ProcessDeadAnnotations.signature signature;
@@ -113,11 +117,9 @@ let processCmt ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
     let cmt_value_dependencies =
       Compat.extractValueDependencies ~cmtFilePath cmt_infos
     in
-    let cmt_ident_resolutions =
-      Compat.resolveIdentOccurrences ~cmtFilePath cmt_infos
-    in
     DeadValue.processStructure ~doTypes:true ~doExternals
       ~cmt_value_dependencies ~cmt_ident_resolutions structure
   | _ -> ());
+  DeadValue.identResolutions := Compat.emptyIdentResolutions;
   DeadType.TypeDependencies.forceDelayedItems ();
   DeadType.TypeDependencies.clear ()

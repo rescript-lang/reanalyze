@@ -12,6 +12,7 @@ let () =
   Local_side_effects.start ();
   Ocaml_compiler_compat.run ();
   Shared_signature_use.run ();
+  ignore (IncludeSigMli.equal (IncludeSigMli.create "a") (IncludeSigMli.create "b"));
   Shared_signature_arg.run ();
   Shared_signature_arg.run_more ();
   Shared_signature_arg.run_even_more ();

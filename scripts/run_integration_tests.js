@@ -168,6 +168,16 @@ function runRegressionTests() {
   assertIncludes(output, "Live Value +Local_side_effects.+process");
   assertIncludes(output, "Live Value +Local_side_effects.+register");
 
+  // Values copied by a named module-type include in an .mli must resolve
+  // back to their implementations, even though they share one location.
+  assertIncludes(output, "Live Value +IncludeSigMli.+equal");
+  assertNotIncludes(output, "Dead Value +IncludeSigMli.+equal");
+  // Before 5.3 the conservative fallback keeps both included items live.
+  if (ocamlVersionAtLeast(5, 3)) {
+    assertIncludes(output, "Dead Value +IncludeSigMli.+hash");
+    assertNotIncludes(output, "Live Value +IncludeSigMli.+hash");
+  }
+
   // A call through one functor instance must never mark the used
   // implementation dead.
   assertIncludes(output, "Live Value +Shared_signature_used.Make.+f");

@@ -150,6 +150,14 @@ let pp_set_formatter_tag_functions =
     Format.pp_set_formatter_tag_functions [@warning "-3"]
 #endif
 
+let getSigValueDescription si = match si with
+#if OCAML_VERSION >= (4, 08, 0)
+  | Types.Sig_value(id, vd, _) -> (id, vd)
+#else
+  | Types.Sig_value(id, vd) -> (id, vd)
+#endif
+  | _ -> assert false
+
 let getSigValue si = match si with
 #if OCAML_VERSION >= (4, 08, 0)
   | Types.Sig_value(id, {Types.val_loc; val_kind; val_type}, _) ->
@@ -416,14 +424,17 @@ let candidateFilesForUnit ~currentCmtFile comp_unit =
     | Some paths -> paths
     | None -> []
   in
-  (* Fall back to sibling files, for callers that did not register. *)
+  (* Also resolve signatures included from the standard library, whose
+     annotations need not be inside the analysis root. *)
   let siblings =
-    [".cmt"; ".cmti"]
-    |> List.concat_map (fun ext ->
-           [
-             Filename.concat dir (comp_unit ^ ext);
-             Filename.concat dir (String.uncapitalize_ascii comp_unit ^ ext);
-           ])
+    [dir; Config.standard_library]
+    |> List.concat_map (fun dir ->
+           [".cmt"; ".cmti"]
+           |> List.concat_map (fun ext ->
+                  [
+                    Filename.concat dir (comp_unit ^ ext);
+                    Filename.concat dir (String.uncapitalize_ascii comp_unit ^ ext);
+                  ]))
   in
   (indexed @ siblings) |> List.filter Sys.file_exists |> List.sort_uniq compare
 
@@ -706,9 +717,19 @@ let loadUnitInfo ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
       Hashtbl.replace unitInfoCache cacheKey info;
       Some info)
 
-let locOfItemDeclaration = function
+(* A destructuring binding has one declaration per bound name, not one for
+   the whole pattern. *)
+let locOfBoundIdent uid (pat : Typedtree.pattern) =
+  match
+    Typedtree.pat_bound_idents_full pat
+    |> List.find_opt (fun (_id, _name, _type, uid') -> Shape.Uid.equal uid uid')
+  with
+  | Some (_id, {Location.loc; _}, _type, _uid) -> loc
+  | None -> pat.pat_loc
+
+let locOfItemDeclaration uid = function
   | Typedtree.Value {val_loc; _} -> Some val_loc
-  | Typedtree.Value_binding {vb_pat = {pat_loc; _}; _} -> Some pat_loc
+  | Typedtree.Value_binding {vb_pat; _} -> Some (locOfBoundIdent uid vb_pat)
   | _ -> None
 
 let declOfUid ~currentCmtFile ~imports
@@ -725,7 +746,7 @@ let declOfUid ~currentCmtFile ~imports
 
 let locOfUid ~currentCmtFile ~imports ~local uid =
   match declOfUid ~currentCmtFile ~imports ~local uid with
-  | Some decl -> locOfItemDeclaration decl
+  | Some decl -> locOfItemDeclaration uid decl
   | None -> None
 
 let moduleBindingOfUid ~currentCmtFile ~imports ~local uid =
@@ -801,15 +822,17 @@ let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
       | Some paths -> paths
       | None -> []
     in
-    (* Fall back to sibling files, for callers that did not register. *)
+    (* Include the standard library even when it is outside the analysis root. *)
     let dir = Filename.dirname cmtFilePath in
     let siblings =
-      [".cmt"; ".cmti"]
-      |> List.concat_map (fun ext ->
-             [
-               Filename.concat dir (comp_unit ^ ext);
-               Filename.concat dir (String.uncapitalize_ascii comp_unit ^ ext);
-             ])
+      [dir; Config.standard_library]
+      |> List.concat_map (fun dir ->
+             [".cmt"; ".cmti"]
+             |> List.concat_map (fun ext ->
+                    [
+                      Filename.concat dir (comp_unit ^ ext);
+                      Filename.concat dir (String.uncapitalize_ascii comp_unit ^ ext);
+                    ]))
     in
     indexed @ siblings
     |> List.filter (fun path -> path <> cmtFilePath && Sys.file_exists path)
@@ -835,21 +858,16 @@ let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
       Hashtbl.replace loadedUnits comp_unit decls;
       decls
   in
-  let loc_of_value_decl = function
-    | Typedtree.Value {val_loc; _} -> Some val_loc
-    | Typedtree.Value_binding {vb_pat = {pat_loc; _}; _} -> Some pat_loc
-    | _ -> None
-  in
   let locs_of_uid uid =
     match UidTbl.find_opt own_uid_to_decl uid with
-    | Some item_decl -> Option.to_list (loc_of_value_decl item_decl)
+    | Some item_decl -> Option.to_list (locOfItemDeclaration uid item_decl)
     | None -> (
       match uid with
       | Shape.Uid.Item {comp_unit; _} ->
         decls_of_unit comp_unit
         |> List.filter_map (fun decls ->
                match UidTbl.find_opt decls uid with
-               | Some item_decl -> loc_of_value_decl item_decl
+               | Some item_decl -> locOfItemDeclaration uid item_decl
                | None -> None)
         |> List.sort_uniq compare
       | _ -> [])
@@ -906,6 +924,9 @@ let noHeadVisited : headVisited =
 type identResolutions = {
   context : string;
   valueKey : Types.value_description -> definitionKey;
+  valueLoc : Types.value_description -> Location.t;
+      (** declaration location of an item copied by a signature include,
+          whose [val_loc] points at the include instead of the value *)
   valueImpl : Location.t -> string -> Location.t option;
       (** occurrence location, last name -> implementation location *)
   moduleShape : Location.t -> string -> moduleShape option;
@@ -950,6 +971,7 @@ let emptyIdentResolutions =
   {
     context = "";
     valueKey = (fun vd -> (vd.Types.val_loc.loc_start, ""));
+    valueLoc = (fun vd -> vd.Types.val_loc);
     valueImpl = (fun _ _ -> None);
     moduleShape = (fun _ _ -> None);
     projValue = (fun _ _ -> None);
@@ -1329,6 +1351,11 @@ let rec makeResolver ~cmtFilePath ~context
         | None -> context
       in
       (vd.val_loc.loc_start, context));
+    valueLoc =
+      (fun vd ->
+        match locOfUid vd.Types.val_uid with
+        | Some loc when not loc.loc_ghost -> loc
+        | _ -> vd.val_loc);
     valueImpl =
       (fun loc name ->
         match Hashtbl.find_opt values (key loc name) with
