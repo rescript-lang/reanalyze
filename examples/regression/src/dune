@@ -27,6 +27,8 @@
   Local_side_effects
   Main
   Nested_module_type
+  Nested_sig_type
+  Nested_sig_type_use
   Nested_arguments
   Nested_arguments_packed
   Ocaml_compiler_compat
@@ -41,6 +43,10 @@
   Shared_signature_unused
   Shared_signature_use
   Shared_signature_used
+  Type_reexport
+  Type_reexport_alias
+  Type_reexport_orig
+  Type_reexport_use
   Unpacked_functor
   Unpacked_functor_use
   Unpacked_include

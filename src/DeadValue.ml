@@ -1805,7 +1805,7 @@ let rec processSignatureItem ~doTypes ~doValues ~moduleLoc ~path
   | Sig_type _ when doTypes ->
     let id, t = si |> Compat.getSigType in
     if !Config.analyzeTypes then
-      DeadType.addDeclaration ~typeId:id ~typeKind:t.type_kind
+      DeadType.addDeclaration ~path ~typeId:id ~typeKind:t.type_kind ()
   | Sig_value _ when doValues ->
     let id, loc, kind, valType = si |> Compat.getSigValue in
     let _, vd = si |> Compat.getSigValueDescription in
@@ -2512,8 +2512,18 @@ let traverseStructure ~doTypes ~doExternals =
       if !Config.analyzeTypes then
         typeDeclarations
         |> List.iter (fun (typeDeclaration : Typedtree.type_declaration) ->
-               DeadType.addDeclaration ~typeId:typeDeclaration.typ_id
-                 ~typeKind:typeDeclaration.typ_type.type_kind)
+               let manifest =
+                 match typeDeclaration.typ_type.type_manifest with
+                 | Some manifestType -> (
+                   match Compat.get_desc manifestType with
+                   | Tconstr (path, _, _) ->
+                     !identResolutions.typeDeclOfPath path
+                   | _ -> None)
+                 | None -> None
+               in
+               DeadType.addDeclaration ?manifest
+                 ~typeId:typeDeclaration.typ_id
+                 ~typeKind:typeDeclaration.typ_type.type_kind ())
     | Tstr_include {incl_mod; incl_type} -> (
       registerUnpackedExports incl_type incl_mod;
       (* [include M] with [M] a functor parameter: the included identifiers

@@ -3,6 +3,19 @@ let currentModule = ref ""
 let currentModuleName = ref ("" |> Name.create)
 let runConfig = RunConfig.runConfig
 
+(* Relative source paths found outside the current directory, with the
+   directory they are relative to. *)
+let sourceDirs : (string, string) Hashtbl.t = Hashtbl.create 64
+
+let registerSourceDir fname dir =
+  if not (Hashtbl.mem sourceDirs fname) then Hashtbl.add sourceDirs fname dir
+
+(* A path to read the source of a location from. *)
+let sourcePath fname =
+  match Hashtbl.find_opt sourceDirs fname with
+  | Some dir when Filename.is_relative fname -> Filename.concat dir fname
+  | _ -> fname
+
 (* Location printer: `filename:line: ' *)
 let posToString (pos : Lexing.position) =
   let file = pos.Lexing.pos_fname in

@@ -84,7 +84,10 @@ module Loc = struct
           (let open Filename in
           match is_implicit pos.pos_fname with
           | _ when !Common.Cli.ci -> basename pos.pos_fname
-          | true -> concat (Sys.getcwd ()) pos.pos_fname
+          | true -> (
+            match Common.sourcePath pos.pos_fname with
+            | path when is_implicit path -> concat (Sys.getcwd ()) path
+            | path -> path)
           | false -> pos.pos_fname);
       }
     in
