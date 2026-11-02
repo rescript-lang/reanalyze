@@ -599,7 +599,7 @@ module WriteDeadAnnotations = struct
       close_out_noerr channel)
 
   let onDeadDecl ~ppf decl =
-    let fileName = decl.pos.pos_fname in
+    let fileName = Common.sourcePath decl.pos.pos_fname in
     if Sys.file_exists fileName then (
       if fileName <> !currentFile then (
         writeFile !currentFile !currentFileLines;

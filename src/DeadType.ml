@@ -83,12 +83,48 @@ let addTypeDependenciesInnerModule ~pathToType ~loc ~typeLabelName =
       extendTypeDependencies loc2 loc
   | None -> TypeLabels.add path loc
 
-let addDeclaration ~(typeId : Ident.t)
-    ~(typeKind : ('a, 'b) Compat.type_kind) =
+(* A re-export [type t = M.t = A | B] declares the same constructors and
+   labels as [M.t]: constructing or reading through either name uses both. *)
+let addManifestDependencies ~(typeKind : ('a, 'b) Compat.type_kind)
+    ~(original : Types.type_declaration) =
+  let link pairs originalPairs =
+    pairs
+    |> List.iter (fun (name, loc) ->
+           match List.assoc_opt name originalPairs with
+           | Some originalLoc ->
+             extendTypeDependencies loc originalLoc;
+             extendTypeDependencies originalLoc loc
+           | None -> ())
+  in
+  let labels = function
+    | Types.Type_record (l, _) ->
+      l |> List.map (fun {Types.ld_id; ld_loc} -> (Ident.name ld_id, ld_loc))
+    | _ -> []
+  in
+  let constructors (kind : ('a, 'b) Compat.type_kind) =
+    match kind with
+    | Type_variant _ ->
+      Compat.getTypeVariant kind
+      |> List.map (fun {Types.cd_id; cd_loc} -> (Ident.name cd_id, cd_loc))
+    | _ -> []
+  in
+  link (labels typeKind) (labels original.type_kind);
+  link (constructors typeKind) (constructors original.type_kind)
+
+(* [path] is the path of the enclosing module, when it is not the current
+   one of the traversal: a submodule of a signature. *)
+let addDeclaration ?manifest ?path ~(typeId : Ident.t)
+    ~(typeKind : ('a, 'b) Compat.type_kind) () =
+  (match manifest with
+  | Some original -> addManifestDependencies ~typeKind ~original
+  | None -> ());
   let currentModulePath = ModulePath.getCurrent () in
   let pathToType =
     (typeId |> Ident.name |> Name.create)
-    :: (currentModulePath.path @ [!Common.currentModuleName])
+    ::
+    (match path with
+    | Some path -> path
+    | None -> currentModulePath.path @ [!Common.currentModuleName])
   in
   let processTypeLabel ?(posAdjustment = Nothing) typeLabelName ~declKind
       ~(loc : Location.t) =

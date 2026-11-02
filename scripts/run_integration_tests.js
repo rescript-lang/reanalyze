@@ -178,6 +178,49 @@ function runRegressionTests() {
     assertNotIncludes(output, "Live Value +IncludeSigMli.+hash");
   }
 
+  // A type re-export (type t = M.t = A | B) shares its constructors and
+  // labels with the original: constructing or reading through either name
+  // keeps both declarations live, also when M is a local module alias. The
+  // original is found through shapes.
+  if (ocamlVersionAtLeast(5, 3)) {
+    for (const unit of ["Type_reexport", "Type_reexport_orig"]) {
+      for (const name of [
+        "change.Built_through_reexport", "change.Built_directly",
+      ]) {
+        assertIncludes(output, `Live VariantCase +${unit}.${name}:`);
+        assertNotIncludes(output, `Dead VariantCase +${unit}.${name}:`);
+      }
+    }
+    for (const unit of ["Type_reexport", "Type_reexport_orig", "Type_reexport_alias"]) {
+      for (const name of [
+        "job.read_through_original", "job.read_through_reexport",
+        "job.read_through_alias",
+      ]) {
+        assertIncludes(output, `Live RecordLabel +${unit}.${name}:`);
+        assertNotIncludes(output, `Dead RecordLabel +${unit}.${name}:`);
+      }
+      assertIncludes(output, `Dead RecordLabel +${unit}.job.never_read:`);
+    }
+    for (const unit of ["Type_reexport", "Type_reexport_orig"]) {
+      assertIncludes(output, `Dead VariantCase +${unit}.change.Never_built:`);
+    }
+  }
+
+  // Types of a submodule of an interface keep their module path, so they
+  // are matched with their implementation.
+  for (const prefix of ["", "+"]) {
+    for (const name of ["setting.Auto", "setting.Never"]) {
+      assertIncludes(output, `Live VariantCase ${prefix}Nested_sig_type.Color.${name}:`);
+      assertNotIncludes(output, `Dead VariantCase ${prefix}Nested_sig_type.Color.${name}:`);
+    }
+    assertIncludes(output, `Live RecordLabel ${prefix}Nested_sig_type.Color.styles.error:`);
+    assertNotIncludes(output, `Dead RecordLabel ${prefix}Nested_sig_type.Color.styles.error:`);
+    assertIncludes(output,
+      `Dead VariantCase ${prefix}Nested_sig_type.Color.setting.Unused_setting:`);
+    assertIncludes(output,
+      `Dead RecordLabel ${prefix}Nested_sig_type.Color.styles.unused_style:`);
+  }
+
   // A call through one functor instance must never mark the used
   // implementation dead.
   assertIncludes(output, "Live Value +Shared_signature_used.Make.+f");
@@ -1275,6 +1318,7 @@ function main() {
     runRegressionTests();
     runExceptionAliasMissingProviderTest();
     require("./test_exception_identity")(reanalyzeFile);
+    require("./test_build_trees")(reanalyzeFile);
     runDuplicateLayoutTest();
     runByteNativeDuplicateTest();
     runDuplicateContextTest();
