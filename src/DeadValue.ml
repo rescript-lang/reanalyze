@@ -42,8 +42,19 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
       when (not loc_ghost) && not vb.vb_loc.loc_ghost ->
       let name = Ident.name id |> Name.create ~isInterface:false in
       let optionalArgs =
-        vb.vb_expr.exp_type |> DeadOptionalArgs.fromTypeExpr
-        |> OptionalArgs.fromList
+        (* Only a function defined here owns its optional parameters. An
+           alias or partial application ([let f = Lib.g], [let f = g ~a]) has
+           them in its type, but cannot drop them. *)
+        match vb.vb_expr.exp_desc with
+        | Texp_function _ ->
+          vb.vb_expr.exp_type |> DeadOptionalArgs.fromTypeExpr
+          |> OptionalArgs.fromList
+        | (Texp_ident (_, _, vd) | Texp_apply ({exp_desc = Texp_ident (_, _, vd)}, _))
+          when DeadOptionalArgs.hasOptionalArgs vb.vb_expr.exp_type ->
+          DeadOptionalArgs.addAlias ~posFrom:loc_start
+            ~posTo:vd.Types.val_loc.loc_start;
+          OptionalArgs.empty
+        | _ -> OptionalArgs.empty
       in
       let exists =
         match PosHash.find_opt decls loc_start with
@@ -293,6 +304,13 @@ let escapedRanges : definitionRange list ref = ref []
    a packed module used only through direct unpacks is followed precisely,
    any other use makes it escape. *)
 let unpackOperands = ref PosSet.empty
+
+(* Functions passed as arguments of an application with their optional
+   parameters intact, e.g. [find_component Env.lookup] where [find_component]
+   takes [(lookup : ?loc:_ -> _)] and calls [lookup ~loc]: the receiver may
+   supply them. Keyed by the argument's location. *)
+let functionArguments : (Lexing.position * Lexing.position, unit) Hashtbl.t =
+  Hashtbl.create 256
 let usedOutsideUnpack = ref DefinitionSet.empty
 
 let inRanges ((pos : Lexing.position), context) ranges =
@@ -1329,6 +1347,17 @@ let registerUnpackedExports signature moduleExpr =
 
 let rec collectExpr super self (e : Typedtree.expression) =
   let locFrom = e.exp_loc in
+  (match e.exp_desc with
+  | Texp_apply (_, args) ->
+    args
+    |> List.iter (fun (_, arg) ->
+           match Compat.applyArgToOption arg with
+           | Some ({Typedtree.exp_desc = Texp_ident _; exp_loc} as arg)
+             when DeadOptionalArgs.hasOptionalArgs arg.exp_type ->
+             Hashtbl.replace functionArguments
+               (exp_loc.loc_start, exp_loc.loc_end) ()
+           | _ -> ())
+  | _ -> ());
   (* [let module F (M : S) = ... in]: key the functor by its binding. On
      OCaml >= 5.5 this is a [Texp_struct_item] holding a [Tstr_module], which
      the structure item handler covers. *)
@@ -1400,7 +1429,15 @@ let rec collectExpr super self (e : Typedtree.expression) =
           (Location.none.loc_start |> posToString)
           (locTo.loc_start |> posToString);
       ValueReferences.add locTo.loc_start Location.none.loc_start)
-    else addValueReferenceOrRedirect ~locFrom ~locTo ~path:_path
+    else addValueReferenceOrRedirect ~locFrom ~locTo ~path:_path;
+    if
+      Hashtbl.mem functionArguments (e.exp_loc.loc_start, e.exp_loc.loc_end)
+      && DeadOptionalArgs.hasOptionalArgs e.exp_type
+    then (
+      let names = DeadOptionalArgs.fromTypeExpr e.exp_type in
+      let locToImpl = findResolution ~identLoc:e.exp_loc ~path:_path in
+      (names, names)
+      |> DeadOptionalArgs.addReferences ~locFrom ~locTo ?locToImpl ~path:_path)
   | Texp_apply
       ( {
           exp_desc =

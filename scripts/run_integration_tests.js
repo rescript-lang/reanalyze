@@ -221,6 +221,22 @@ function runRegressionTests() {
       `Dead RecordLabel ${prefix}Nested_sig_type.Color.styles.unused_style:`);
   }
 
+  // Aliases and partial applications of functions with optional parameters
+  // do not own them; functions defined here still do.
+  assertNotIncludes(output, "optional argument pp_sep of function +print_list");
+  assertNotIncludes(output, "optional argument pp_sep of function +print_ints");
+  assertIncludes(output,
+    "optional argument unused_opt of function +local_function is never used");
+  assertNotIncludes(output, "optional argument through_alias of function +base ");
+  assertIncludes(output,
+    "optional argument never_through_alias of function +base_never is never used");
+  // A function passed as an argument keeps its optional parameters for the
+  // callee to supply; one only called without them is still reported.
+  assertNotIncludes(output, "optional argument loc of function +local_lookup");
+  assertNotIncludes(output, "optional argument loc of function +lookup ");
+  assertIncludes(output,
+    "optional argument loc of function +never_passed is never used");
+
   // A call through one functor instance must never mark the used
   // implementation dead.
   assertIncludes(output, "Live Value +Shared_signature_used.Make.+f");

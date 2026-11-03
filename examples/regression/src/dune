@@ -29,6 +29,9 @@
   Nested_module_type
   Nested_sig_type
   Nested_sig_type_use
+  Optional_arg_alias
+  Optional_arg_passed
+  Optional_arg_passed_env
   Nested_arguments
   Nested_arguments_packed
   Ocaml_compiler_compat

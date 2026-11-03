@@ -81,6 +81,24 @@ let addCallToImplementation ~(posTo : Lexing.position) (argNames, argNamesMaybe)
 (* Once all declarations are known, calls whose target is not a declaration
    but have a shape-resolved implementation are attributed to it. Must run
    before [forwardDelayedItems] and [forceDelayedItems]. *)
+(* Bindings that alias or partially apply another function ([let g = f],
+   [let g = f a]) do not own optional parameters: calls through them are
+   calls of the function they stand for. *)
+let aliasTargets : Lexing.position PosHash.t = PosHash.create 16
+
+let addAlias ~(posFrom : Lexing.position) ~(posTo : Lexing.position) =
+  if posFrom <> posTo then (
+    if !Common.Cli.debug then
+      Log_.item "OptionalArgs.addAlias %s --> %s@." (posFrom |> posToString)
+        (posTo |> posToString);
+    PosHash.replace aliasTargets posFrom posTo)
+
+let rec resolveAlias ?(seen = PosSet.empty) pos =
+  match PosHash.find_opt aliasTargets pos with
+  | Some target when not (PosSet.mem pos seen) ->
+    resolveAlias ~seen:(PosSet.add pos seen) target
+  | _ -> pos
+
 let settleDelayedItems () =
   delayedItems :=
     !delayedItems
@@ -116,7 +134,10 @@ let forwardDelayedItems dependencies =
         |> List.map (fun posTo -> {item with posTo}))
 
 let forceDelayedItems () =
-  let items = !delayedItems |> List.rev in
+  let items =
+    !delayedItems |> List.rev
+    |> List.map (fun item -> {item with posTo = resolveAlias item.posTo})
+  in
   delayedItems := [];
   items
   |> List.iter (fun {posTo; argNames; argNamesMaybe} ->
