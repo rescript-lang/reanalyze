@@ -74,7 +74,8 @@ module OptionalArgs = struct
     mutable alwaysUsed : StringSet.t;
   }
 
-  let empty =
+  (* A fresh value each time: [call] and [combine] mutate it. *)
+  let empty () =
     {unused = StringSet.empty; alwaysUsed = StringSet.empty; count = 0}
 
   let fromList l =
@@ -487,7 +488,7 @@ let addDeclaration_ ?posEnd ?posStart ~declKind ~path ~(loc : Location.t)
     PosHash.replace decls pos decl)
 
 let addValueDeclaration ?(isToplevel = true) ~(loc : Location.t) ~moduleLoc
-    ?(optionalArgs = OptionalArgs.empty) ~path ~sideEffects name =
+    ?(optionalArgs = OptionalArgs.empty ()) ~path ~sideEffects name =
   name
   |> addDeclaration_
        ~declKind:(Value {isToplevel; optionalArgs; sideEffects})

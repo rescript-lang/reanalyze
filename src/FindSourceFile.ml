@@ -55,33 +55,47 @@ let sourceDir ?cmtRoot ?cmtFilePath fname =
 (* Declarations are identified by their source positions. Two build trees
    holding different files under one relative name (e.g. a generated file
    copied from per-platform sources) cannot be told apart: their declarations
-   at the same positions are merged. Warn once per file. *)
-let differingSources = Hashtbl.create 4
+   at the same positions are merged. Each copy is compared with the first one
+   seen, including the copy in a build tree when the file is also found from
+   the current directory, and a difference is reported once per file. *)
+let firstCopies : (string, string) Hashtbl.t = Hashtbl.create 256
+let comparedCopies : (string, unit) Hashtbl.t = Hashtbl.create 256
+let differingSources : (string, unit) Hashtbl.t = Hashtbl.create 4
 
-let checkSameSource fname dir =
-  match Hashtbl.find_opt Common.sourceDirs fname with
-  | Some previous
-    when previous <> dir && not (Hashtbl.mem differingSources fname) ->
-    let digest dir =
-      try Some (Digest.file (Filename.concat dir fname)) with Sys_error _ -> None
-    in
-    if digest previous <> digest dir then (
+let checkSameSource fname path =
+  match Hashtbl.find_opt firstCopies fname with
+  | None -> Hashtbl.add firstCopies fname path
+  | Some first
+    when first <> path
+         && (not (Hashtbl.mem comparedCopies path))
+         && not (Hashtbl.mem differingSources fname) ->
+    Hashtbl.add comparedCopies path ();
+    let digest path = try Some (Digest.file path) with Sys_error _ -> None in
+    if digest first <> digest path then (
       Hashtbl.add differingSources fname ();
       Printf.eprintf
         "Warning: %s differs between %s and %s. Declarations at the same \
          positions are merged; give the variants distinct source names (e.g. \
          with dune's copy#).\n\
          %!"
-        fname previous dir)
-  | _ -> ()
+        fname first path)
+  | Some _ -> ()
 
 let sourceExists ?cmtRoot ?cmtFilePath fname =
   match sourceDir ?cmtRoot ?cmtFilePath fname with
   | Some (Some dir) ->
-    checkSameSource fname dir;
+    checkSameSource fname (concatRelative dir fname);
     Common.registerSourceDir fname dir;
     true
-  | Some None -> true
+  | Some None ->
+    checkSameSource fname (nativeFilePath fname);
+    (match cmtFilePath with
+    | Some cmtFilePath when Filename.is_relative fname -> (
+      match ancestorSourceDir ~cmtFilePath fname with
+      | Some dir -> checkSameSource fname (Filename.concat dir fname)
+      | None -> ())
+    | _ -> ());
+    true
   | None -> false
 
 let rec interface ?cmtRoot ?cmtFilePath items =

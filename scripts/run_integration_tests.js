@@ -245,6 +245,14 @@ function runRegressionTests() {
   // optional parameters.
   assertIncludes(output, "optional argument x of function +let_in_fun is never used");
   assertIncludes(output, "optional argument x of function +if_fun is never used");
+  // A binding is an alias only for the optional parameters the applied
+  // function leaves (including those a partial application skips), not for
+  // ones that merely share a name.
+  assertIncludes(output, "optional argument x of function +wrap is never used");
+  assertNotIncludes(output, "optional argument x of function +skipped ");
+  // A function passed to a parameter of a named function type keeps its
+  // optional parameters.
+  assertNotIncludes(output, "optional argument loc of function +named_lookup");
   // Passing a function to a parameter of type 'a (ignore, ref) supplies
   // nothing.
   assertIncludes(output, "optional argument x of function +ignored is never used");

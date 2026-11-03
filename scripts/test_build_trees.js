@@ -100,5 +100,19 @@ module.exports = function testBuildTrees(reanalyzeFile) {
     expect("Dead VariantCase +lib.mode.Playground_through_reexport:", false);
   }
   expect("Dead VariantCase +lib.mode.Never_built:");
+
+  // A file found from the current directory is still compared with each
+  // tree's copy: here it matches the native copy but not the browser one.
+  write(path.join(root, "src/platform.ml"), platforms.native);
+  const rerun = child_process.spawnSync(reanalyzeFile, [
+    "-ci", "-dce-cmt", scan,
+  ], { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  if (rerun.status !== 0) throw new Error(`build trees: reanalyze failed\n${rerun.stderr}`);
+  const cwdWarnings = rerun.stderr.split("\n").filter((l) =>
+    l.startsWith("Warning: src/platform.ml differs between src/platform.ml and ")
+    && l.includes(path.join("browser", "src", "platform.ml")));
+  if (cwdWarnings.length !== 1) {
+    throw new Error(`build trees: expected one warning for the current directory copy\n${rerun.stderr}`);
+  }
   fs.rmSync(root, { recursive: true, force: true });
 };

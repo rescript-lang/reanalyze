@@ -18,6 +18,30 @@ let checkAnyValueBindingWithNoSideEffects
 (* See [registerPackedModule], defined once its helpers are. *)
 let registerPackedModuleRef = ref (fun (_ : Typedtree.value_binding) -> ())
 
+(* The optional parameters of the declared type [t] that remain after the
+   application [args]: those the application skips, which the result takes
+   (a skipped one filled with [None] is an argument), then those of the
+   arrows after the last argument. A result that is a type variable, as in
+   [let g = wrap f] with [wrap : ?x:_ -> 'a -> 'a], has none of its own: its
+   optional parameters come from the argument, not from the applied
+   function. *)
+let residualLabels (t : Types.type_expr) args =
+  let rec go (t : Types.type_expr) args =
+    match (Compat.get_desc t, args) with
+    | (Tlink t | Tpoly (t, [])), _ -> go t args
+    | Tsubst _, _ -> go (Compat.getTSubst (Compat.get_desc t)) args
+    | _, [] -> DeadOptionalArgs.fromTypeExpr t
+    | Tarrow (label, _, rest, _), (_, arg) :: args ->
+      let skipped =
+        match (label, Compat.applyArgToOption arg) with
+        | Optional s, None -> [s]
+        | _ -> []
+      in
+      skipped @ go rest args
+    | _ -> []
+  in
+  go t args
+
 let collectValueBinding super self (vb : Typedtree.value_binding) =
   let oldCurrentBindings = !Current.bindings in
   let oldLastBinding = !Current.lastBinding in
@@ -45,24 +69,28 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
         (* An alias or application ([let f = Lib.g], [let f = g ~a],
            [let f = List.hd fs]) has optional parameters in its type, but they
            belong to another function and cannot be dropped here. A binding
-           whose labels all come from the applied function stands for it:
-           calls through it are calls of that function. Any other binding
-           defines a function and owns its optional parameters. *)
+           whose optional parameters are those the applied function has left
+           stands for it: calls through it are calls of that function. Any
+           other binding defines a function and owns its optional parameters. *)
         let own () =
           vb.vb_expr.exp_type |> DeadOptionalArgs.fromTypeExpr
           |> OptionalArgs.fromList
         in
-        match vb.vb_expr.exp_desc with
-        | Texp_ident (_, _, vd) | Texp_apply ({exp_desc = Texp_ident (_, _, vd)}, _)
-          ->
+        let alias (vd : Types.value_description) args =
           let labels = DeadOptionalArgs.fromTypeExpr vb.vb_expr.exp_type in
-          let headLabels = DeadOptionalArgs.fromTypeExpr vd.Types.val_type in
-          if labels <> [] && List.for_all (fun l -> List.mem l headLabels) labels
+          if
+            labels <> []
+            && List.sort compare labels
+               = List.sort compare (residualLabels vd.val_type args)
           then
             DeadOptionalArgs.addAlias ~posFrom:loc_start
-              ~posTo:vd.Types.val_loc.loc_start;
-          OptionalArgs.empty
-        | Texp_apply _ -> OptionalArgs.empty
+              ~posTo:vd.val_loc.loc_start;
+          OptionalArgs.empty ()
+        in
+        match vb.vb_expr.exp_desc with
+        | Texp_ident (_, _, vd) -> alias vd []
+        | Texp_apply ({exp_desc = Texp_ident (_, _, vd)}, args) -> alias vd args
+        | Texp_apply _ -> OptionalArgs.empty ()
         | _ -> own ()
       in
       let exists =
@@ -1358,8 +1386,14 @@ let rec collectExpr super self (e : Typedtree.expression) =
   let locFrom = e.exp_loc in
   (* A function passed to a parameter that the callee declares as a function
      with optional parameters, e.g. [find_component (lookup : ?loc:_ -> _)],
-     may receive them. A parameter of any other type (['a] of [ignore] or
-     [ref]) does not say so. Arguments follow the callee's parameter order. *)
+     may receive them. So may one passed to a parameter of a named type
+     ([find (f : lookup)] with [type lookup = ?loc:int -> int]): the argument
+     unified with it, so the name stands for a function type (only an
+     identity abbreviation [type 'a id = 'a] would be credited wrongly). A
+     type variable (['a] of [ignore] or [ref]) does not say so. Arguments
+     follow the callee's parameter order. The argument is typed with the
+     parameter's type ([lookup]), so its optional parameters are read from
+     its declaration. *)
   (match e.exp_desc with
   | Texp_apply ({exp_desc = Texp_ident (_, _, {Types.val_type})}, args) ->
     (* An annotated parameter ([(lookup : ?loc:_ -> _)]) can have a
@@ -1368,6 +1402,11 @@ let rec collectExpr super self (e : Typedtree.expression) =
       match Compat.get_desc t with
       | Tpoly (t, []) | Tlink t -> unpoly t
       | _ -> t
+    in
+    let isNamedType (t : Types.type_expr) =
+      match Compat.get_desc t with
+      | Tconstr _ -> true
+      | _ -> false
     in
     let rec parameters (t : Types.type_expr) =
       match Compat.get_desc t with
@@ -1380,9 +1419,10 @@ let rec collectExpr super self (e : Typedtree.expression) =
       match (args, parameters) with
       | (_, arg) :: args, parameter :: parameters ->
         (match Compat.applyArgToOption arg with
-        | Some ({Typedtree.exp_desc = Texp_ident _; exp_loc} as arg)
-          when DeadOptionalArgs.hasOptionalArgs arg.exp_type
-               && DeadOptionalArgs.hasOptionalArgs parameter ->
+        | Some {Typedtree.exp_desc = Texp_ident (_, _, vd); exp_loc}
+          when DeadOptionalArgs.hasOptionalArgs vd.val_type
+               && (DeadOptionalArgs.hasOptionalArgs parameter
+                  || isNamedType parameter) ->
           Hashtbl.replace functionArguments
             (exp_loc.loc_start, exp_loc.loc_end) ()
         | _ -> ());
@@ -1465,9 +1505,8 @@ let rec collectExpr super self (e : Typedtree.expression) =
     else addValueReferenceOrRedirect ~locFrom ~locTo ~path:_path;
     if
       Hashtbl.mem functionArguments (e.exp_loc.loc_start, e.exp_loc.loc_end)
-      && DeadOptionalArgs.hasOptionalArgs e.exp_type
     then (
-      let names = DeadOptionalArgs.fromTypeExpr e.exp_type in
+      let names = DeadOptionalArgs.fromTypeExpr vd.val_type in
       let locToImpl = findResolution ~identLoc:e.exp_loc ~path:_path in
       (names, names)
       |> DeadOptionalArgs.addReferences ~locFrom ~locTo ?locToImpl ~path:_path)
@@ -2705,7 +2744,7 @@ let processValueDependency
            calls through it are calls of the aliased function. *)
         DeadOptionalArgs.addAlias ~posFrom ~posTo;
         match fromDecl with
-        | {declKind = Value r} -> r.optionalArgs <- OptionalArgs.empty
+        | {declKind = Value r} -> r.optionalArgs <- OptionalArgs.empty ()
         | _ -> ())
       else DeadOptionalArgs.addFunctionReference ~locFrom ~locTo
 

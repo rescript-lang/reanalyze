@@ -500,15 +500,14 @@ let compilationContext ~cmtFilePath infos =
       match Hashtbl.find_opt metadata path with
       | Some entry -> entry
       | None ->
+        (* Parsed once, shared with the analysis itself. *)
         let entry =
-          try
-            let info = Cmt_format.read_cmt path in
-            Some
-              ( sourceContext info,
-                info.cmt_modname,
-                info.cmt_imports,
-                interfaceDigest info )
-          with _ -> None
+          readCmt path
+          |> Option.map (fun (info : Cmt_format.cmt_infos) ->
+                 ( sourceContext info,
+                   info.cmt_modname,
+                   info.cmt_imports,
+                   interfaceDigest info ))
         in
         Hashtbl.add metadata path entry;
         entry

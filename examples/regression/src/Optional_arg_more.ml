@@ -25,7 +25,31 @@ let ignored ?x () = match x with Some x -> x | None -> 0
 let in_ref ?y () = match y with Some y -> y | None -> 0
 let stored = ref in_ref
 
+(* A binding stands for the applied function only with the optional
+   parameters that function leaves. [wrapped_g]'s [?x] comes from [wrapped]
+   through [wrap]'s ['a], not from [wrap]'s own [?x], which nobody supplies. *)
+let wrap ?x f =
+  ignore x;
+  f
+
+let wrapped ?x () = match x with Some x -> x | None -> 0
+let wrapped_g = wrap wrapped
+
+(* A partial application leaves the optional parameters it skips. *)
+let skipped ?x ~a () = match x with Some x -> x + a | None -> a
+let skipped_partial = skipped ~a:1
+
+(* A function passed to a parameter of a named function type may receive
+   its optional parameters. *)
+type lookup = ?loc:int -> int -> int
+
+let find (f : lookup) = f ~loc:1 2
+let named_lookup ?loc x = match loc with Some l -> l + x | None -> x
+
 let () =
+  print_int (wrapped_g ~x:1 ());
+  print_int (skipped_partial ~x:2 ());
+  print_int (find named_lookup);
   print_int (sig_alias ~x:1 ());
   print_int (let_in_fun ());
   print_int (if_fun ());
