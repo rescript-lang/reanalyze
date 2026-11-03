@@ -3,9 +3,10 @@
 - Fix DCE false positives on case-insensitive file systems (macOS, Windows): a unit's `.cmt` was found under two spellings and treated as ambiguous, so exceptions raised across modules of a dune wrapped library were reported as never raised.
 - Fix DCE false positives for type re-exports `type t = M.t = A | B` (OCaml 5.3+): constructors and labels are shared with the original type, also when `M` is a local module alias.
 - Fix DCE false positives for types declared in a submodule of an interface (`module M : sig type t = A end`), which were not matched with their implementation.
-- Fix false positive "optional argument is never used" reports on aliases and partial applications of functions with optional parameters (e.g. `let assert_equal = OUnit.assert_equal`): only a function defined in the analyzed code owns its optional parameters, and calls through an alias or partial application count for the function it stands for.
-- Fix false positive "optional argument is never used" reports for functions passed as an argument with their optional parameters intact (e.g. `find (lookup : ?loc:_ -> _)` calling `lookup ~loc`): the receiver may supply them.
-- Support analyzing several build trees of one project together (e.g. two dune profiles): sources found only inside a build tree are read from it, and a unit compiled from the same source in several trees resolves to the copy in the consumer's tree.
+- Fix false positive "optional argument is never used" reports on aliases and partial applications of functions with optional parameters (e.g. `let assert_equal = OUnit.assert_equal`), also when exported through an interface: they stand for the function they apply, and calls through them count for it.
+- Fix false positive "optional argument is never used" reports for functions passed to a parameter declared as a function with optional parameters (e.g. `find (lookup : ?loc:_ -> _)` calling `lookup ~loc`).
+- Support analyzing several build trees of one project together (e.g. two dune profiles): sources found only inside a build tree are read from it, and a unit compiled from the same source in several trees resolves to the copy in the consumer's tree. A source path that names different files in different trees is warned about, since their declarations cannot be told apart.
+- Parse each `.cmt` at most once, which reduces memory use on large projects.
 
 - Fix false positives for values in functor bodies (and modules) constrained by a module type defined in another file, e.g. `module Make (K) : Gen.S with type key = K.t`. On OCaml 5.3+ declaration dependencies pointing at other compilation units are now resolved, and references to `val` items of a named module type are forwarded to the implementations satisfying it.
 

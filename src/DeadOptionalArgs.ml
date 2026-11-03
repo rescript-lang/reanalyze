@@ -78,9 +78,6 @@ let addCallToImplementation ~(posTo : Lexing.position) (argNames, argNamesMaybe)
       {posTo; posToImpl = None; argNames; argNamesMaybe}
       :: !delayedItems
 
-(* Once all declarations are known, calls whose target is not a declaration
-   but have a shape-resolved implementation are attributed to it. Must run
-   before [forwardDelayedItems] and [forceDelayedItems]. *)
 (* Bindings that alias or partially apply another function ([let g = f],
    [let g = f a]) do not own optional parameters: calls through them are
    calls of the function they stand for. *)
@@ -99,7 +96,24 @@ let rec resolveAlias ?(seen = PosSet.empty) pos =
     resolveAlias ~seen:(PosSet.add pos seen) target
   | _ -> pos
 
+let isAlias pos = PosHash.mem aliasTargets pos
+
+(* Calls through an alias are calls of the function it stands for. The
+   implementation found for the alias itself no longer applies: the target is
+   settled or forwarded on its own. *)
+let resolveAliases () =
+  delayedItems :=
+    !delayedItems
+    |> List.map (fun item ->
+           if isAlias item.posTo then
+             {item with posTo = resolveAlias item.posTo; posToImpl = None}
+           else item)
+
+(* Once all declarations are known, calls whose target is not a declaration
+   but have a shape-resolved implementation are attributed to it. Must run
+   before [forwardDelayedItems] and [forceDelayedItems]. *)
 let settleDelayedItems () =
+  resolveAliases ();
   delayedItems :=
     !delayedItems
     |> List.map (fun item ->
@@ -111,6 +125,8 @@ let settleDelayedItems () =
    [val] inside a named module type) are re-attributed to the implementation.
    Must run before [forceDelayedItems]. *)
 let forwardDelayedItems dependencies =
+  (* Aliases declared in an interface are known only now. *)
+  resolveAliases ();
   (* Traverse each original call independently. A diamond or cycle in the
      signature graph must not multiply a call, while distinct calls with the
      same argument labels must remain distinct. Declarations are endpoints:

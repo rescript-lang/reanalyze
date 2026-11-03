@@ -86,7 +86,7 @@ module Loc = struct
           | _ when !Common.Cli.ci -> basename pos.pos_fname
           | true -> (
             match Common.sourcePath pos.pos_fname with
-            | path when is_implicit path -> concat (Sys.getcwd ()) path
+            | path when is_relative path -> concat (Sys.getcwd ()) path
             | path -> path)
           | false -> pos.pos_fname);
       }

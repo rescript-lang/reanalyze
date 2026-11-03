@@ -42,19 +42,28 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
       when (not loc_ghost) && not vb.vb_loc.loc_ghost ->
       let name = Ident.name id |> Name.create ~isInterface:false in
       let optionalArgs =
-        (* Only a function defined here owns its optional parameters. An
-           alias or partial application ([let f = Lib.g], [let f = g ~a]) has
-           them in its type, but cannot drop them. *)
-        match vb.vb_expr.exp_desc with
-        | Texp_function _ ->
+        (* An alias or application ([let f = Lib.g], [let f = g ~a],
+           [let f = List.hd fs]) has optional parameters in its type, but they
+           belong to another function and cannot be dropped here. A binding
+           whose labels all come from the applied function stands for it:
+           calls through it are calls of that function. Any other binding
+           defines a function and owns its optional parameters. *)
+        let own () =
           vb.vb_expr.exp_type |> DeadOptionalArgs.fromTypeExpr
           |> OptionalArgs.fromList
-        | (Texp_ident (_, _, vd) | Texp_apply ({exp_desc = Texp_ident (_, _, vd)}, _))
-          when DeadOptionalArgs.hasOptionalArgs vb.vb_expr.exp_type ->
-          DeadOptionalArgs.addAlias ~posFrom:loc_start
-            ~posTo:vd.Types.val_loc.loc_start;
+        in
+        match vb.vb_expr.exp_desc with
+        | Texp_ident (_, _, vd) | Texp_apply ({exp_desc = Texp_ident (_, _, vd)}, _)
+          ->
+          let labels = DeadOptionalArgs.fromTypeExpr vb.vb_expr.exp_type in
+          let headLabels = DeadOptionalArgs.fromTypeExpr vd.Types.val_type in
+          if labels <> [] && List.for_all (fun l -> List.mem l headLabels) labels
+          then
+            DeadOptionalArgs.addAlias ~posFrom:loc_start
+              ~posTo:vd.Types.val_loc.loc_start;
           OptionalArgs.empty
-        | _ -> OptionalArgs.empty
+        | Texp_apply _ -> OptionalArgs.empty
+        | _ -> own ()
       in
       let exists =
         match PosHash.find_opt decls loc_start with
@@ -1347,16 +1356,40 @@ let registerUnpackedExports signature moduleExpr =
 
 let rec collectExpr super self (e : Typedtree.expression) =
   let locFrom = e.exp_loc in
+  (* A function passed to a parameter that the callee declares as a function
+     with optional parameters, e.g. [find_component (lookup : ?loc:_ -> _)],
+     may receive them. A parameter of any other type (['a] of [ignore] or
+     [ref]) does not say so. Arguments follow the callee's parameter order. *)
   (match e.exp_desc with
-  | Texp_apply (_, args) ->
-    args
-    |> List.iter (fun (_, arg) ->
-           match Compat.applyArgToOption arg with
-           | Some ({Typedtree.exp_desc = Texp_ident _; exp_loc} as arg)
-             when DeadOptionalArgs.hasOptionalArgs arg.exp_type ->
-             Hashtbl.replace functionArguments
-               (exp_loc.loc_start, exp_loc.loc_end) ()
-           | _ -> ())
+  | Texp_apply ({exp_desc = Texp_ident (_, _, {Types.val_type})}, args) ->
+    (* An annotated parameter ([(lookup : ?loc:_ -> _)]) can have a
+       monomorphic [Tpoly] type. *)
+    let rec unpoly (t : Types.type_expr) =
+      match Compat.get_desc t with
+      | Tpoly (t, []) | Tlink t -> unpoly t
+      | _ -> t
+    in
+    let rec parameters (t : Types.type_expr) =
+      match Compat.get_desc t with
+      | Tarrow (_, parameter, rest, _) -> unpoly parameter :: parameters rest
+      | Tlink t -> parameters t
+      | Tsubst _ -> parameters (Compat.getTSubst (Compat.get_desc t))
+      | _ -> []
+    in
+    let rec walk args parameters =
+      match (args, parameters) with
+      | (_, arg) :: args, parameter :: parameters ->
+        (match Compat.applyArgToOption arg with
+        | Some ({Typedtree.exp_desc = Texp_ident _; exp_loc} as arg)
+          when DeadOptionalArgs.hasOptionalArgs arg.exp_type
+               && DeadOptionalArgs.hasOptionalArgs parameter ->
+          Hashtbl.replace functionArguments
+            (exp_loc.loc_start, exp_loc.loc_end) ()
+        | _ -> ());
+        walk args parameters
+      | _ -> ()
+    in
+    walk args (parameters val_type)
   | _ -> ());
   (* [let module F (M : S) = ... in]: key the functor by its binding. On
      OCaml >= 5.5 this is a [Texp_struct_item] holding a [Tstr_module], which
@@ -2550,13 +2583,16 @@ let traverseStructure ~doTypes ~doExternals =
         typeDeclarations
         |> List.iter (fun (typeDeclaration : Typedtree.type_declaration) ->
                let manifest =
-                 match typeDeclaration.typ_type.type_manifest with
-                 | Some manifestType -> (
+                 match
+                   ( typeDeclaration.typ_type.type_manifest,
+                     typeDeclaration.typ_type.type_kind )
+                 with
+                 | Some manifestType, (Type_variant _ | Type_record _) -> (
                    match Compat.get_desc manifestType with
                    | Tconstr (path, _, _) ->
                      !identResolutions.typeDeclOfPath path
                    | _ -> None)
-                 | None -> None
+                 | _ -> None
                in
                DeadType.addDeclaration ?manifest
                  ~typeId:typeDeclaration.typ_id
@@ -2660,10 +2696,18 @@ let processValueDependency
                  }
                in
                addValueReference ~addFileReference:true ~locFrom:locRef ~locTo)
-    | Some _ ->
+    | Some fromDecl ->
       let addFileReference = fileIsImplementationOf fnTo fnFrom in
       addValueReference ~addFileReference ~locFrom ~locTo;
-      DeadOptionalArgs.addFunctionReference ~locFrom ~locTo
+      if DeadOptionalArgs.isAlias posTo then (
+        (* The interface declares an alias ([let g = f] in the
+           implementation): it has no optional parameters of its own, and
+           calls through it are calls of the aliased function. *)
+        DeadOptionalArgs.addAlias ~posFrom ~posTo;
+        match fromDecl with
+        | {declKind = Value r} -> r.optionalArgs <- OptionalArgs.empty
+        | _ -> ())
+      else DeadOptionalArgs.addFunctionReference ~locFrom ~locTo
 
 (* Value dependencies are processed once all files have been scanned, so that
    declarations and references from every file are known. *)

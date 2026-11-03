@@ -382,6 +382,19 @@ let cmtFilesByUnit : (string, string list) Hashtbl.t = Hashtbl.create 256
 let compilationContexts : (string, string) Hashtbl.t = Hashtbl.create 256
 let compilationContextsReady = ref false
 
+(* Each .cmt/.cmti is parsed at most once: lookups from many consumers (one
+   cache entry per consumer directory) share the parsed value. *)
+let cmtCache : (string, Cmt_format.cmt_infos option) Hashtbl.t =
+  Hashtbl.create 256
+
+let readCmt path =
+  match Hashtbl.find_opt cmtCache path with
+  | Some infos -> infos
+  | None ->
+    let infos = try Some (Cmt_format.read_cmt path) with _ -> None in
+    Hashtbl.add cmtCache path infos;
+    infos
+
 let unitNameOfCmtFile path =
   path |> Filename.basename |> Filename.remove_extension
   |> String.capitalize_ascii
@@ -623,7 +636,7 @@ let selectUnitAnnotations ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
   | Some loaded -> loaded
   | None ->
     let read path =
-      try Some (path, Cmt_format.read_cmt path) with _ -> None
+      Option.map (fun infos -> (path, infos)) (readCmt path)
     in
     let loaded = files |> List.filter_map read in
     let interfaceDigest path =
@@ -674,7 +687,11 @@ let selectUnitAnnotations ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
          the same positions. Use the copy strictly closest to the consumer:
          the one in its own build tree. Ties and distinct sources stay
          ambiguous: the consumer's actual dependency is unknown. *)
-      let components path = String.split_on_char '/' (Filename.dirname path) in
+      let components path =
+        Filename.dirname path
+        |> String.map (fun c -> if c = '\\' then '/' else c)
+        |> String.split_on_char '/'
+      in
       let consumer = components currentCmtFile in
       let commonPrefix path =
         let rec go n a b =
@@ -827,7 +844,7 @@ let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
   UidTbl.iter (UidTbl.replace own_uid_to_decl) cmt_infos.cmt_uid_to_decl;
   let read_cmt path =
     if Sys.file_exists path then
-      try Some (Cmt_format.read_cmt path) with _ -> None
+      readCmt path
     else None
   in
   (match read_cmt ((cmtFilePath |> Filename.remove_extension) ^ ".cmti") with

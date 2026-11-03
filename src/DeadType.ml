@@ -32,7 +32,28 @@ module TypeDependencies = struct
     if (not ghost1) && (not ghost2) && posTo <> posFrom then
       addTypeReference ~posTo ~posFrom
 
-  let forceDelayedItems () = List.iter processTypeDependency !delayedItems
+  (* Links between a re-export and the type it re-exports. A use counts only
+     from a declaration of the analysis: the original may be outside it (the
+     standard library, an excluded file), where a link would make the
+     re-export look used. *)
+  let manifestItems = ref []
+
+  let addManifest loc1 loc2 = manifestItems := (loc1, loc2) :: !manifestItems
+
+  (* Runs after each file: a link waits until the files of both ends have
+     been scanned. *)
+  let forceDelayedItems () =
+    List.iter processTypeDependency !delayedItems;
+    manifestItems :=
+      !manifestItems
+      |> List.filter (fun ((locTo : Location.t), (locFrom : Location.t)) ->
+             if
+               PosHash.mem decls locTo.loc_start
+               && PosHash.mem decls locFrom.loc_start
+             then (
+               processTypeDependency (locTo, locFrom);
+               false)
+             else true)
 end
 
 let extendTypeDependencies (loc1 : Location.t) (loc2 : Location.t) =
@@ -91,9 +112,10 @@ let addManifestDependencies ~(typeKind : ('a, 'b) Compat.type_kind)
     pairs
     |> List.iter (fun (name, loc) ->
            match List.assoc_opt name originalPairs with
-           | Some originalLoc ->
-             extendTypeDependencies loc originalLoc;
-             extendTypeDependencies originalLoc loc
+           | Some originalLoc when loc.Location.loc_start <> originalLoc.Location.loc_start ->
+             TypeDependencies.addManifest loc originalLoc;
+             TypeDependencies.addManifest originalLoc loc
+           | Some _ -> ()
            | None -> ())
   in
   let labels = function

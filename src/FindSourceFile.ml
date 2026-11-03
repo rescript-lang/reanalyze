@@ -14,6 +14,8 @@ let nativeFilePath fname =
    normalize [cmt_builddir]. The build root is then an ancestor of the .cmt.
    Dune's generated library wrappers ([.ml-gen]) hold only module aliases and
    are not analyzed, as when the analysis runs from the source tree. *)
+let ancestorDirs : (string * string, string option) Hashtbl.t = Hashtbl.create 64
+
 let ancestorSourceDir ~cmtFilePath fname =
   let rec search dir =
     if Sys.file_exists (Filename.concat dir fname) then Some dir
@@ -22,15 +24,21 @@ let ancestorSourceDir ~cmtFilePath fname =
       if parent = dir then None else search parent
   in
   if Filename.check_suffix fname ".ml-gen" then None
-  else search (Filename.dirname cmtFilePath)
+  else
+    let key = (Filename.dirname cmtFilePath, fname) in
+    match Hashtbl.find_opt ancestorDirs key with
+    | Some found -> found
+    | None ->
+      let found = search (fst key) in
+      Hashtbl.add ancestorDirs key found;
+      found
 
 (* Whether a source path is found, and the directory it is relative to when
    that is not the current one: reports and [-write] read the source there. *)
 let sourceDir ?cmtRoot ?cmtFilePath fname =
-  if Sys.file_exists (nativeFilePath fname) then
-    match (Filename.is_relative fname, !Common.Cli.nativeBuildTarget) with
-    | true, Some target -> Some (Some target)
-    | _ -> Some None
+  (* Found from the current directory, or through [-native-build-target],
+     whose reports keep naming the path relative to the current directory. *)
+  if Sys.file_exists (nativeFilePath fname) then Some None
   else if not (Filename.is_relative fname) then None
   else
     (* In -dce-cmt mode, source paths in CMT metadata can be relative to the
@@ -44,9 +52,33 @@ let sourceDir ?cmtRoot ?cmtFilePath fname =
         ancestorSourceDir ~cmtFilePath fname |> Option.map Option.some
       | None -> None)
 
+(* Declarations are identified by their source positions. Two build trees
+   holding different files under one relative name (e.g. a generated file
+   copied from per-platform sources) cannot be told apart: their declarations
+   at the same positions are merged. Warn once per file. *)
+let differingSources = Hashtbl.create 4
+
+let checkSameSource fname dir =
+  match Hashtbl.find_opt Common.sourceDirs fname with
+  | Some previous
+    when previous <> dir && not (Hashtbl.mem differingSources fname) ->
+    let digest dir =
+      try Some (Digest.file (Filename.concat dir fname)) with Sys_error _ -> None
+    in
+    if digest previous <> digest dir then (
+      Hashtbl.add differingSources fname ();
+      Printf.eprintf
+        "Warning: %s differs between %s and %s. Declarations at the same \
+         positions are merged; give the variants distinct source names (e.g. \
+         with dune's copy#).\n\
+         %!"
+        fname previous dir)
+  | _ -> ()
+
 let sourceExists ?cmtRoot ?cmtFilePath fname =
   match sourceDir ?cmtRoot ?cmtFilePath fname with
   | Some (Some dir) ->
+    checkSameSource fname dir;
     Common.registerSourceDir fname dir;
     true
   | Some None -> true

@@ -7,7 +7,11 @@ open Common
 let scannedUnits = Hashtbl.create 256
 
 let loadCmtFile ~cmtRoot cmtFilePath =
-  let cmt_infos = Cmt_format.read_cmt cmtFilePath in
+  let cmt_infos =
+    match Compat.readCmt cmtFilePath with
+    | Some infos -> infos
+    | None -> Cmt_format.read_cmt cmtFilePath (* raises the read error *)
+  in
   let unitKey =
     Compat.cmtUnitKey ~cmtFilePath ~isInterface:(Filename.check_suffix cmtFilePath ".cmti")
       cmt_infos

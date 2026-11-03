@@ -30,6 +30,9 @@
   Nested_sig_type
   Nested_sig_type_use
   Optional_arg_alias
+  Optional_arg_iface
+  Optional_arg_iface_use
+  Optional_arg_more
   Optional_arg_passed
   Optional_arg_passed_env
   Nested_arguments
@@ -49,6 +52,7 @@
   Type_reexport
   Type_reexport_alias
   Type_reexport_orig
+  Type_reexport_stdlib
   Type_reexport_use
   Unpacked_functor
   Unpacked_functor_use

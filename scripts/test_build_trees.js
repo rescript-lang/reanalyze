@@ -35,7 +35,9 @@ module.exports = function testBuildTrees(reanalyzeFile) {
   };
   const platforms = {
     native: "let hash (s : string) = Hashtbl.hash s\nlet native_unused = 1\n",
-    browser: "let hash (s : string) = String.length s\nlet browser_unused = 2\n",
+    // Different files under one name: their declarations are told apart by
+    // position only, and reports read one of the files (hence the warning).
+    browser: "let hash (s : string) = String.length s\n\nlet browser_unused = 2\n",
   };
   for (const [file, content] of Object.entries(sources)) {
     write(path.join(root, file), content);
@@ -61,9 +63,16 @@ module.exports = function testBuildTrees(reanalyzeFile) {
   for (const tree of Object.keys(trees)) {
     fs.symlinkSync(path.join(root, `_build_${tree}`), path.join(scan, tree));
   }
-  const output = child_process.execFileSync(reanalyzeFile, [
+  const run = child_process.spawnSync(reanalyzeFile, [
     "-ci", "-debug", "-dce-cmt", scan,
-  ], { cwd: root, encoding: "utf8" });
+  ], { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  if (run.status !== 0) throw new Error(`build trees: reanalyze failed\n${run.stderr}`);
+  const output = run.stdout;
+  // The generated platform.ml differs between the trees: warned about once.
+  const warnings = run.stderr.split("\n").filter((l) => l.startsWith("Warning: src/platform.ml differs"));
+  if (warnings.length !== 1) {
+    throw new Error(`build trees: expected one differing-source warning\n${run.stderr}`);
+  }
   const expect = (text, present = true) => {
     if (output.includes(text) !== present) {
       throw new Error(
@@ -79,6 +88,7 @@ module.exports = function testBuildTrees(reanalyzeFile) {
   expect("Live Value +platform.+hash:");
   expect("Dead Value +platform.+native_unused:");
   expect("Dead Value +platform.+browser_unused:");
+
   // Constructed only in the browser tree, through a re-export: the original
   // is found in the browser copy of Lib, whose source is shared with the
   // native copy, but whose dependency context differs.

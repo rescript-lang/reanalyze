@@ -230,6 +230,29 @@ function runRegressionTests() {
   assertNotIncludes(output, "optional argument through_alias of function +base ");
   assertIncludes(output,
     "optional argument never_through_alias of function +base_never is never used");
+  // An alias exported through an interface has no optional parameters of its
+  // own; calls through it are calls of the aliased function.
+  assertNotIncludes(output, "of function +iface_alias ");
+  assertNotIncludes(output, "of function +iface_alias_never ");
+  assertIncludes(output,
+    "optional argument x of function +iface_target is always supplied");
+  assertIncludes(output,
+    "optional argument y of function +iface_target_never is never used");
+  // ... also when it aliases a value of a module constrained by a signature.
+  assertNotIncludes(output, "of function +sig_alias ");
+  assertNotIncludes(output, "optional argument x of function M.+sig_f is never used");
+  // A binding whose body is not syntactically a function still owns its
+  // optional parameters.
+  assertIncludes(output, "optional argument x of function +let_in_fun is never used");
+  assertIncludes(output, "optional argument x of function +if_fun is never used");
+  // Passing a function to a parameter of type 'a (ignore, ref) supplies
+  // nothing.
+  assertIncludes(output, "optional argument x of function +ignored is never used");
+  assertIncludes(output, "optional argument y of function +in_ref is never used");
+  // A re-export of a type outside the analysis does not make its
+  // constructors live.
+  assertIncludes(output, "Dead VariantCase +Type_reexport_stdlib.node.Cons:");
+
   // A function passed as an argument keeps its optional parameters for the
   // callee to supply; one only called without them is still reported.
   assertNotIncludes(output, "optional argument loc of function +local_lookup");
