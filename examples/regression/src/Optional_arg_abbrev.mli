@@ -4,3 +4,4 @@ type fn = ?x:int -> unit -> int
 
 val abbrev : fn
 val abbrev_never : fn
+val abbrev_aliased : fn

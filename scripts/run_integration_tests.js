@@ -294,6 +294,13 @@ function runRegressionTests() {
     "optional argument x of function +abbrev is always supplied (1 calls)");
   assertIncludes(output,
     "optional argument x of function +abbrev_never is never used");
+  // ... also through a further alias, whose type shows no labels either.
+  assertIncludes(output,
+    "optional argument x of function +doubly is always supplied (1 calls)");
+  assertNotIncludes(output, "optional argument x of function +doubly is never used");
+  assertIncludes(output,
+    "optional argument x of function +abbrev_aliased is always supplied (1 calls)");
+  assertNotIncludes(output, "optional argument x of function +abbrev_aliased is never used");
   // A function passed to a parameter of a named function type keeps its
   // optional parameters.
   assertNotIncludes(output, "optional argument loc of function +named_lookup");

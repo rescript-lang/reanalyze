@@ -117,6 +117,11 @@ type fn = ?x:int -> unit -> int
 let plain ?x () = match x with Some x -> x | None -> 0
 let plain_g : fn = plain
 
+(* An alias of such a constrained alias, whose type shows no labels either. *)
+let doubly ?x () = match x with Some x -> x | None -> 0
+let doubly_first : fn = doubly
+let doubly_second = doubly_first
+
 let () =
   print_int (picked ~x:1 ());
   ignore uncalled_p;
@@ -128,6 +133,7 @@ let () =
   print_int (partial_xp ~y:2 ());
   print_int (lambda_applied ~c:1 ());
   print_int (plain_g ~x:1 ());
+  print_int (doubly_second ~x:1 ());
   print_int (plain ());
   print_int (wrapped_g ~x:1 ());
   print_int (skipped_partial ~x:2 ());

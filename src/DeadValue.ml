@@ -178,11 +178,12 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
         let labels = DeadOptionalArgs.fromTypeExpr vb.vb_expr.exp_type in
         match vb.vb_expr.exp_desc with
         | Texp_ident (_, _, vd) ->
-          (* The same function, also when a constraint names its type with an
-             abbreviation ([let g : fn = f]) that hides its labels. *)
-          if DeadOptionalArgs.hasOptionalArgs vd.val_type then
-            DeadOptionalArgs.addAlias ~application:None ~supplied:([], [])
-              ~posFrom:loc_start ~posTo:vd.val_loc.loc_start;
+          (* The same value, whatever the types say: an abbreviation can hide
+             the labels on either side ([let g : fn = f], [let h = g], a
+             [val f : fn]). An alias of a value without optional parameters
+             receives no optional arguments, so it changes nothing. *)
+          DeadOptionalArgs.addAlias ~application:None ~supplied:([], [])
+            ~posFrom:loc_start ~posTo:vd.val_loc.loc_start;
           OptionalArgs.empty ()
         | Texp_apply (_, args) ->
           (match appliedIdent vb.vb_expr with
