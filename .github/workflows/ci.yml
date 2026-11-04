@@ -19,8 +19,15 @@ jobs:
           - 5.3.x
           - 5.4.x
           - 5.5.x
+        os: [ubuntu-latest]
+        exclude:
+          - ocaml-compiler: 5.0.x
+        include:
+          # OCaml 5.0.0 does not compile with the GCC of newer runner images.
+          - ocaml-compiler: 5.0.x
+            os: ubuntu-24.04
 
-    runs-on: ubuntu-latest
+    runs-on: ${{matrix.os}}
 
     steps:
       - uses: actions/checkout@v4
