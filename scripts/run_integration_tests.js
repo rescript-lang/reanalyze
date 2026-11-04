@@ -250,6 +250,18 @@ function runRegressionTests() {
   // ones that merely share a name.
   assertIncludes(output, "optional argument x of function +wrap is never used");
   assertNotIncludes(output, "optional argument x of function +skipped ");
+  // A binding that is not an alias owns no optional parameters, so calls
+  // through it never make one "always supplied".
+  assertNotIncludes(output, "of function +wrapped_g ");
+  // Labels hidden by an abbreviation: a constrained alias, and an interface
+  // naming the type of a function with optional parameters.
+  assertNotIncludes(output, "optional argument x of function +plain ");
+  assertNotIncludes(output, "of function +plain_g ");
+  assertNotIncludes(output, "optional argument x of function +abbrev is never used");
+  assertIncludes(output,
+    "optional argument x of function +abbrev is always supplied (1 calls)");
+  assertIncludes(output,
+    "optional argument x of function +abbrev_never is never used");
   // A function passed to a parameter of a named function type keeps its
   // optional parameters.
   assertNotIncludes(output, "optional argument loc of function +named_lookup");

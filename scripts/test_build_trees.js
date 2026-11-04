@@ -110,7 +110,8 @@ module.exports = function testBuildTrees(reanalyzeFile) {
   if (rerun.status !== 0) throw new Error(`build trees: reanalyze failed\n${rerun.stderr}`);
   const cwdWarnings = rerun.stderr.split("\n").filter((l) =>
     l.startsWith("Warning: src/platform.ml differs between src/platform.ml and ")
-    && l.includes(path.join("browser", "src", "platform.ml")));
+    && l.includes(path.join("browser", "src", "platform.ml"))
+    && l.includes("The build is out of date"));
   if (cwdWarnings.length !== 1) {
     throw new Error(`build trees: expected one warning for the current directory copy\n${rerun.stderr}`);
   }

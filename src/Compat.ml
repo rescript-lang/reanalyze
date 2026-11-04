@@ -395,6 +395,13 @@ let readCmt path =
     Hashtbl.add cmtCache path infos;
     infos
 
+(* A .cmt that may not be analyzed (e.g. the byte copy of a unit whose
+   native copy is): reuse a parsed value, but do not keep a new one. *)
+let peekCmt path =
+  match Hashtbl.find_opt cmtCache path with
+  | Some infos -> infos
+  | None -> ( try Some (Cmt_format.read_cmt path) with _ -> None)
+
 let unitNameOfCmtFile path =
   path |> Filename.basename |> Filename.remove_extension
   |> String.capitalize_ascii
@@ -500,9 +507,8 @@ let compilationContext ~cmtFilePath infos =
       match Hashtbl.find_opt metadata path with
       | Some entry -> entry
       | None ->
-        (* Parsed once, shared with the analysis itself. *)
         let entry =
-          readCmt path
+          peekCmt path
           |> Option.map (fun (info : Cmt_format.cmt_infos) ->
                  ( sourceContext info,
                    info.cmt_modname,

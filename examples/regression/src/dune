@@ -29,6 +29,8 @@
   Nested_module_type
   Nested_sig_type
   Nested_sig_type_use
+  Optional_arg_abbrev
+  Optional_arg_abbrev_use
   Optional_arg_alias
   Optional_arg_iface
   Optional_arg_iface_use

@@ -88,7 +88,13 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
           OptionalArgs.empty ()
         in
         match vb.vb_expr.exp_desc with
-        | Texp_ident (_, _, vd) -> alias vd []
+        | Texp_ident (_, _, vd) ->
+          (* The same function, also when a constraint names its type with an
+             abbreviation ([let g : fn = f]) that hides its labels. *)
+          if DeadOptionalArgs.fromTypeExpr vd.val_type <> [] then
+            DeadOptionalArgs.addAlias ~posFrom:loc_start
+              ~posTo:vd.val_loc.loc_start;
+          OptionalArgs.empty ()
         | Texp_apply ({exp_desc = Texp_ident (_, _, vd)}, args) -> alias vd args
         | Texp_apply _ -> OptionalArgs.empty ()
         | _ -> own ()
@@ -770,7 +776,15 @@ let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
   let args =
     List.map (fun (lbl, arg) -> (lbl, Compat.applyArgToOption arg)) args
   in
-  if expType |> DeadOptionalArgs.hasOptionalArgs then (
+  (* The callee's type can be an abbreviation ([g : fn]) that hides its
+     labels; the arguments still carry them. *)
+  let hasOptionalArg =
+    List.exists
+      (fun (lbl, _) ->
+        match lbl with Asttypes.Optional _ -> true | _ -> false)
+      args
+  in
+  if DeadOptionalArgs.hasOptionalArgs expType || hasOptionalArg then (
     let supplied = ref [] in
     let suppliedMaybe = ref [] in
     args
@@ -2738,10 +2752,20 @@ let processValueDependency
     | Some fromDecl ->
       let addFileReference = fileIsImplementationOf fnTo fnFrom in
       addValueReference ~addFileReference ~locFrom ~locTo;
-      if DeadOptionalArgs.isAlias posTo then (
+      let hidesLabels =
+        (* [val f : fn] with [type fn = ?x:int -> unit]: the interface item
+           shows no optional parameters, the implementation has them. *)
+        match (fromDecl, PosHash.find_opt decls posTo) with
+        | {declKind = Value rFrom}, Some {declKind = Value rTo} ->
+          OptionalArgs.isEmpty rFrom.optionalArgs
+          && not (OptionalArgs.isEmpty rTo.optionalArgs)
+        | _ -> false
+      in
+      if DeadOptionalArgs.isAlias posTo || hidesLabels then (
         (* The interface declares an alias ([let g = f] in the
-           implementation): it has no optional parameters of its own, and
-           calls through it are calls of the aliased function. *)
+           implementation), or names the type with an abbreviation: it has no
+           optional parameters of its own, and calls through it are calls of
+           the implementation. *)
         DeadOptionalArgs.addAlias ~posFrom ~posTo;
         match fromDecl with
         | {declKind = Value r} -> r.optionalArgs <- OptionalArgs.empty ()

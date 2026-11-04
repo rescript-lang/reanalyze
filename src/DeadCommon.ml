@@ -87,7 +87,12 @@ module OptionalArgs = struct
     let nameSet = argNames |> StringSet.of_list in
     let nameSetMaybe = argNamesMaybe |> StringSet.of_list in
     let nameSetAlways = StringSet.diff nameSet nameSetMaybe in
-    if x.count = 0 then x.alwaysUsed <- nameSetAlways
+    (* Calls are applied once all declarations are known, so at the first
+       call [unused] still holds every optional parameter the function owns:
+       a label it does not own (a call through an application that is not
+       an alias) is never always supplied. *)
+    if x.count = 0 then
+      x.alwaysUsed <- StringSet.inter nameSetAlways x.unused
     else x.alwaysUsed <- StringSet.inter nameSetAlways x.alwaysUsed;
     argNames
     |> List.iter (fun name -> x.unused <- StringSet.remove name x.unused);

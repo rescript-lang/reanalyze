@@ -60,9 +60,11 @@ let sourceDir ?cmtRoot ?cmtFilePath fname =
    the current directory, and a difference is reported once per file. *)
 let firstCopies : (string, string) Hashtbl.t = Hashtbl.create 256
 let comparedCopies : (string, unit) Hashtbl.t = Hashtbl.create 256
+let currentCopies : (string, unit) Hashtbl.t = Hashtbl.create 256
 let differingSources : (string, unit) Hashtbl.t = Hashtbl.create 4
 
-let checkSameSource fname path =
+let checkSameSource ?(current = false) fname path =
+  if current then Hashtbl.replace currentCopies path ();
   match Hashtbl.find_opt firstCopies fname with
   | None -> Hashtbl.add firstCopies fname path
   | Some first
@@ -73,12 +75,20 @@ let checkSameSource fname path =
     let digest path = try Some (Digest.file path) with Sys_error _ -> None in
     if digest first <> digest path then (
       Hashtbl.add differingSources fname ();
-      Printf.eprintf
-        "Warning: %s differs between %s and %s. Declarations at the same \
-         positions are merged; give the variants distinct source names (e.g. \
-         with dune's copy#).\n\
-         %!"
-        fname first path)
+      if current || Hashtbl.mem currentCopies first then
+        (* Usually a source edited since the last build. *)
+        Printf.eprintf
+          "Warning: %s differs between %s and %s. The build is out of date; \
+           rebuild before analyzing.\n\
+           %!"
+          fname first path
+      else
+        Printf.eprintf
+          "Warning: %s differs between %s and %s. Declarations at the same \
+           positions are merged; give the variants distinct source names \
+           (e.g. with dune's copy#).\n\
+           %!"
+          fname first path)
   | Some _ -> ()
 
 let sourceExists ?cmtRoot ?cmtFilePath fname =
@@ -88,7 +98,7 @@ let sourceExists ?cmtRoot ?cmtFilePath fname =
     Common.registerSourceDir fname dir;
     true
   | Some None ->
-    checkSameSource fname (nativeFilePath fname);
+    checkSameSource ~current:true fname (nativeFilePath fname);
     (match cmtFilePath with
     | Some cmtFilePath when Filename.is_relative fname -> (
       match ancestorSourceDir ~cmtFilePath fname with

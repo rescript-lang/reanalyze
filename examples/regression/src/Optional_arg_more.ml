@@ -46,7 +46,17 @@ type lookup = ?loc:int -> int -> int
 let find (f : lookup) = f ~loc:1 2
 let named_lookup ?loc x = match loc with Some l -> l + x | None -> x
 
+(* A binding constrained with an abbreviation that hides the labels is
+   still an alias; calls through it are recorded although its type shows
+   no optional parameters. *)
+type fn = ?x:int -> unit -> int
+
+let plain ?x () = match x with Some x -> x | None -> 0
+let plain_g : fn = plain
+
 let () =
+  print_int (plain_g ~x:1 ());
+  print_int (plain ());
   print_int (wrapped_g ~x:1 ());
   print_int (skipped_partial ~x:2 ());
   print_int (find named_lookup);
