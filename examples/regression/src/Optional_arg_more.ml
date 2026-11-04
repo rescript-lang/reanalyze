@@ -89,6 +89,15 @@ let piped_h ?y a = match y with Some y -> y + a | None -> a
 let piped_mk a ?x () = match x with Some x -> x + a | None -> a
 let piped = piped_h ~y:2 1 |> piped_mk
 
+(* A pipe into a partial application is typed as a nested application
+   ([(pipe_f ~x:1) 1]); it stands for [pipe_f] too. *)
+let pipe_f ?x a ?y () =
+  (match x with Some x -> x | None -> 0)
+  + a
+  + match y with Some y -> y | None -> 0
+
+let pipe_p = 1 |> pipe_f ~x:1
+
 (* A partial application leaves the optional parameters it skips. *)
 let skipped ?x ~a () = match x with Some x -> x + a | None -> a
 let skipped_partial = skipped ~a:1
@@ -114,6 +123,7 @@ let () =
   ignore sig_partials;
   ignore chain_q;
   print_int (piped ~x:3 ());
+  print_int (pipe_p ~y:2 ());
   print_int (partial_xp ());
   print_int (partial_xp ~y:2 ());
   print_int (lambda_applied ~c:1 ());

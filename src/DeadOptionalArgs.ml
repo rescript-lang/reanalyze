@@ -10,8 +10,9 @@ type item = {
   argNames : string list;
   argNamesMaybe : string list;
   fromAlias : Lexing.position option;
-      (** The partial application that forms this alias ([let p = f ~x:1]):
-          a call only when nothing calls through the alias. *)
+      (** The alias this item's application forms ([p] for the item of
+          [f ~x:1] in [let p = f ~x:1]); the item counts as a call only when
+          nothing calls through it. *)
 }
 
 let delayedItems = (ref [] : item list ref)

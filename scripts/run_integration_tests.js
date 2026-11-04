@@ -280,6 +280,11 @@ function runRegressionTests() {
   assertIncludes(output,
     "optional argument y of function +piped_h is always supplied (1 calls)");
   assertNotIncludes(output, "optional argument y of function +piped_h is never used");
+  assertIncludes(output,
+    "optional argument y of function +pipe_f is always supplied (1 calls)");
+  assertIncludes(output,
+    "optional argument x of function +pipe_f is always supplied (1 calls)");
+  assertNotIncludes(output, "of function +pipe_p ");
   // Labels hidden by an abbreviation: a constrained alias, and an interface
   // naming the type of a function with optional parameters.
   assertNotIncludes(output, "optional argument x of function +plain ");

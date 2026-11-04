@@ -19,28 +19,49 @@ let checkAnyValueBindingWithNoSideEffects
 let registerPackedModuleRef = ref (fun (_ : Typedtree.value_binding) -> ())
 
 (* The optional parameters of the declared type [t] that remain after the
-   application [args]: those the application skips, which the result takes
-   (a skipped one filled with [None] is an argument), then those of the
-   arrows after the last argument. A result that is a type variable, as in
+   applications [argGroups] (innermost first, as in [(f ~x:1) a], which is
+   how [a |> f ~x:1] is typed): each takes the parameters its arguments
+   skip first (a skipped one filled with [None] is an argument), then those
+   after its last argument. A result that is a type variable, as in
    [let g = wrap f] with [wrap : ?x:_ -> 'a -> 'a], has none of its own: its
    optional parameters come from the argument, not from the applied
    function. *)
-let residualLabels (t : Types.type_expr) args =
-  let rec go (t : Types.type_expr) args =
-    match (Compat.get_desc t, args) with
-    | (Tlink t | Tpoly (t, [])), _ -> go t args
-    | Tsubst _, _ -> go (Compat.getTSubst (Compat.get_desc t)) args
-    | _, [] -> DeadOptionalArgs.fromTypeExpr t
-    | Tarrow (label, _, rest, _), (_, arg) :: args ->
-      let skipped =
-        match (label, Compat.applyArgToOption arg) with
-        | Optional s, None -> [s]
-        | _ -> []
-      in
-      skipped @ go rest args
+let residualLabels (t : Types.type_expr) argGroups =
+  (* Each parameter as its optional label, or [None]. *)
+  let rec parameters (t : Types.type_expr) =
+    match Compat.get_desc t with
+    | Tlink t | Tpoly (t, []) -> parameters t
+    | Tsubst _ -> parameters (Compat.getTSubst (Compat.get_desc t))
+    | Tarrow (Optional s, _, rest, _) -> Some s :: parameters rest
+    | Tarrow (_, _, rest, _) -> None :: parameters rest
     | _ -> []
   in
-  go t args
+  let rec apply parameters args =
+    match (parameters, args) with
+    | _, [] -> parameters
+    | parameter :: parameters, (_, arg) :: args ->
+      let skipped =
+        match (parameter, Compat.applyArgToOption arg) with
+        | Some _, None -> [parameter]
+        | _ -> []
+      in
+      skipped @ apply parameters args
+    | [], _ :: _ -> []
+  in
+  List.fold_left apply (parameters t) argGroups |> List.filter_map Fun.id
+
+(* The identifier an application applies, also through nested applications
+   ([(f ~x:1) a]): its declaration, the argument groups innermost first, and
+   the innermost application, which is the one recorded as a call. *)
+let rec appliedIdent (e : Typedtree.expression) =
+  match e.exp_desc with
+  | Texp_apply ({exp_desc = Texp_ident (_, _, vd)}, args) ->
+    Some (vd, [args], e.exp_loc)
+  | Texp_apply (inner, args) ->
+    appliedIdent inner
+    |> Option.map (fun (vd, groups, application) ->
+           (vd, groups @ [args], application))
+  | _ -> None
 
 (* Functions passed as arguments of an application with their optional
    parameters intact, e.g. [find_component Env.lookup] where [find_component]
@@ -163,17 +184,17 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
             DeadOptionalArgs.addAlias ~application:None ~supplied:([], [])
               ~posFrom:loc_start ~posTo:vd.val_loc.loc_start;
           OptionalArgs.empty ()
-        | Texp_apply ({exp_desc = Texp_ident (_, _, vd)}, args)
-          when labels <> []
-               && List.sort compare labels
-                  = List.sort compare (residualLabels vd.val_type args) ->
-          (* Calls through the binding also pass what it applies. *)
-          DeadOptionalArgs.addAlias ~application:(Some vb.vb_expr.exp_loc)
-            ~supplied:(suppliedLabels args) ~posFrom:loc_start
-            ~posTo:vd.val_loc.loc_start;
-          OptionalArgs.empty ()
         | Texp_apply (_, args) ->
-          if labels <> [] then creditFunctionArguments ~labels args;
+          (match appliedIdent vb.vb_expr with
+          | Some (vd, groups, application)
+            when labels <> []
+                 && List.sort compare labels
+                    = List.sort compare (residualLabels vd.val_type groups) ->
+            (* Calls through the binding also pass what it applies. *)
+            DeadOptionalArgs.addAlias ~application:(Some application)
+              ~supplied:(suppliedLabels (List.concat groups))
+              ~posFrom:loc_start ~posTo:vd.val_loc.loc_start
+          | _ -> if labels <> [] then creditFunctionArguments ~labels args);
           OptionalArgs.empty ()
         | _ -> OptionalArgs.fromList labels
       in
