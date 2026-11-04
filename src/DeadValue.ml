@@ -124,9 +124,6 @@ let creditPassedFunctions calleeType args =
   in
   walk args (parameterTypes calleeType)
 
-(* The applications that form aliases: not calls themselves. *)
-let aliasApplications = ref PosSet.empty
-
 let collectValueBinding super self (vb : Typedtree.value_binding) =
   let oldCurrentBindings = !Current.bindings in
   let oldLastBinding = !Current.lastBinding in
@@ -163,18 +160,15 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
           (* The same function, also when a constraint names its type with an
              abbreviation ([let g : fn = f]) that hides its labels. *)
           if DeadOptionalArgs.hasOptionalArgs vd.val_type then
-            DeadOptionalArgs.addAlias ~isApplication:false ~supplied:([], [])
+            DeadOptionalArgs.addAlias ~application:None ~supplied:([], [])
               ~posFrom:loc_start ~posTo:vd.val_loc.loc_start;
           OptionalArgs.empty ()
         | Texp_apply ({exp_desc = Texp_ident (_, _, vd)}, args)
           when labels <> []
                && List.sort compare labels
                   = List.sort compare (residualLabels vd.val_type args) ->
-          (* Calls through the binding also pass what it applies; the
-             application itself is not a call. *)
-          aliasApplications :=
-            PosSet.add vb.vb_expr.exp_loc.loc_start !aliasApplications;
-          DeadOptionalArgs.addAlias ~isApplication:true
+          (* Calls through the binding also pass what it applies. *)
+          DeadOptionalArgs.addAlias ~application:(Some vb.vb_expr.exp_loc)
             ~supplied:(suppliedLabels args) ~posFrom:loc_start
             ~posTo:vd.val_loc.loc_start;
           OptionalArgs.empty ()
@@ -1538,8 +1532,7 @@ let rec collectExpr super self (e : Typedtree.expression) =
           exp_type;
           exp_loc = identLoc;
         },
-        args )
-    when not (PosSet.mem locFrom.loc_start !aliasApplications) ->
+        args ) ->
     let locTo = !identResolutions.valueLoc vd in
     let locToImpl = findResolution ~identLoc ~path in
     args
@@ -2773,7 +2766,7 @@ let processValueDependency
            implementation), or names the type with an abbreviation: it has no
            optional parameters of its own, and calls through it are calls of
            the implementation. *)
-        DeadOptionalArgs.addAlias ~isApplication:false ~supplied:([], [])
+        DeadOptionalArgs.addAlias ~application:None ~supplied:([], [])
           ~posFrom ~posTo;
         match fromDecl with
         | {declKind = Value r} -> r.optionalArgs <- OptionalArgs.empty ()
@@ -2888,8 +2881,8 @@ let forceDelayedItems () =
         with
         | [] ->
           calls
-          |> List.iter (fun {call; callTo} ->
-                 DeadOptionalArgs.addCallToImplementation
+          |> List.iter (fun {call; callTo; callFrom} ->
+                 DeadOptionalArgs.addCallToImplementation ~locFrom:callFrom
                    ~posTo:callTo.loc_start call)
         | locs ->
           locs
@@ -2906,7 +2899,7 @@ let forceDelayedItems () =
                           locTo;
                         let locTo = Option.value locTo ~default:callTo in
                         DeadOptionalArgs.addCallToImplementation
-                          ~posTo:locTo.loc_start call))
+                          ~locFrom:callFrom ~posTo:locTo.loc_start call))
       else ())
     parameterCalls;
   Hashtbl.reset parameterCalls;

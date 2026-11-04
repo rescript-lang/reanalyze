@@ -94,21 +94,22 @@ let sourceExists ~cmtFilePath fname =
       true
     | None -> false
 
-let rec interface ~cmtFilePath items =
-  match items with
-  | {Typedtree.sig_loc} :: rest -> (
-    match sourceExists ~cmtFilePath sig_loc.loc_start.pos_fname with
-    | false -> interface ~cmtFilePath rest
-    | true -> Some sig_loc.loc_start.pos_fname)
-  | [] -> None
+(* The source of the first item whose location names an existing file. *)
+let firstSource ~cmtFilePath locs =
+  locs
+  |> List.find_map (fun (loc : Location.t) ->
+         let fname = loc.loc_start.pos_fname in
+         if sourceExists ~cmtFilePath fname then Some fname else None)
 
-let rec implementation ~cmtFilePath items =
-  match items with
-  | {Typedtree.str_loc} :: rest -> (
-    match sourceExists ~cmtFilePath str_loc.loc_start.pos_fname with
-    | false -> implementation ~cmtFilePath rest
-    | true -> Some str_loc.loc_start.pos_fname)
-  | [] -> None
+let interface ~cmtFilePath items =
+  items
+  |> List.map (fun (item : Typedtree.signature_item) -> item.sig_loc)
+  |> firstSource ~cmtFilePath
+
+let implementation ~cmtFilePath items =
+  items
+  |> List.map (fun (item : Typedtree.structure_item) -> item.str_loc)
+  |> firstSource ~cmtFilePath
 
 let sourcefile ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
   match cmt_infos.cmt_sourcefile with

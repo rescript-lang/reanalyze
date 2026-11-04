@@ -59,6 +59,36 @@ let picked = second unrelated picked_from
 let uncalled ?x () = match x with Some x -> x | None -> 0
 let uncalled_p = uncalled ~x:1
 
+(* ... also when it applies a value of a module constrained by a signature,
+   whose call is attributed to the implementation. *)
+module type Sig_partial = sig
+  val sf : ?x:int -> ?y:int -> unit -> int
+end
+
+module Sig_partial_m : Sig_partial = struct
+  let sf ?x ?y () =
+    (match x with Some x -> x | None -> 0) + match y with Some y -> y | None -> 0
+end
+
+let sig_partial = Sig_partial_m.sf ~x:1
+let sig_partials = [sig_partial]
+
+(* ... and in a chain nobody calls through, where only the last application
+   is a call (passing x and y). *)
+let chain ?x ?y ?z () =
+  (match x with Some x -> x | None -> 0)
+  + (match y with Some y -> y | None -> 0)
+  + match z with Some z -> z | None -> 0
+
+let chain_p = chain ~x:1
+let chain_q = chain_p ~y:2
+
+(* An operand starting where the alias's application starts is a call of its
+   own: [piped_h ~y:2 1 |> piped_mk] is typed as [piped_mk (piped_h ~y:2 1)]. *)
+let piped_h ?y a = match y with Some y -> y + a | None -> a
+let piped_mk a ?x () = match x with Some x -> x + a | None -> a
+let piped = piped_h ~y:2 1 |> piped_mk
+
 (* A partial application leaves the optional parameters it skips. *)
 let skipped ?x ~a () = match x with Some x -> x + a | None -> a
 let skipped_partial = skipped ~a:1
@@ -81,6 +111,9 @@ let plain_g : fn = plain
 let () =
   print_int (picked ~x:1 ());
   ignore uncalled_p;
+  ignore sig_partials;
+  ignore chain_q;
+  print_int (piped ~x:3 ());
   print_int (partial_xp ());
   print_int (partial_xp ~y:2 ());
   print_int (lambda_applied ~c:1 ());

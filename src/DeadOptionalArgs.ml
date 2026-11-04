@@ -9,6 +9,9 @@ type item = {
       (** Shape-resolved implementation, used when [posTo] is not a declaration. *)
   argNames : string list;
   argNamesMaybe : string list;
+  fromAlias : Lexing.position option;
+      (** The partial application that forms this alias ([let p = f ~x:1]):
+          a call only when nothing calls through the alias. *)
 }
 
 let delayedItems = (ref [] : item list ref)
@@ -48,6 +51,16 @@ let rec fromTypeExpr (texpr : Types.type_expr) =
   | Tsubst _ -> fromTypeExpr (Compat.getTSubst (Compat.get_desc texpr))
   | _ -> []
 
+(* Aliases formed by a partial application ([let p = f ~x:1]), by the
+   application's location (an operand can start at the same position:
+   [let p = h ~y:2 1 |> mk] is typed as [mk (h ~y:2 1)]). *)
+let aliasApplications :
+    (Lexing.position * Lexing.position, Lexing.position) Hashtbl.t =
+  Hashtbl.create 16
+
+let aliasApplication (loc : Location.t) =
+  Hashtbl.find_opt aliasApplications (loc.loc_start, loc.loc_end)
+
 let addReferences ~(locFrom : Location.t) ~(locTo : Location.t)
     ?(locToImpl : Location.t option) ~path
     (argNames, argNamesMaybe) =
@@ -56,7 +69,9 @@ let addReferences ~(locFrom : Location.t) ~(locTo : Location.t)
     let posToImpl = Option.map (fun (l : Location.t) -> l.loc_start) locToImpl in
     let posFrom = locFrom.loc_start in
     delayedItems :=
-      {posTo; posToImpl; argNames; argNamesMaybe} :: !delayedItems;
+      {posTo; posToImpl; argNames; argNamesMaybe;
+       fromAlias = aliasApplication locFrom}
+      :: !delayedItems;
     if !Common.Cli.debug then
       Log_.item
         "DeadOptionalArgs.addReferences %s called with optional argNames:%s \
@@ -71,11 +86,12 @@ let addReferences ~(locFrom : Location.t) ~(locTo : Location.t)
    type item rather than a declaration (no shapes, e.g. before OCaml 5.3, or
    an argument without a resolvable shape), the call is forwarded to the
    implementations of that item, conservatively. *)
-let addCallToImplementation ~(posTo : Lexing.position) (argNames, argNamesMaybe)
-    =
+let addCallToImplementation ~(locFrom : Location.t)
+    ~(posTo : Lexing.position) (argNames, argNamesMaybe) =
   if active () then
     delayedItems :=
-      {posTo; posToImpl = None; argNames; argNamesMaybe}
+      {posTo; posToImpl = None; argNames; argNamesMaybe;
+       fromAlias = aliasApplication locFrom}
       :: !delayedItems
 
 (* Bindings that alias or partially apply another function ([let g = f],
@@ -86,21 +102,22 @@ let addCallToImplementation ~(posTo : Lexing.position) (argNames, argNamesMaybe)
 let aliasTargets : (Lexing.position * (string list * string list)) PosHash.t =
   PosHash.create 16
 
-(* Aliases formed by a partial application ([let p = f ~x:1]). The
-   application itself is not a call: each call through [p] is one. When no
-   call goes through [p] (it escapes, or is unused), the application counts
-   once, so that what it passes is not reported as never used. *)
-let applicationAliases = ref PosSet.empty
+(* The aliases some call goes through. The application forming an alias
+   ([application]) is then not a call itself: each call through it is one.
+   When no call goes through it (it escapes, or is unused), the application
+   counts once, so that what it passes is not reported as never used. *)
 let aliasesCalled = ref PosSet.empty
 
-let addAlias ~isApplication ~supplied ~(posFrom : Lexing.position)
-    ~(posTo : Lexing.position) =
+let addAlias ~(application : Location.t option) ~supplied
+    ~(posFrom : Lexing.position) ~(posTo : Lexing.position) =
   if posFrom <> posTo then (
     if !Common.Cli.debug then
       Log_.item "OptionalArgs.addAlias %s --> %s@." (posFrom |> posToString)
         (posTo |> posToString);
-    if isApplication then
-      applicationAliases := PosSet.add posFrom !applicationAliases;
+    application
+    |> Option.iter (fun (loc : Location.t) ->
+           Hashtbl.replace aliasApplications (loc.loc_start, loc.loc_end)
+             posFrom);
     PosHash.replace aliasTargets posFrom (posTo, supplied))
 
 (* The function an alias chain stands for, with the optional arguments the
@@ -167,16 +184,14 @@ let forceDelayedItems () =
   (* Forwarding can reach an alias ([let g = f] implementing a [val]). *)
   let items = !delayedItems |> List.rev |> List.map resolveItem in
   delayedItems := [];
-  let uncalled =
-    PosSet.diff !applicationAliases !aliasesCalled
-    |> PosSet.elements
-    |> List.map (fun pos ->
-           let posTo, (argNames, argNamesMaybe) =
-             resolveAliasCall pos ([], [])
-           in
-           {posTo; posToImpl = None; argNames; argNamesMaybe})
+  (* Now every call through an alias is known. *)
+  let items =
+    items
+    |> List.filter (fun item ->
+           match item.fromAlias with
+           | Some alias -> not (PosSet.mem alias !aliasesCalled)
+           | None -> true)
   in
-  let items = items @ uncalled in
   items
   |> List.iter (fun {posTo; argNames; argNamesMaybe} ->
          match PosHash.find_opt decls posTo with
