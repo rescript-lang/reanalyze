@@ -42,6 +42,45 @@ let residualLabels (t : Types.type_expr) args =
   in
   go t args
 
+(* Functions passed as arguments of an application with their optional
+   parameters intact, e.g. [find_component Env.lookup] where [find_component]
+   takes [(lookup : ?loc:_ -> _)] and calls [lookup ~loc]: the receiver may
+   supply them. Keyed by the argument's location. *)
+let functionArguments : (Lexing.position * Lexing.position, unit) Hashtbl.t =
+  Hashtbl.create 256
+
+(* The optional arguments an application passes: [~x:v] (wrapped in
+   [Some]) surely, [?x:v] maybe; an omitted one or [None] not. Returns the
+   supplied labels (including the maybe ones) and the maybe ones. *)
+let suppliedLabels args =
+  List.fold_right
+    (fun (lbl, arg) (supplied, maybe) ->
+      match (lbl : Asttypes.arg_label) with
+      | Optional s -> (
+        match Compat.applyArgToOption arg with
+        | Some {Typedtree.exp_desc = Texp_construct (_, {cstr_name = "Some"}, _)}
+          ->
+          (s :: supplied, maybe)
+        | Some {exp_desc = Texp_construct (_, {cstr_name = "None"}, _)} | None ->
+          (supplied, maybe)
+        | Some _ -> (s :: supplied, s :: maybe))
+      | _ -> (supplied, maybe))
+    args ([], [])
+
+(* A binding that applies a function but does not stand for it, yet has
+   optional parameters ([let g = wrap f] with [wrap : ?x:_ -> 'a -> 'a]):
+   they come from a function among the arguments, which calls through the
+   binding may supply. *)
+let creditFunctionArguments args =
+  args
+  |> List.iter (fun (_, arg) ->
+         match Compat.applyArgToOption arg with
+         | Some {Typedtree.exp_desc = Texp_ident (_, _, vd); exp_loc}
+           when DeadOptionalArgs.hasOptionalArgs vd.val_type ->
+           Hashtbl.replace functionArguments
+             (exp_loc.loc_start, exp_loc.loc_end) ()
+         | _ -> ())
+
 let collectValueBinding super self (vb : Typedtree.value_binding) =
   let oldCurrentBindings = !Current.bindings in
   let oldLastBinding = !Current.lastBinding in
@@ -76,15 +115,17 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
           vb.vb_expr.exp_type |> DeadOptionalArgs.fromTypeExpr
           |> OptionalArgs.fromList
         in
+        let labels = DeadOptionalArgs.fromTypeExpr vb.vb_expr.exp_type in
         let alias (vd : Types.value_description) args =
-          let labels = DeadOptionalArgs.fromTypeExpr vb.vb_expr.exp_type in
           if
             labels <> []
             && List.sort compare labels
                = List.sort compare (residualLabels vd.val_type args)
           then
-            DeadOptionalArgs.addAlias ~posFrom:loc_start
-              ~posTo:vd.val_loc.loc_start;
+            (* Calls through the binding also pass what it applies. *)
+            DeadOptionalArgs.addAlias ~supplied:(suppliedLabels args)
+              ~posFrom:loc_start ~posTo:vd.val_loc.loc_start
+          else if labels <> [] then creditFunctionArguments args;
           OptionalArgs.empty ()
         in
         match vb.vb_expr.exp_desc with
@@ -92,11 +133,13 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
           (* The same function, also when a constraint names its type with an
              abbreviation ([let g : fn = f]) that hides its labels. *)
           if DeadOptionalArgs.fromTypeExpr vd.val_type <> [] then
-            DeadOptionalArgs.addAlias ~posFrom:loc_start
+            DeadOptionalArgs.addAlias ~supplied:([], []) ~posFrom:loc_start
               ~posTo:vd.val_loc.loc_start;
           OptionalArgs.empty ()
         | Texp_apply ({exp_desc = Texp_ident (_, _, vd)}, args) -> alias vd args
-        | Texp_apply _ -> OptionalArgs.empty ()
+        | Texp_apply (_, args) ->
+          if labels <> [] then creditFunctionArguments args;
+          OptionalArgs.empty ()
         | _ -> own ()
       in
       let exists =
@@ -348,12 +391,6 @@ let escapedRanges : definitionRange list ref = ref []
    any other use makes it escape. *)
 let unpackOperands = ref PosSet.empty
 
-(* Functions passed as arguments of an application with their optional
-   parameters intact, e.g. [find_component Env.lookup] where [find_component]
-   takes [(lookup : ?loc:_ -> _)] and calls [lookup ~loc]: the receiver may
-   supply them. Keyed by the argument's location. *)
-let functionArguments : (Lexing.position * Lexing.position, unit) Hashtbl.t =
-  Hashtbl.create 256
 let usedOutsideUnpack = ref DefinitionSet.empty
 
 let inRanges ((pos : Lexing.position), context) ranges =
@@ -773,9 +810,6 @@ let registerParameterAlias (id : Ident.t option)
 
 let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
     ~path args =
-  let args =
-    List.map (fun (lbl, arg) -> (lbl, Compat.applyArgToOption arg)) args
-  in
   (* The callee's type can be an abbreviation ([g : fn]) that hides its
      labels; the arguments still carry them. *)
   let hasOptionalArg =
@@ -785,33 +819,7 @@ let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
       args
   in
   if DeadOptionalArgs.hasOptionalArgs expType || hasOptionalArg then (
-    let supplied = ref [] in
-    let suppliedMaybe = ref [] in
-    args
-    |> List.iter (fun (lbl, arg) ->
-           let argIsSupplied =
-             match arg with
-             | Some
-                 {
-                   Typedtree.exp_desc =
-                     Texp_construct (_, {cstr_name = "Some"}, _);
-                 } ->
-               Some true
-             | Some
-                 {
-                   Typedtree.exp_desc =
-                     Texp_construct (_, {cstr_name = "None"}, _);
-                 } ->
-               Some false
-             | Some _ -> None
-             | None -> Some false
-           in
-           match lbl with
-           | Asttypes.Optional s when not locFrom.loc_ghost ->
-             if argIsSupplied <> Some false then supplied := s :: !supplied;
-             if argIsSupplied = None then suppliedMaybe := s :: !suppliedMaybe
-           | _ -> ());
-    let call = (!supplied, !suppliedMaybe) in
+    let call = if locFrom.loc_ghost then ([], []) else suppliedLabels args in
     let parameter = findFunctorParameter path in
     (* Without shape resolution the call is only forwarded (below); recording
        it here too would credit it twice. *)
@@ -2766,7 +2774,7 @@ let processValueDependency
            implementation), or names the type with an abbreviation: it has no
            optional parameters of its own, and calls through it are calls of
            the implementation. *)
-        DeadOptionalArgs.addAlias ~posFrom ~posTo;
+        DeadOptionalArgs.addAlias ~supplied:([], []) ~posFrom ~posTo;
         match fromDecl with
         | {declKind = Value r} -> r.optionalArgs <- OptionalArgs.empty ()
         | _ -> ())

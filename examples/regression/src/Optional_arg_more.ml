@@ -35,6 +35,19 @@ let wrap ?x f =
 let wrapped ?x () = match x with Some x -> x | None -> 0
 let wrapped_g = wrap wrapped
 
+(* A partial application that stands for the function passes its own
+   arguments on every call through it: [x] is always supplied. *)
+let partial_x ?x ?y () =
+  (match x with Some x -> x | None -> 0) + match y with Some y -> y | None -> 0
+
+let partial_xp = partial_x ~x:1
+
+(* An application that does not stand for the function it applies, through
+   an identifier or not, leaves its result's optional parameters to the
+   function among its arguments. *)
+let via_lambda ?c () = match c with Some c -> c | None -> 0
+let lambda_applied = (fun h -> h) via_lambda
+
 (* A partial application leaves the optional parameters it skips. *)
 let skipped ?x ~a () = match x with Some x -> x + a | None -> a
 let skipped_partial = skipped ~a:1
@@ -55,6 +68,9 @@ let plain ?x () = match x with Some x -> x | None -> 0
 let plain_g : fn = plain
 
 let () =
+  print_int (partial_xp ());
+  print_int (partial_xp ~y:2 ());
+  print_int (lambda_applied ~c:1 ());
   print_int (plain_g ~x:1 ());
   print_int (plain ());
   print_int (wrapped_g ~x:1 ());

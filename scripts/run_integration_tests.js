@@ -251,8 +251,17 @@ function runRegressionTests() {
   assertIncludes(output, "optional argument x of function +wrap is never used");
   assertNotIncludes(output, "optional argument x of function +skipped ");
   // A binding that is not an alias owns no optional parameters, so calls
-  // through it never make one "always supplied".
+  // through it never make one "always supplied"; the function among its
+  // arguments may receive them.
   assertNotIncludes(output, "of function +wrapped_g ");
+  assertNotIncludes(output, "of function +wrapped ");
+  assertNotIncludes(output, "of function +via_lambda ");
+  assertNotIncludes(output, "of function +lambda_applied ");
+  // Calls through a partial application pass what it applies.
+  assertIncludes(output,
+    "optional argument x of function +partial_x is always supplied (3 calls)");
+  assertNotIncludes(output, "optional argument y of function +partial_x ");
+  assertNotIncludes(output, "of function +partial_xp ");
   // Labels hidden by an abbreviation: a constrained alias, and an interface
   // naming the type of a function with optional parameters.
   assertNotIncludes(output, "optional argument x of function +plain ");

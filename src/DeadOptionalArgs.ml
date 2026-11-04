@@ -81,20 +81,29 @@ let addCallToImplementation ~(posTo : Lexing.position) (argNames, argNamesMaybe)
 (* Bindings that alias or partially apply another function ([let g = f],
    [let g = f a]) do not own optional parameters: calls through them are
    calls of the function they stand for. *)
-let aliasTargets : Lexing.position PosHash.t = PosHash.create 16
+(* Each alias maps to its target and the optional arguments it passes
+   itself ([let g = f ~x:1]: supplied [x], maybe none), which every call
+   through it passes too. *)
+let aliasTargets : (Lexing.position * (string list * string list)) PosHash.t =
+  PosHash.create 16
 
-let addAlias ~(posFrom : Lexing.position) ~(posTo : Lexing.position) =
+let addAlias ~supplied ~(posFrom : Lexing.position)
+    ~(posTo : Lexing.position) =
   if posFrom <> posTo then (
     if !Common.Cli.debug then
       Log_.item "OptionalArgs.addAlias %s --> %s@." (posFrom |> posToString)
         (posTo |> posToString);
-    PosHash.replace aliasTargets posFrom posTo)
+    PosHash.replace aliasTargets posFrom (posTo, supplied))
 
-let rec resolveAlias ?(seen = PosSet.empty) pos =
+(* The function an alias chain stands for, with the optional arguments the
+   chain passes on the way. *)
+let rec resolveAliasCall ?(seen = PosSet.empty) pos (argNames, argNamesMaybe)
+    =
   match PosHash.find_opt aliasTargets pos with
-  | Some target when not (PosSet.mem pos seen) ->
-    resolveAlias ~seen:(PosSet.add pos seen) target
-  | _ -> pos
+  | Some (target, (supplied, maybe)) when not (PosSet.mem pos seen) ->
+    resolveAliasCall ~seen:(PosSet.add pos seen) target
+      (supplied @ argNames, maybe @ argNamesMaybe)
+  | _ -> (pos, (argNames, argNamesMaybe))
 
 let isAlias pos = PosHash.mem aliasTargets pos
 
@@ -106,7 +115,10 @@ let resolveAliases () =
     !delayedItems
     |> List.map (fun item ->
            if isAlias item.posTo then
-             {item with posTo = resolveAlias item.posTo; posToImpl = None}
+             let posTo, (argNames, argNamesMaybe) =
+               resolveAliasCall item.posTo (item.argNames, item.argNamesMaybe)
+             in
+             {posTo; argNames; argNamesMaybe; posToImpl = None}
            else item)
 
 (* Once all declarations are known, calls whose target is not a declaration
@@ -152,7 +164,11 @@ let forwardDelayedItems dependencies =
 let forceDelayedItems () =
   let items =
     !delayedItems |> List.rev
-    |> List.map (fun item -> {item with posTo = resolveAlias item.posTo})
+    |> List.map (fun item ->
+           let posTo, (argNames, argNamesMaybe) =
+             resolveAliasCall item.posTo (item.argNames, item.argNamesMaybe)
+           in
+           {item with posTo; argNames; argNamesMaybe})
   in
   delayedItems := [];
   items
