@@ -115,8 +115,7 @@ let addManifestDependencies ~(typeKind : ('a, 'b) Compat.type_kind)
            | Some originalLoc when loc.Location.loc_start <> originalLoc.Location.loc_start ->
              TypeDependencies.addManifest loc originalLoc;
              TypeDependencies.addManifest originalLoc loc
-           | Some _ -> ()
-           | None -> ())
+           | _ -> ())
   in
   let labels = function
     | Types.Type_record (l, _) ->

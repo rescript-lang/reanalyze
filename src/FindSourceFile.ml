@@ -11,9 +11,10 @@ let nativeFilePath fname =
 
 (* Build systems such as dune record source paths relative to the build root
    (e.g. [src/foo.ml] for [_build/default/src/.lib.objs/byte/foo.cmt]), and
-   normalize [cmt_builddir]. The build root is then an ancestor of the .cmt.
-   Dune's generated library wrappers ([.ml-gen]) hold only module aliases and
-   are not analyzed, as when the analysis runs from the source tree. *)
+   normalize [cmt_builddir]. The build root is then an ancestor of the .cmt,
+   as is the root scanned by [-dce-cmt]. Dune's generated library wrappers
+   ([.ml-gen]) hold only module aliases and are not analyzed, as when the
+   analysis runs from the source tree. *)
 let ancestorDirs : (string * string, string option) Hashtbl.t = Hashtbl.create 64
 
 let ancestorSourceDir ~cmtFilePath fname =
@@ -23,7 +24,8 @@ let ancestorSourceDir ~cmtFilePath fname =
       let parent = Filename.dirname dir in
       if parent = dir then None else search parent
   in
-  if Filename.check_suffix fname ".ml-gen" then None
+  if Filename.check_suffix fname ".ml-gen" || not (Filename.is_relative fname)
+  then None
   else
     let key = (Filename.dirname cmtFilePath, fname) in
     match Hashtbl.find_opt ancestorDirs key with
@@ -32,25 +34,6 @@ let ancestorSourceDir ~cmtFilePath fname =
       let found = search (fst key) in
       Hashtbl.add ancestorDirs key found;
       found
-
-(* Whether a source path is found, and the directory it is relative to when
-   that is not the current one: reports and [-write] read the source there. *)
-let sourceDir ?cmtRoot ?cmtFilePath fname =
-  (* Found from the current directory, or through [-native-build-target],
-     whose reports keep naming the path relative to the current directory. *)
-  if Sys.file_exists (nativeFilePath fname) then Some None
-  else if not (Filename.is_relative fname) then None
-  else
-    (* In -dce-cmt mode, source paths in CMT metadata can be relative to the
-       scanned build root rather than the current working directory. *)
-    match cmtRoot with
-    | Some root when Sys.file_exists (concatRelative root fname) ->
-      Some (Some root)
-    | _ -> (
-      match cmtFilePath with
-      | Some cmtFilePath ->
-        ancestorSourceDir ~cmtFilePath fname |> Option.map Option.some
-      | None -> None)
 
 (* Declarations are identified by their source positions. Two build trees
    holding different files under one relative name (e.g. a generated file
@@ -91,60 +74,62 @@ let checkSameSource ?(current = false) fname path =
           fname first path)
   | Some _ -> ()
 
-let sourceExists ?cmtRoot ?cmtFilePath fname =
-  match sourceDir ?cmtRoot ?cmtFilePath fname with
-  | Some (Some dir) ->
-    checkSameSource fname (concatRelative dir fname);
-    Common.registerSourceDir fname dir;
-    true
-  | Some None ->
+(* Whether a source path is found: from the current directory (or through
+   [-native-build-target], whose reports keep naming the path relative to the
+   current directory), or else in an ancestor of the .cmt, from where reports
+   and [-write] then read it. *)
+let sourceExists ~cmtFilePath fname =
+  let ancestor = ancestorSourceDir ~cmtFilePath fname in
+  if Sys.file_exists (nativeFilePath fname) then (
     checkSameSource ~current:true fname (nativeFilePath fname);
-    (match cmtFilePath with
-    | Some cmtFilePath when Filename.is_relative fname -> (
-      match ancestorSourceDir ~cmtFilePath fname with
-      | Some dir -> checkSameSource fname (Filename.concat dir fname)
-      | None -> ())
-    | _ -> ());
-    true
-  | None -> false
+    ancestor
+    |> Option.iter (fun dir ->
+           checkSameSource fname (Filename.concat dir fname));
+    true)
+  else
+    match ancestor with
+    | Some dir ->
+      checkSameSource fname (Filename.concat dir fname);
+      Common.registerSourceDir fname dir;
+      true
+    | None -> false
 
-let rec interface ?cmtRoot ?cmtFilePath items =
+let rec interface ~cmtFilePath items =
   match items with
   | {Typedtree.sig_loc} :: rest -> (
-    match sourceExists ?cmtRoot ?cmtFilePath sig_loc.loc_start.pos_fname with
-    | false -> interface ?cmtRoot ?cmtFilePath rest
+    match sourceExists ~cmtFilePath sig_loc.loc_start.pos_fname with
+    | false -> interface ~cmtFilePath rest
     | true -> Some sig_loc.loc_start.pos_fname)
   | [] -> None
 
-let rec implementation ?cmtRoot ?cmtFilePath items =
+let rec implementation ~cmtFilePath items =
   match items with
   | {Typedtree.str_loc} :: rest -> (
-    match sourceExists ?cmtRoot ?cmtFilePath str_loc.loc_start.pos_fname with
-    | false -> implementation ?cmtRoot ?cmtFilePath rest
+    match sourceExists ~cmtFilePath str_loc.loc_start.pos_fname with
+    | false -> implementation ~cmtFilePath rest
     | true -> Some str_loc.loc_start.pos_fname)
   | [] -> None
 
-let sourcefile ?cmtRoot ?cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
+let sourcefile ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
   match cmt_infos.cmt_sourcefile with
-  | Some sourceFile when sourceExists ?cmtRoot ?cmtFilePath sourceFile ->
-    Some sourceFile
+  | Some sourceFile when sourceExists ~cmtFilePath sourceFile -> Some sourceFile
   | _ -> None
 
-let cmt ?cmtRoot ?cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
+let cmt ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
   (* Preprocessed/generated locations can point at files that are not present
      locally; cmt_sourcefile usually still names the real source file. *)
-  let fallback () = sourcefile ?cmtRoot ?cmtFilePath cmt_infos in
+  let fallback () = sourcefile ~cmtFilePath cmt_infos in
   match cmt_infos.cmt_annots with
   | Cmt_format.Interface signature ->
     if !Common.Cli.debug && signature.sig_items = [] then
       Log_.item "Interface %d@." (signature.sig_items |> List.length);
-    (match interface ?cmtRoot ?cmtFilePath signature.sig_items with
+    (match interface ~cmtFilePath signature.sig_items with
     | Some sourceFile -> Some sourceFile
     | None -> fallback ())
   | Implementation structure ->
     if !Common.Cli.debug && structure.str_items = [] then
       Log_.item "Implementation %d@." (structure.str_items |> List.length);
-    (match implementation ?cmtRoot ?cmtFilePath structure.str_items with
+    (match implementation ~cmtFilePath structure.str_items with
     | Some sourceFile -> Some sourceFile
     | None -> fallback ())
   | _ -> None

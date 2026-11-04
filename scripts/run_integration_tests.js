@@ -227,7 +227,8 @@ function runRegressionTests() {
   assertNotIncludes(output, "optional argument pp_sep of function +print_ints");
   assertIncludes(output,
     "optional argument unused_opt of function +local_function is never used");
-  assertNotIncludes(output, "optional argument through_alias of function +base ");
+  assertIncludes(output,
+    "optional argument through_alias of function +base is always supplied (1 calls)");
   assertIncludes(output,
     "optional argument never_through_alias of function +base_never is never used");
   // An alias exported through an interface has no optional parameters of its
@@ -249,7 +250,8 @@ function runRegressionTests() {
   // function leaves (including those a partial application skips), not for
   // ones that merely share a name.
   assertIncludes(output, "optional argument x of function +wrap is never used");
-  assertNotIncludes(output, "optional argument x of function +skipped ");
+  assertIncludes(output,
+    "optional argument x of function +skipped is always supplied (1 calls)");
   // A binding that is not an alias owns no optional parameters, so calls
   // through it never make one "always supplied"; the function among its
   // arguments may receive them.
@@ -257,11 +259,16 @@ function runRegressionTests() {
   assertNotIncludes(output, "of function +wrapped ");
   assertNotIncludes(output, "of function +via_lambda ");
   assertNotIncludes(output, "of function +lambda_applied ");
-  // Calls through a partial application pass what it applies.
+  assertIncludes(output, "optional argument z of function +unrelated is never used");
+  assertNotIncludes(output, "of function +picked_from ");
+  // Calls through a partial application pass what it applies; the
+  // application itself is a call only when nobody calls through it.
   assertIncludes(output,
-    "optional argument x of function +partial_x is always supplied (3 calls)");
+    "optional argument x of function +partial_x is always supplied (2 calls)");
   assertNotIncludes(output, "optional argument y of function +partial_x ");
   assertNotIncludes(output, "of function +partial_xp ");
+  assertIncludes(output,
+    "optional argument x of function +uncalled is always supplied (1 calls)");
   // Labels hidden by an abbreviation: a constrained alias, and an interface
   // naming the type of a function with optional parameters.
   assertNotIncludes(output, "optional argument x of function +plain ");

@@ -48,6 +48,17 @@ let partial_xp = partial_x ~x:1
 let via_lambda ?c () = match c with Some c -> c | None -> 0
 let lambda_applied = (fun h -> h) via_lambda
 
+(* Only an argument that has all of the binding's optional parameters can
+   be where they come from: [unrelated]'s [?z] is never supplied. *)
+let unrelated ?z () = match z with Some z -> z | None -> 0
+let picked_from ?x () = match x with Some x -> x | None -> 0
+let second _ b = b
+let picked = second unrelated picked_from
+
+(* A partial application nobody calls through counts as one call. *)
+let uncalled ?x () = match x with Some x -> x | None -> 0
+let uncalled_p = uncalled ~x:1
+
 (* A partial application leaves the optional parameters it skips. *)
 let skipped ?x ~a () = match x with Some x -> x + a | None -> a
 let skipped_partial = skipped ~a:1
@@ -68,6 +79,8 @@ let plain ?x () = match x with Some x -> x | None -> 0
 let plain_g : fn = plain
 
 let () =
+  print_int (picked ~x:1 ());
+  ignore uncalled_p;
   print_int (partial_xp ());
   print_int (partial_xp ~y:2 ());
   print_int (lambda_applied ~c:1 ());

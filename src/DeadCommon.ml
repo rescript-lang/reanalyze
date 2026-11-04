@@ -91,9 +91,9 @@ module OptionalArgs = struct
        call [unused] still holds every optional parameter the function owns:
        a label it does not own (a call through an application that is not
        an alias) is never always supplied. *)
-    if x.count = 0 then
-      x.alwaysUsed <- StringSet.inter nameSetAlways x.unused
-    else x.alwaysUsed <- StringSet.inter nameSetAlways x.alwaysUsed;
+    x.alwaysUsed <-
+      StringSet.inter nameSetAlways
+        (if x.count = 0 then x.unused else x.alwaysUsed);
     argNames
     |> List.iter (fun name -> x.unused <- StringSet.remove name x.unused);
     x.count <- x.count + 1

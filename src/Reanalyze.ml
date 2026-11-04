@@ -6,7 +6,7 @@ open Common
    twice. *)
 let scannedUnits = Hashtbl.create 256
 
-let loadCmtFile ~cmtRoot cmtFilePath =
+let loadCmtFile cmtFilePath =
   let cmt_infos =
     match Compat.readCmt cmtFilePath with
     | Some infos -> infos
@@ -35,7 +35,7 @@ let loadCmtFile ~cmtRoot cmtFilePath =
            try String.sub sourceFile 0 (String.length prefix) = prefix
            with Invalid_argument _ -> false)
   in
-  match FindSourceFile.cmt ?cmtRoot ~cmtFilePath cmt_infos with
+  match FindSourceFile.cmt ~cmtFilePath cmt_infos with
   | Some sourceFile when not (excludePath sourceFile) ->
     if !Cli.debug then
       Log_.item "Scanning %s Source:%s@."
@@ -79,7 +79,7 @@ let processCmtFiles ~root =
   in
   let cmtFilePaths = walkSubDirs "" in
   cmtFilePaths |> List.iter Compat.registerCmtFile;
-  cmtFilePaths |> List.iter (loadCmtFile ~cmtRoot:(Some root))
+  cmtFilePaths |> List.iter loadCmtFile
 
 let runAnalysis ~root ~ppf =
   Log_.Color.setup ();
