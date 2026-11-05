@@ -47,7 +47,7 @@ let loadCmtFile cmtFilePath =
         | false -> sourceFile);
     FileReferences.addFile sourceFile;
     currentSrc := sourceFile;
-    currentModule := Paths.getModuleName sourceFile;
+    currentModule := sourceFile |> Filename.basename |> Filename.remove_extension;
     currentModuleName :=
       !currentModule
       |> Name.create ~isInterface:(Filename.check_suffix !currentSrc "i");
