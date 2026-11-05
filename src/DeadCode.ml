@@ -100,18 +100,14 @@ let processCmt ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
       ~moduleTypeRanges:(moduleTypeRangesOfSignature signature);
     processSignature ~doValues:true ~doTypes:true signature.sig_type
   | Implementation structure ->
-    let cmtiExists =
-      Sys.file_exists ((cmtFilePath |> Filename.remove_extension) ^ ".cmti")
-    in
-    ProcessDeadAnnotations.structure ~doGenType:(not cmtiExists) structure;
+    ProcessDeadAnnotations.structure structure;
     setSignatureValueFilter ~fileName:cmt_infos.cmt_sourcefile
       ~buildDir:cmt_infos.cmt_builddir
       ~moduleTypeRanges:(moduleTypeRangesOfStructure structure);
     processSignature ~doValues:true ~doTypes:false structure.str_type;
     let doExternals =
-      (* This is already handled at the interface level, avoid issues in inconsistent locations
-         https://github.com/BuckleScript/syntax/pull/54
-         Ideally, the handling should be less location-based, just like other language aspects. *)
+      (* Externals are handled at the interface level; handling them in the
+         implementation too would declare them at inconsistent locations. *)
       false
     in
     let cmt_value_dependencies =

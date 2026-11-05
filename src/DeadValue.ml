@@ -1529,16 +1529,7 @@ let rec collectExpr super self (e : Typedtree.expression) =
   | Texp_ident (_path, _, ({Types.val_loc = {loc_ghost = false; _}} as vd))
     ->
     let locTo = !identResolutions.valueLoc vd in
-    (* if Path.name _path = "rc" then assert false; *)
-    if locFrom = locTo && _path |> Path.name = "emptyArray" then (
-      (* Work around lowercase jsx with no children producing an artifact `emptyArray`
-         which is called from its own location as many things are generated on the same location. *)
-      if !Common.Cli.debug then
-        Log_.item "addDummyReference %s --> %s@."
-          (Location.none.loc_start |> posToString)
-          (locTo.loc_start |> posToString);
-      ValueReferences.add locTo.loc_start Location.none.loc_start)
-    else addValueReferenceOrRedirect ~locFrom ~locTo ~path:_path;
+    addValueReferenceOrRedirect ~locFrom ~locTo ~path:_path;
     if
       Hashtbl.mem functionArguments (e.exp_loc.loc_start, e.exp_loc.loc_end)
     then (
@@ -2645,10 +2636,7 @@ let traverseStructure ~doTypes ~doExternals =
       in
       let id = vd.val_id |> Ident.name in
       Printf.printf "Primitive %s\n" id;
-      if
-        (not exists) && id <> "unsafe_expr"
-        (* see https://github.com/BuckleScript/bucklescript/issues/4532 *)
-      then
+      if not exists then
         id
         |> Name.create ~isInterface:false
         |> addValueDeclaration ~path ~loc:vd.val_loc
