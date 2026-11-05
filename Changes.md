@@ -1,5 +1,6 @@
 # Unreleased
 
+- Require OCaml 4.14 or later (CI covers 4.14 to 5.5). Users of older compilers keep getting 2.26.0 from opam.
 - Remove the support for ReScript's `@genType` annotations, which kept the annotated value live: reanalyze is for OCaml only (the ReScript version lives in the rescript monorepo). Remove the workarounds for ReScript's JSX (`emptyArray`) and BuckleScript (`unsafe_expr`) as well.
 - Fix DCE false positives on case-insensitive file systems (macOS, Windows): a unit's `.cmt` was found under two spellings and treated as ambiguous, so exceptions raised across modules of a dune wrapped library were reported as never raised.
 - Fix DCE false positives for type re-exports `type t = M.t = A | B` (OCaml 5.3+): constructors and labels are shared with the original type, also when `M` is a local module alias.
