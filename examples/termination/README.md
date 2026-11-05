@@ -149,8 +149,8 @@ Constraint equations:
 # Example Inference
 
 
-```reason
-let rec iter = (f, x) => { f(x); iter(f,x); };
+```ocaml
+let rec iter f x = f x; iter f x
 ```
 
 ```

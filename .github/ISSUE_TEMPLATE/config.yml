@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Using Reanalyze with ReScript?
-    url: https://github.com/rescript-lang/rescript-vscode/issues/new
-    about: Reanalyze is being developed in the rescript-vscode repo. Please open your issue there.
+  - name: Using reanalyze with ReScript?
+    url: https://github.com/rescript-lang/rescript/issues/new
+    about: The ReScript version of reanalyze is developed in the rescript monorepo. Please open your issue there.

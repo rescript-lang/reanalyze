@@ -1,5 +1,2 @@
-
-(* CREATED BY reanalyze/scripts/bump_version_module.js *)
-(* DO NOT MODIFY BY HAND, WILL BE AUTOMATICALLY UPDATED BY npm version *)
-
-let version = "2.26.0";
+(* Set at release, together with test/version.t (see CONTRIBUTING.md). *)
+let version = "2.26.0"

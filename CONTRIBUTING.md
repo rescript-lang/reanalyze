@@ -2,12 +2,12 @@
 
 ## Build reanalyze
 
-Assumes opam with OCaml 4.08 or later.
+Assumes opam with OCaml 4.14 or later.
 
 ```
-# Installs all dependencies (if needed) and builds reanalyze
-npm install
-npm run build
+opam install dune cppo
+dune build
+# _build/default/src/Reanalyze.exe
 ```
 
 ## Test reanalyze
@@ -23,57 +23,21 @@ dune promote
 
 ## Releases (for Maintainers)
 
-The project is compatible with the [`npm
-version`](https://docs.npmjs.com/cli/version) workflow. After using the `npm
-version [major|minor|patch|...]` command, npm will automatically tag the
-current commit, bump all the necessary version numbers (also the number in
-`src/Version.ml`) and push it to the current remote branch.
+1. In a pull request, set the new version in `src/Version.ml`, update
+   `test/version.t` to match (`dune test` and `dune promote`), and rename the
+   `# Unreleased` heading of `Changes.md` to the version. Raise the OCaml
+   bounds in `reanalyze.opam` if needed.
+2. After merging, tag the merge commit on master and push the tag:
 
-Use the `...` menu next to the [tag](https://github.com/rescript-lang/reanalyze/tags) to create a release manually. (To be automated later).
+   ```
+   git tag -a vX.Y.Z -m "Version X.Y.Z"
+   git push origin vX.Y.Z
+   ```
 
-**Here are the concrete commands to run:**
-
-```
-# Make sure to commit & push all current changes, the working branch should be clean
-# and synced up with your remote branch
-
-# Also make sure that your current branch is explicitly set to the relevant remote
-# (`git push` instead of `git push origin master`)
-git status
-
-# For patches (0.0.X+1)
-npm version patch
-
-# For minor (0.X+1.0)
-npm version minor
-
-# For major (X+1.0.0)
-npm version major
-```
-
-## Releasing to npm (Maintainers only)
-
-Use the GitHub web iterface to download the artifact `reanalyze-npm.tar` and zip it.
-
-```
-# Dry run for testing
-npm publish reanalyze-npm.tar.gz --dry-run
-
-# Publish package as @latest
-npm publish reanalyze-npm.tar.gz
-
-# Publish package with @beta tag
-npm publish reanalyze-npm.tar.gz --tag beta
-```
-
-Consult the [npm publish](https://docs.npmjs.com/cli/publish) documentation for more options.
-In case you get an `ENEEDAUTH` error, use `npm adduser` and authenticate with your npm account first.
-
-## Releasing ot opam (Maintainers only)
-
-```
-docker build -t opam-publish --pull .
-docker run --rm -it -v ~/.ssh:/home/opam/.ssh -v `pwd`:/data opam-publish bash
-cd /data
-opam publish
-```
+3. Create a GitHub release from the tag, with the `Changes.md` section as
+   release notes.
+4. Publish to opam: with [opam-publish](https://github.com/ocaml-opam/opam-publish)
+   (`opam install opam-publish`), run `opam publish` in a checkout of the tag.
+   It opens a pull request on
+   [opam-repository](https://github.com/ocaml/opam-repository) adding the
+   package with the tag's source archive and checksums.
