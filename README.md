@@ -135,7 +135,7 @@ For example, you might want to set `_build/default` for projects that use the de
 ## Build From Sources
 
 ```sh
-opam install dune
+opam install dune cppo
 dune build
 # _build/default/src/Reanalyze.exe
 ```
