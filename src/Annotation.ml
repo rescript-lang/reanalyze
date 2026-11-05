@@ -8,15 +8,6 @@ type attributePayload =
   | TuplePayload of attributePayload list
   | UnrecognizedPayload
 
-let tagIsGenType s = s = "genType" || s = "gentype"
-
-let tagIsGenTypeImport s = s = "genType.import" || s = "gentype.import"
-
-let tagIsGenTypeOpaque s = s = "genType.opaque" || s = "gentype.opaque"
-
-let tagIsOneOfTheGenTypeAnnotations s =
-  tagIsGenType s || tagIsGenTypeImport s || tagIsGenTypeOpaque s
-
 let rec getAttributePayload checkText (attributes : Typedtree.attributes) =
   let rec fromExpr (expr : Parsetree.expression) =
     match expr with

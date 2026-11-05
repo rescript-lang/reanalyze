@@ -24,6 +24,12 @@ Dead code and exception analysis of the deadcode example.
     let stale_dead_annotation () = () [@@dead "+stale_dead_annotation"] 
   
     Warning Dead Value
+    File "Annotations.ml", line 8, characters 0-39
+    +gentype_annotated is never used
+    <-- line 8
+    let[@genType] gentype_annotated () = () [@@dead "+gentype_annotated"] 
+  
+    Warning Dead Value
     File "Deadcode.ml", line 3, characters 0-18
     +unused is never used
     <-- line 3
@@ -163,7 +169,7 @@ Dead code and exception analysis of the deadcode example.
     <-- line 4
       | LiveA [@dead "live_variant.LiveA"] 
     
-    Analysis reported 28 issues (Warning Dead Exception:1, Warning Dead Module:2, Warning Dead Type:5, Warning Dead Value:17, Warning Redundant Optional Argument:2, Warning Unused Argument:1)
+    Analysis reported 29 issues (Warning Dead Exception:1, Warning Dead Module:2, Warning Dead Type:5, Warning Dead Value:18, Warning Redundant Optional Argument:2, Warning Unused Argument:1)
 
   $ reanalyze.exe -ci -native-build-target . -exception-cmt _build/default/src/.deadcode_fixture.objs/byte
   

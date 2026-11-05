@@ -214,7 +214,7 @@ let check decl =
   match decl with
   | {declKind = Value {optionalArgs}}
     when active ()
-         && not (ProcessDeadAnnotations.isAnnotatedGenTypeOrLive decl.pos) ->
+         && not (ProcessDeadAnnotations.isAnnotatedLive decl.pos) ->
     optionalArgs
     |> OptionalArgs.iterUnused (fun s ->
            Log_.warning ~loc:(decl |> declGetLoc) ~name:"Warning Unused Argument"

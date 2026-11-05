@@ -277,26 +277,15 @@ let iterFilesFromRootsToLeaves iterFun =
                           fileName);
                   iterFun fileName))
 
-(** Keep track of the location of values annotated @genType or @dead *)
+(** Keep track of the location of values annotated @dead or @live *)
 module ProcessDeadAnnotations = struct
-  type annotatedAs = GenType | Dead | Live
+  type annotatedAs = Dead | Live
 
   let positionsAnnotated = PosHash.create 1
 
   let isAnnotatedDead pos = PosHash.find_opt positionsAnnotated pos = Some Dead
 
-  let isAnnotatedGenTypeOrLive pos =
-    match PosHash.find_opt positionsAnnotated pos with
-    | Some (Live | GenType) -> true
-    | Some Dead | None -> false
-
-  let isAnnotatedGenTypeOrDead pos =
-    match PosHash.find_opt positionsAnnotated pos with
-    | Some (Dead | GenType) -> true
-    | Some Live | None -> false
-
-  let annotateGenType (pos : Lexing.position) =
-    PosHash.replace positionsAnnotated pos GenType
+  let isAnnotatedLive pos = PosHash.find_opt positionsAnnotated pos = Some Live
 
   let annotateDead (pos : Lexing.position) =
     PosHash.replace positionsAnnotated pos Dead
@@ -304,15 +293,10 @@ module ProcessDeadAnnotations = struct
   let annotateLive (pos : Lexing.position) =
     PosHash.replace positionsAnnotated pos Live
 
-  let processAttributes ~doGenType ~name ~pos attributes =
-    let getPayloadFun f = attributes |> Annotation.getAttributePayload f in
+  let processAttributes ~name ~pos attributes =
     let getPayload (x : string) =
       attributes |> Annotation.getAttributePayload (( = ) x)
     in
-    if
-      doGenType
-      && getPayloadFun Annotation.tagIsOneOfTheGenTypeAnnotations <> None
-    then pos |> annotateGenType;
     if getPayload deadAnnotation <> None then pos |> annotateDead;
     let nameIsInLiveNamesOrPaths () =
       !Cli.liveNames |> List.mem name
@@ -335,7 +319,7 @@ module ProcessDeadAnnotations = struct
     if attributes |> Annotation.isOcamlSuppressDeadWarning then
       pos |> annotateLive
 
-  let collectExportLocations ~doGenType =
+  let collectExportLocations () =
     let super = Tast_mapper.default in
     let currentlyDisableWarnings = ref false in
     let value_binding self
@@ -355,7 +339,7 @@ module ProcessDeadAnnotations = struct
       #endif
         if !currentlyDisableWarnings then pos |> annotateLive;
         vb_attributes
-        |> processAttributes ~doGenType ~name:(id |> Ident.name) ~pos
+        |> processAttributes ~name:(id |> Ident.name) ~pos
       | _ -> ());
       super.value_binding self value_binding
     in
@@ -366,8 +350,7 @@ module ProcessDeadAnnotations = struct
         |> List.iter
              (fun ({ld_attributes; ld_loc} : Typedtree.label_declaration) ->
                toplevelAttrs @ ld_attributes
-               |> processAttributes ~doGenType:false ~name:""
-                    ~pos:ld_loc.loc_start)
+               |> processAttributes ~name:"" ~pos:ld_loc.loc_start)
       | Ttype_variant constructorDeclarations ->
         constructorDeclarations
         |> List.iter
@@ -375,8 +358,7 @@ module ProcessDeadAnnotations = struct
                ({cd_attributes; cd_loc} : Typedtree.constructor_declaration)
              ->
                toplevelAttrs @ cd_attributes
-               |> processAttributes ~doGenType:false ~name:""
-                    ~pos:cd_loc.loc_start)
+               |> processAttributes ~name:"" ~pos:cd_loc.loc_start)
       | _ -> ());
       super.type_kind self typeKind
     in
@@ -392,7 +374,7 @@ module ProcessDeadAnnotations = struct
           Typedtree.value_description) =
       if !currentlyDisableWarnings then pos |> annotateLive;
       val_attributes
-      |> processAttributes ~doGenType ~name:(val_id |> Ident.name) ~pos;
+      |> processAttributes ~name:(val_id |> Ident.name) ~pos;
       super.value_description self value_description
     in
     let structure_item self (item : Typedtree.structure_item) =
@@ -434,14 +416,14 @@ module ProcessDeadAnnotations = struct
       value_description;
     }
 
-  let structure ~doGenType structure =
-    let collectExportLocations = collectExportLocations ~doGenType in
+  let structure structure =
+    let collectExportLocations = collectExportLocations () in
     structure
     |> collectExportLocations.structure collectExportLocations
     |> ignore
 
   let signature signature =
-    let collectExportLocations = collectExportLocations ~doGenType:true in
+    let collectExportLocations = collectExportLocations () in
     signature
     |> collectExportLocations.signature collectExportLocations
     |> ignore
@@ -786,9 +768,9 @@ let declIsDead ~refs decl =
     |> PosSet.filter (fun p -> not (ProcessDeadAnnotations.isAnnotatedDead p))
   in
   liveRefs |> PosSet.cardinal = 0
-  && not (ProcessDeadAnnotations.isAnnotatedGenTypeOrLive decl.pos)
+  && not (ProcessDeadAnnotations.isAnnotatedLive decl.pos)
 
-let doReportDead pos = not (ProcessDeadAnnotations.isAnnotatedGenTypeOrDead pos)
+let doReportDead pos = not (ProcessDeadAnnotations.isAnnotatedDead pos)
 
 let rec resolveRecursiveRefs ~checkOptionalArg ~deadDeclarations ~level
     ~orderedFiles ~refs ~refsBeingResolved decl : bool =
