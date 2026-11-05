@@ -1,0 +1,174 @@
+Dead code and exception analysis of the deadcode example.
+
+  $ cp -r ../examples/deadcode . && cd deadcode
+  $ dune build --root . 2>&1
+
+  $ reanalyze.exe -ci -native-build-target . -externals -dce-cmt _build/default/src/.deadcode_fixture.objs/byte
+  
+    Warning Unused Argument
+    File "OptionalArgs.ml", line 1, characters 0-86
+    optional argument unused of function +live_optional is never used
+  
+    Warning Redundant Optional Argument
+    File "OptionalArgs.ml", line 1, characters 0-86
+    optional argument used of function +live_optional is always supplied (1 calls)
+  
+    Warning Redundant Optional Argument
+    File "FunctorSigMli.ml", line 11, characters 2-30
+    optional argument x of function Make.+with_opt is always supplied (1 calls)
+  
+    Warning Dead Value
+    File "Annotations.ml", line 5, characters 0-33
+    +stale_dead_annotation is never used
+    <-- line 5
+    let stale_dead_annotation () = () [@@dead "+stale_dead_annotation"] 
+  
+    Warning Dead Value
+    File "Deadcode.ml", line 3, characters 0-18
+    +unused is never used
+    <-- line 3
+    let unused () = () [@@dead "+unused"] 
+  
+    Warning Dead Value
+    File "Exceptions.ml", line 9, characters 0-24
+    +leaks is never used
+    <-- line 9
+    let leaks () = raises () [@@dead "+leaks"] 
+  
+    Warning Dead Exception
+    File "Exceptions.ml", line 13, characters 0-23
+    DeadAlias is never raised or passed as value
+    <-- line 13
+    exception DeadAlias = A [@@dead "DeadAlias"] 
+  
+    Warning Dead Value
+    File "Externals.ml", line 3, characters 0-57
+    +dead_external is never used
+    <-- line 3
+    external dead_external : string -> int = "%string_length" [@@dead "+dead_external"] 
+  
+    Warning Dead Module
+    File "FirstClassModules.ml", line 9, characters 0-48
+    +FirstClassModules.DeadRunner is a dead module as all its items are dead.
+  
+    Warning Dead Value
+    File "FirstClassModules.ml", line 10, characters 2-17
+    DeadRunner.+run is never used
+    <-- line 10
+      let run () = () [@@dead "DeadRunner.+run"] 
+  
+    Warning Dead Value
+    File "FunctorSigInline.ml", line 6, characters 2-32
+    Make.+unused_in_inline_sig is never used
+    <-- line 6
+      let unused_in_inline_sig k = k [@@dead "Make.+unused_in_inline_sig"] 
+  
+    Warning Dead Value
+    File "FunctorSigInline.ml", line 8, characters 2-29
+    Make.+truly_dead_inline is never used
+    <-- line 8
+      let truly_dead_inline k = k [@@dead "Make.+truly_dead_inline"] 
+  
+    Warning Dead Value
+    File "FunctorSigMli.ml", line 7, characters 2-25
+    Make.+unused_in_sig is never used
+    <-- line 7
+      let unused_in_sig k = k [@@dead "Make.+unused_in_sig"] 
+  
+    Warning Dead Value
+    File "FunctorSigMli.ml", line 9, characters 2-22
+    Make.+truly_dead is never used
+    <-- line 9
+      let truly_dead k = k [@@dead "Make.+truly_dead"] 
+  
+    Warning Dead Value
+    File "Includes.ml", line 4, characters 2-29
+    +included_unused is never used
+    <-- line 4
+      let included_unused () = () [@@dead "+included_unused"] 
+  
+    Warning Dead Value
+    File "ModuleAliases.ml", line 4, characters 2-36
+    Source.+unused_even_with_alias is never used
+    <-- line 4
+      let unused_even_with_alias () = () [@@dead "Source.+unused_even_with_alias"] 
+  
+    Warning Dead Module
+    File "Modules.ml", line 7, characters 0-79
+    +Modules.DeadNested is a dead module as all its items are dead.
+  
+    Warning Dead Value
+    File "Modules.ml", line 8, characters 2-20
+    DeadNested.+helper is never used
+    <-- line 8
+      let helper () = () [@@dead "DeadNested.+helper"] 
+  
+    Warning Dead Value
+    File "Modules.ml", line 10, characters 2-26
+    DeadNested.+value is never used
+    <-- line 10
+      let value () = helper () [@@dead "DeadNested.+value"] 
+  
+    Warning Dead Value
+    File "Modules.ml", line 16, characters 2-20
+    PartlyLive.+unused is never used
+    <-- line 16
+      let unused () = () [@@dead "PartlyLive.+unused"] 
+  
+    Warning Dead Value
+    File "OptionalArgs.ml", line 6, characters 0-88
+    +dead_optional is never used
+    <-- line 6
+      | None -> () [@@dead "+dead_optional"] 
+  
+    Warning Dead Value
+    File "TransitiveTypes.ml", line 11, characters 0-52
+    +dead_value is never used
+    <-- line 11
+    let dead_value = UnusedWrapper (UnusedLeaf "unused") [@@dead "+dead_value"] 
+  
+    Warning Dead Type
+    File "Types.ml", line 1, characters 21-29
+    live_record.id is a record label never used to read a value
+    <-- line 1
+    type live_record = { id : int [@dead "live_record.id"]  }
+  
+    Warning Dead Type
+    File "Types.ml", line 4, characters 2-9
+    live_variant.LiveA is a variant case which is never constructed
+    <-- line 4
+      | LiveA [@dead "live_variant.LiveA"] 
+  
+    Warning Dead Type
+    File "Types.ml", line 9, characters 21-34
+    dead_record.dead_id is a record label never used to read a value
+    <-- line 9
+    type dead_record = { dead_id : int [@dead "dead_record.dead_id"]  }
+  
+    Warning Dead Type
+    File "Types.ml", line 12, characters 2-9
+    dead_variant.DeadA is a variant case which is never constructed
+    <-- line 12
+      | DeadA [@dead "dead_variant.DeadA"] 
+  
+    Warning Dead Value
+    File "Types.ml", line 17, characters 0-41
+    +make_dead is never used
+    <-- line 17
+    let make_dead id = DeadB { dead_id = id } [@@dead "+make_dead"] 
+  
+    Warning Dead Type
+    File "Types.mli", line 4, characters 2-9
+    live_variant.LiveA is a variant case which is never constructed
+    <-- line 4
+      | LiveA [@dead "live_variant.LiveA"] 
+    
+    Analysis reported 28 issues (Warning Dead Exception:1, Warning Dead Module:2, Warning Dead Type:5, Warning Dead Value:17, Warning Redundant Optional Argument:2, Warning Unused Argument:1)
+
+  $ reanalyze.exe -ci -native-build-target . -exception-cmt _build/default/src/.deadcode_fixture.objs/byte
+  
+    Exception Analysis
+    File "Exceptions.ml", line 3, characters 4-10
+    raises might raise A (Exceptions.ml:3:16) and is not annotated with [@raises A]
+    
+    Analysis reported 1 issues (Exception Analysis:1)

@@ -1,0 +1,22 @@
+(cram
+ (deps
+  %{bin:reanalyze.exe}
+  (source_tree ../examples)))
+
+; Results that rely on shapes, which OCaml records from 5.3 on.
+
+(cram
+ (applies_to
+  regression_ocaml_5_3
+  build_trees_ocaml_5_3
+  duplicate_context
+  compilation_context
+  compilation_context_shared_interface
+  split_interface
+  functor_scan_order_nested_arguments
+  functor_scan_order_unpacked_functor
+  functor_scan_order_attribution_sweep
+  functor_scan_order_unpacked_open
+  import_digest_selection)
+ (enabled_if
+  (>= %{ocaml_version} 5.3)))

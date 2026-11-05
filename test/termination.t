@@ -1,0 +1,218 @@
+Termination analysis of the termination example.
+
+  $ cp -r ../examples/termination . && cd termination
+  $ dune build --root . 2>&1
+
+  $ reanalyze.exe -ci -debug -native-build-target . -termination-cmt _build/default/src/.termination_fixture.objs/byte
+    Scanning _build/default/src/.termination_fixture.objs/byte/termination_fixture__Termination.cmt Source:src/Termination.ml
+  
+    Function Table
+    1 just_return: _
+  
+    Termination Analysis for just_return
+  
+    Termination Analysis
+    File "Termination.ml", line 15, characters 40-47
+    just_return returns NoProgress with trace _
+  
+    Function Table
+    1 always_loop: always_loop
+  
+    Termination Analysis for always_loop
+  
+    Error Termination
+    File "Termination.ml", line 17, characters 45-59
+    Possible infinite loop when calling always_loop
+    CallStack:
+      1 always_loop (Termination.ml 17)
+  
+    Termination Analysis
+    File "Termination.ml", line 17, characters 40-59
+    always_loop returns NoProgress with trace always_loop:NoProgress
+  
+    Function Table
+    1 always_progress: +progress; always_progress
+  
+    Termination Analysis for always_progress
+  
+    Termination Analysis
+    File "Termination.ml", line 19, characters 44-84
+    always_progress returns Progress with trace progress:Progress; always_progress:Progress
+  
+    Function Table
+    1 always_progress_wrong_order: always_progress_wrong_order; +progress
+  
+    Termination Analysis for always_progress_wrong_order
+  
+    Error Termination
+    File "Termination.ml", line 24, characters 2-32
+    Possible infinite loop when calling always_progress_wrong_order
+    CallStack:
+      1 always_progress_wrong_order (Termination.ml 23)
+  
+    Termination Analysis
+    File "Termination.ml", line 23, characters 56-108
+    always_progress_wrong_order returns Progress with trace always_progress_wrong_order:NoProgress; progress:Progress
+  
+    Error Hygiene
+    File "Termination.ml", line 28, characters 14-26
+    do_not_alias can only be called directly, or passed as labeled argument
+  
+    Function Table
+    1 do_not_alias: _
+  
+    Termination Analysis for do_not_alias
+  
+    Termination Analysis
+    File "Termination.ml", line 27, characters 41-86
+    do_not_alias returns NoProgress with trace _
+  
+    Function Table
+    1 progress_on_both_branches: [+progress || +progress2]; progress_on_both_branches
+  
+    Termination Analysis for progress_on_both_branches
+  
+    Termination Analysis
+    File "Termination.ml", line 31, characters 67-147
+    progress_on_both_branches returns Progress with trace [progress:Progress || progress2:Progress]; progress_on_both_branches:Progress
+  
+    Function Table
+    1 progress_on_one_branch: [+progress || _]; progress_on_one_branch
+  
+    Termination Analysis for progress_on_one_branch
+  
+    Error Termination
+    File "Termination.ml", line 37, characters 2-26
+    Possible infinite loop when calling progress_on_one_branch
+    CallStack:
+      1 progress_on_one_branch (Termination.ml 35)
+  
+    Termination Analysis
+    File "Termination.ml", line 35, characters 51-110
+    progress_on_one_branch returns NoProgress with trace [progress:Progress || _]; progress_on_one_branch:NoProgress
+  
+    Termination Analysis
+    File "Termination.ml", line 44, characters 40-64
+    call_parse_function is parametric ~parse_function=test_parametric_function
+  
+    Function Table
+    1 call_parse_function<parse_function>: parse_function
+    2 test_parametric_function: [+progress || _]; test_parametric_function2
+    3 test_parametric_function2: call_parse_function<parse_function:test_parametric_function>
+  
+    Termination Analysis for test_parametric_function
+  
+    Termination Analysis
+    File "Termination.ml", line 41, characters 2-29
+    Cache miss for test_parametric_function2
+  
+    Termination Analysis
+    File "Termination.ml", line 44, characters 2-64
+    Cache miss for call_parse_function<parse_function:test_parametric_function>
+  
+    Error Termination
+    File "Termination.ml", line 46, characters 44-60
+    Possible infinite loop when calling parse_function which is test_parametric_function
+    CallStack:
+      3 call_parse_function<parse_function:test_parametric_function> (Termination.ml 44)
+      2 test_parametric_function2 (Termination.ml 41)
+      1 test_parametric_function (Termination.ml 39)
+  
+    Termination Analysis
+    File "Termination.ml", line 44, characters 2-64
+    call_parse_function<parse_function:test_parametric_function> returns NoProgress with trace test_parametric_function:NoProgress
+  
+    Termination Analysis
+    File "Termination.ml", line 41, characters 2-29
+    test_parametric_function2 returns NoProgress with trace call_parse_function<parse_function:test_parametric_function>:NoProgress
+  
+    Termination Analysis
+    File "Termination.ml", line 39, characters 53-115
+    test_parametric_function returns NoProgress with trace [progress:Progress || _]; test_parametric_function2:NoProgress
+  
+    Function Table
+    1 do_nothing: _
+    2 test_cache_hit: [do_nothing; do_nothing; +Progress.Nested.f || _]; test_cache_hit
+  
+    Termination Analysis for test_cache_hit
+  
+    Termination Analysis
+    File "Termination.ml", line 50, characters 4-16
+    Cache miss for do_nothing
+  
+    Termination Analysis
+    File "Termination.ml", line 50, characters 4-16
+    do_nothing returns NoProgress with trace _
+  
+    Termination Analysis
+    File "Termination.ml", line 51, characters 4-16
+    Cache hit for do_nothing
+  
+    Error Termination
+    File "Termination.ml", line 53, characters 2-18
+    Possible infinite loop when calling test_cache_hit
+    CallStack:
+      1 test_cache_hit (Termination.ml 48)
+  
+    Termination Analysis
+    File "Termination.ml", line 48, characters 52-155
+    test_cache_hit returns NoProgress with trace [do_nothing:NoProgress; do_nothing:NoProgress; Progress.Nested.f:Progress || _]; test_cache_hit:NoProgress
+  
+    Function Table
+    1 eval_order_is_not_left_to_right: {+progress, eval_order_is_not_left_to_right}; _
+  
+    Termination Analysis for eval_order_is_not_left_to_right
+  
+    Error Termination
+    File "Termination.ml", line 59, characters 34-67
+    Possible infinite loop when calling eval_order_is_not_left_to_right
+    CallStack:
+      1 eval_order_is_not_left_to_right (Termination.ml 57)
+  
+    Termination Analysis
+    File "Termination.ml", line 57, characters 60-173
+    eval_order_is_not_left_to_right returns Progress with trace progress:Progress; eval_order_is_not_left_to_right:NoProgress
+  
+    Function Table
+    1 eval_order_is_not_right_to_left: {eval_order_is_not_right_to_left, +progress}; _
+  
+    Termination Analysis for eval_order_is_not_right_to_left
+  
+    Error Termination
+    File "Termination.ml", line 63, characters 21-54
+    Possible infinite loop when calling eval_order_is_not_right_to_left
+    CallStack:
+      1 eval_order_is_not_right_to_left (Termination.ml 61)
+  
+    Termination Analysis
+    File "Termination.ml", line 61, characters 60-173
+    eval_order_is_not_right_to_left returns Progress with trace eval_order_is_not_right_to_left:NoProgress; progress:Progress
+  
+    Function Table
+    1 first_argument_is_always_evaluated: +progress; first_argument_is_always_evaluated
+  
+    Termination Analysis for first_argument_is_always_evaluated
+  
+    Termination Analysis
+    File "Termination.ml", line 65, characters 63-185
+    first_argument_is_always_evaluated returns Progress with trace progress:Progress; first_argument_is_always_evaluated:Progress
+  
+    Function Table
+    1 second_argument_is_always_evaluated: +progress; second_argument_is_always_evaluated
+  
+    Termination Analysis for second_argument_is_always_evaluated
+  
+    Termination Analysis
+    File "Termination.ml", line 70, characters 64-187
+    second_argument_is_always_evaluated returns Progress with trace progress:Progress; second_argument_is_always_evaluated:Progress
+  
+    Termination Analysis Stats
+    Files:1
+    Recursive Blocks:13
+    Functions:16
+    Infinite Loops:7
+    Hygiene Errors:1
+    Cache Hits:1/4
+    
+    
+    Analysis reported 8 issues (Error Hygiene:1, Error Termination:7)

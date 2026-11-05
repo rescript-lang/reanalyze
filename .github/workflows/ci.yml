@@ -37,15 +37,10 @@ jobs:
         with:
           ocaml-compiler: ${{matrix.ocaml-compiler}}
 
-      - name: Use Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 18
-
       - run: opam install dune cppo
 
       - name: Build
         run: opam exec -- dune build
 
       - name: Test
-        run: opam exec -- npm test
+        run: opam exec -- dune test
