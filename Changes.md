@@ -1,4 +1,4 @@
-# Unreleased
+# 2.27.0
 
 - Require OCaml 4.14 or later (CI covers 4.14 to 5.5). Users of older compilers keep getting 2.26.0 from opam.
 - Remove the support for ReScript's `@genType` annotations, which kept the annotated value live: reanalyze is for OCaml only (the ReScript version lives in the rescript monorepo). Remove the workarounds for ReScript's JSX (`emptyArray`) and BuckleScript (`unsafe_expr`) as well.
