@@ -1,1 +1,5 @@
-(dirs :standard \ node_modules examples)
+(dirs :standard \ node_modules)
+
+; Fixture projects for the tests: copied as data, built by the cram tests.
+
+(data_only_dirs examples)

@@ -10,6 +10,17 @@ npm install
 npm run build
 ```
 
+## Test reanalyze
+
+The tests are dune cram tests in `test/`, over the fixture projects in
+`examples/`:
+
+```
+dune test
+# After an intended change of output, review the diff and accept it with
+dune promote
+```
+
 ## Releases (for Maintainers)
 
 The project is compatible with the [`npm
