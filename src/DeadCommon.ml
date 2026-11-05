@@ -74,7 +74,8 @@ module OptionalArgs = struct
     mutable alwaysUsed : StringSet.t;
   }
 
-  let empty =
+  (* A fresh value each time: [call] and [combine] mutate it. *)
+  let empty () =
     {unused = StringSet.empty; alwaysUsed = StringSet.empty; count = 0}
 
   let fromList l =
@@ -86,8 +87,13 @@ module OptionalArgs = struct
     let nameSet = argNames |> StringSet.of_list in
     let nameSetMaybe = argNamesMaybe |> StringSet.of_list in
     let nameSetAlways = StringSet.diff nameSet nameSetMaybe in
-    if x.count = 0 then x.alwaysUsed <- nameSetAlways
-    else x.alwaysUsed <- StringSet.inter nameSetAlways x.alwaysUsed;
+    (* Calls are applied once all declarations are known, so at the first
+       call [unused] still holds every optional parameter the function owns:
+       a label it does not own (a call through an application that is not
+       an alias) is never always supplied. *)
+    x.alwaysUsed <-
+      StringSet.inter nameSetAlways
+        (if x.count = 0 then x.unused else x.alwaysUsed);
     argNames
     |> List.iter (fun name -> x.unused <- StringSet.remove name x.unused);
     x.count <- x.count + 1
@@ -487,7 +493,7 @@ let addDeclaration_ ?posEnd ?posStart ~declKind ~path ~(loc : Location.t)
     PosHash.replace decls pos decl)
 
 let addValueDeclaration ?(isToplevel = true) ~(loc : Location.t) ~moduleLoc
-    ?(optionalArgs = OptionalArgs.empty) ~path ~sideEffects name =
+    ?(optionalArgs = OptionalArgs.empty ()) ~path ~sideEffects name =
   name
   |> addDeclaration_
        ~declKind:(Value {isToplevel; optionalArgs; sideEffects})
@@ -599,7 +605,7 @@ module WriteDeadAnnotations = struct
       close_out_noerr channel)
 
   let onDeadDecl ~ppf decl =
-    let fileName = decl.pos.pos_fname in
+    let fileName = Common.sourcePath decl.pos.pos_fname in
     if Sys.file_exists fileName then (
       if fileName <> !currentFile then (
         writeFile !currentFile !currentFileLines;

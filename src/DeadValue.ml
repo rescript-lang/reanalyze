@@ -18,6 +18,133 @@ let checkAnyValueBindingWithNoSideEffects
 (* See [registerPackedModule], defined once its helpers are. *)
 let registerPackedModuleRef = ref (fun (_ : Typedtree.value_binding) -> ())
 
+(* The optional parameters of the declared type [t] that remain after the
+   applications [argGroups] (innermost first, as in [(f ~x:1) a], which is
+   how [a |> f ~x:1] is typed): each takes the parameters its arguments
+   skip first (a skipped one filled with [None] is an argument), then those
+   after its last argument. A result that is a type variable, as in
+   [let g = wrap f] with [wrap : ?x:_ -> 'a -> 'a], has none of its own: its
+   optional parameters come from the argument, not from the applied
+   function. *)
+let residualLabels (t : Types.type_expr) argGroups =
+  (* Each parameter as its optional label, or [None]. *)
+  let rec parameters (t : Types.type_expr) =
+    match Compat.get_desc t with
+    | Tlink t | Tpoly (t, []) -> parameters t
+    | Tsubst _ -> parameters (Compat.getTSubst (Compat.get_desc t))
+    | Tarrow (Optional s, _, rest, _) -> Some s :: parameters rest
+    | Tarrow (_, _, rest, _) -> None :: parameters rest
+    | _ -> []
+  in
+  let rec apply parameters args =
+    match (parameters, args) with
+    | _, [] -> parameters
+    | parameter :: parameters, (_, arg) :: args ->
+      let skipped =
+        match (parameter, Compat.applyArgToOption arg) with
+        | Some _, None -> [parameter]
+        | _ -> []
+      in
+      skipped @ apply parameters args
+    | [], _ :: _ -> []
+  in
+  List.fold_left apply (parameters t) argGroups |> List.filter_map Fun.id
+
+(* The identifier an application applies, also through nested applications
+   ([(f ~x:1) a]): its declaration, the argument groups innermost first, and
+   the innermost application, which is the one recorded as a call. *)
+let rec appliedIdent (e : Typedtree.expression) =
+  match e.exp_desc with
+  | Texp_apply ({exp_desc = Texp_ident (_, _, vd)}, args) ->
+    Some (vd, [args], e.exp_loc)
+  | Texp_apply (inner, args) ->
+    appliedIdent inner
+    |> Option.map (fun (vd, groups, application) ->
+           (vd, groups @ [args], application))
+  | _ -> None
+
+(* Functions passed as arguments of an application with their optional
+   parameters intact, e.g. [find_component Env.lookup] where [find_component]
+   takes [(lookup : ?loc:_ -> _)] and calls [lookup ~loc]: the receiver may
+   supply them. Keyed by the argument's location. *)
+let functionArguments : (Lexing.position * Lexing.position, unit) Hashtbl.t =
+  Hashtbl.create 256
+
+(* The optional arguments an application passes: [~x:v] (wrapped in
+   [Some]) surely, [?x:v] maybe; an omitted one or [None] not. Returns the
+   supplied labels (including the maybe ones) and the maybe ones. *)
+let suppliedLabels args =
+  List.fold_right
+    (fun (lbl, arg) (supplied, maybe) ->
+      match (lbl : Asttypes.arg_label) with
+      | Optional s -> (
+        match Compat.applyArgToOption arg with
+        | Some {Typedtree.exp_desc = Texp_construct (_, {cstr_name = "Some"}, _)}
+          ->
+          (s :: supplied, maybe)
+        | Some {exp_desc = Texp_construct (_, {cstr_name = "None"}, _)} | None ->
+          (supplied, maybe)
+        | Some _ -> (s :: supplied, s :: maybe))
+      | _ -> (supplied, maybe))
+    args ([], [])
+
+(* A binding that applies a function but does not stand for it, yet has
+   optional parameters ([let g = wrap f] with [wrap : ?x:_ -> 'a -> 'a]):
+   they come from a function among the arguments, which calls through the
+   binding may supply. *)
+let creditFunctionArgument ~accepts arg =
+  match Compat.applyArgToOption arg with
+  | Some {Typedtree.exp_desc = Texp_ident (_, _, vd); exp_loc}
+    when accepts vd.Types.val_type ->
+    Hashtbl.replace functionArguments (exp_loc.loc_start, exp_loc.loc_end) ()
+  | _ -> ()
+
+(* Only functions that have all of the binding's optional parameters can be
+   where they come from. *)
+let creditFunctionArguments ~labels args =
+  args
+  |> List.iter (fun (_, arg) ->
+         arg
+         |> creditFunctionArgument ~accepts:(fun t ->
+                let own = DeadOptionalArgs.fromTypeExpr t in
+                List.for_all (fun l -> List.mem l own) labels))
+
+(* An annotated parameter ([(lookup : ?loc:_ -> _)]) can have a monomorphic
+   [Tpoly] type. *)
+let rec unpoly (t : Types.type_expr) =
+  match Compat.get_desc t with Tpoly (t, []) | Tlink t -> unpoly t | _ -> t
+
+let rec parameterTypes (t : Types.type_expr) =
+  match Compat.get_desc t with
+  | Tarrow (_, parameter, rest, _) -> unpoly parameter :: parameterTypes rest
+  | Tlink t -> parameterTypes t
+  | Tsubst _ -> parameterTypes (Compat.getTSubst (Compat.get_desc t))
+  | _ -> []
+
+(* A function passed to a parameter that the callee declares as a function
+   with optional parameters, e.g. [find_component (lookup : ?loc:_ -> _)],
+   may receive them. So may one passed to a parameter of a named type
+   ([find (f : lookup)] with [type lookup = ?loc:int -> int]): the argument
+   unified with it, so the name stands for a function type (only an identity
+   abbreviation [type 'a id = 'a] would be credited wrongly). A type variable
+   (['a] of [ignore] or [ref]) does not say so. Arguments follow the callee's
+   parameter order. The argument is typed with the parameter's type
+   ([lookup]), so its optional parameters are read from its declaration. *)
+let creditPassedFunctions calleeType args =
+  let mayReceive (parameter : Types.type_expr) =
+    DeadOptionalArgs.hasOptionalArgs parameter
+    || match Compat.get_desc parameter with Tconstr _ -> true | _ -> false
+  in
+  let rec walk args parameters =
+    match (args, parameters) with
+    | (_, arg) :: args, parameter :: parameters ->
+      if mayReceive parameter then
+        arg |> creditFunctionArgument ~accepts:DeadOptionalArgs.hasOptionalArgs;
+      walk args parameters
+    | _ -> ()
+  in
+  walk args (parameterTypes calleeType)
+
 let collectValueBinding super self (vb : Typedtree.value_binding) =
   let oldCurrentBindings = !Current.bindings in
   let oldLastBinding = !Current.lastBinding in
@@ -42,8 +169,35 @@ let collectValueBinding super self (vb : Typedtree.value_binding) =
       when (not loc_ghost) && not vb.vb_loc.loc_ghost ->
       let name = Ident.name id |> Name.create ~isInterface:false in
       let optionalArgs =
-        vb.vb_expr.exp_type |> DeadOptionalArgs.fromTypeExpr
-        |> OptionalArgs.fromList
+        (* An alias or application ([let f = Lib.g], [let f = g ~a],
+           [let f = List.hd fs]) has optional parameters in its type, but they
+           belong to another function and cannot be dropped here. A binding
+           whose optional parameters are those the applied function has left
+           stands for it: calls through it are calls of that function. Any
+           other binding defines a function and owns its optional parameters. *)
+        let labels = DeadOptionalArgs.fromTypeExpr vb.vb_expr.exp_type in
+        match vb.vb_expr.exp_desc with
+        | Texp_ident (_, _, vd) ->
+          (* The same value, whatever the types say: an abbreviation can hide
+             the labels on either side ([let g : fn = f], [let h = g], a
+             [val f : fn]). An alias of a value without optional parameters
+             receives no optional arguments, so it changes nothing. *)
+          DeadOptionalArgs.addAlias ~application:None ~supplied:([], [])
+            ~posFrom:loc_start ~posTo:vd.val_loc.loc_start;
+          OptionalArgs.empty ()
+        | Texp_apply (_, args) ->
+          (match appliedIdent vb.vb_expr with
+          | Some (vd, groups, application)
+            when labels <> []
+                 && List.sort compare labels
+                    = List.sort compare (residualLabels vd.val_type groups) ->
+            (* Calls through the binding also pass what it applies. *)
+            DeadOptionalArgs.addAlias ~application:(Some application)
+              ~supplied:(suppliedLabels (List.concat groups))
+              ~posFrom:loc_start ~posTo:vd.val_loc.loc_start
+          | _ -> if labels <> [] then creditFunctionArguments ~labels args);
+          OptionalArgs.empty ()
+        | _ -> OptionalArgs.fromList labels
       in
       let exists =
         match PosHash.find_opt decls loc_start with
@@ -293,6 +447,7 @@ let escapedRanges : definitionRange list ref = ref []
    a packed module used only through direct unpacks is followed precisely,
    any other use makes it escape. *)
 let unpackOperands = ref PosSet.empty
+
 let usedOutsideUnpack = ref DefinitionSet.empty
 
 let inRanges ((pos : Lexing.position), context) ranges =
@@ -712,37 +867,16 @@ let registerParameterAlias (id : Ident.t option)
 
 let processOptionalArgs ~expType ~(locFrom : Location.t) ~locTo ?locToImpl
     ~path args =
-  let args =
-    List.map (fun (lbl, arg) -> (lbl, Compat.applyArgToOption arg)) args
+  (* The callee's type can be an abbreviation ([g : fn]) that hides its
+     labels; the arguments still carry them. *)
+  let hasOptionalArg =
+    List.exists
+      (fun (lbl, _) ->
+        match lbl with Asttypes.Optional _ -> true | _ -> false)
+      args
   in
-  if expType |> DeadOptionalArgs.hasOptionalArgs then (
-    let supplied = ref [] in
-    let suppliedMaybe = ref [] in
-    args
-    |> List.iter (fun (lbl, arg) ->
-           let argIsSupplied =
-             match arg with
-             | Some
-                 {
-                   Typedtree.exp_desc =
-                     Texp_construct (_, {cstr_name = "Some"}, _);
-                 } ->
-               Some true
-             | Some
-                 {
-                   Typedtree.exp_desc =
-                     Texp_construct (_, {cstr_name = "None"}, _);
-                 } ->
-               Some false
-             | Some _ -> None
-             | None -> Some false
-           in
-           match lbl with
-           | Asttypes.Optional s when not locFrom.loc_ghost ->
-             if argIsSupplied <> Some false then supplied := s :: !supplied;
-             if argIsSupplied = None then suppliedMaybe := s :: !suppliedMaybe
-           | _ -> ());
-    let call = (!supplied, !suppliedMaybe) in
+  if DeadOptionalArgs.hasOptionalArgs expType || hasOptionalArg then (
+    let call = if locFrom.loc_ghost then ([], []) else suppliedLabels args in
     let parameter = findFunctorParameter path in
     (* Without shape resolution the call is only forwarded (below); recording
        it here too would credit it twice. *)
@@ -1329,6 +1463,10 @@ let registerUnpackedExports signature moduleExpr =
 
 let rec collectExpr super self (e : Typedtree.expression) =
   let locFrom = e.exp_loc in
+  (match e.exp_desc with
+  | Texp_apply ({exp_desc = Texp_ident (_, _, {Types.val_type})}, args) ->
+    creditPassedFunctions val_type args
+  | _ -> ());
   (* [let module F (M : S) = ... in]: key the functor by its binding. On
      OCaml >= 5.5 this is a [Texp_struct_item] holding a [Tstr_module], which
      the structure item handler covers. *)
@@ -1400,7 +1538,14 @@ let rec collectExpr super self (e : Typedtree.expression) =
           (Location.none.loc_start |> posToString)
           (locTo.loc_start |> posToString);
       ValueReferences.add locTo.loc_start Location.none.loc_start)
-    else addValueReferenceOrRedirect ~locFrom ~locTo ~path:_path
+    else addValueReferenceOrRedirect ~locFrom ~locTo ~path:_path;
+    if
+      Hashtbl.mem functionArguments (e.exp_loc.loc_start, e.exp_loc.loc_end)
+    then (
+      let names = DeadOptionalArgs.fromTypeExpr vd.val_type in
+      let locToImpl = findResolution ~identLoc:e.exp_loc ~path:_path in
+      (names, names)
+      |> DeadOptionalArgs.addReferences ~locFrom ~locTo ?locToImpl ~path:_path)
   | Texp_apply
       ( {
           exp_desc =
@@ -1805,7 +1950,7 @@ let rec processSignatureItem ~doTypes ~doValues ~moduleLoc ~path
   | Sig_type _ when doTypes ->
     let id, t = si |> Compat.getSigType in
     if !Config.analyzeTypes then
-      DeadType.addDeclaration ~typeId:id ~typeKind:t.type_kind
+      DeadType.addDeclaration ~path ~typeId:id ~typeKind:t.type_kind ()
   | Sig_value _ when doValues ->
     let id, loc, kind, valType = si |> Compat.getSigValue in
     let _, vd = si |> Compat.getSigValueDescription in
@@ -2512,8 +2657,21 @@ let traverseStructure ~doTypes ~doExternals =
       if !Config.analyzeTypes then
         typeDeclarations
         |> List.iter (fun (typeDeclaration : Typedtree.type_declaration) ->
-               DeadType.addDeclaration ~typeId:typeDeclaration.typ_id
-                 ~typeKind:typeDeclaration.typ_type.type_kind)
+               let manifest =
+                 match
+                   ( typeDeclaration.typ_type.type_manifest,
+                     typeDeclaration.typ_type.type_kind )
+                 with
+                 | Some manifestType, (Type_variant _ | Type_record _) -> (
+                   match Compat.get_desc manifestType with
+                   | Tconstr (path, _, _) ->
+                     !identResolutions.typeDeclOfPath path
+                   | _ -> None)
+                 | _ -> None
+               in
+               DeadType.addDeclaration ?manifest
+                 ~typeId:typeDeclaration.typ_id
+                 ~typeKind:typeDeclaration.typ_type.type_kind ())
     | Tstr_include {incl_mod; incl_type} -> (
       registerUnpackedExports incl_type incl_mod;
       (* [include M] with [M] a functor parameter: the included identifiers
@@ -2613,10 +2771,29 @@ let processValueDependency
                  }
                in
                addValueReference ~addFileReference:true ~locFrom:locRef ~locTo)
-    | Some _ ->
+    | Some fromDecl ->
       let addFileReference = fileIsImplementationOf fnTo fnFrom in
       addValueReference ~addFileReference ~locFrom ~locTo;
-      DeadOptionalArgs.addFunctionReference ~locFrom ~locTo
+      let hidesLabels =
+        (* [val f : fn] with [type fn = ?x:int -> unit]: the interface item
+           shows no optional parameters, the implementation has them. *)
+        match (fromDecl, PosHash.find_opt decls posTo) with
+        | {declKind = Value rFrom}, Some {declKind = Value rTo} ->
+          OptionalArgs.isEmpty rFrom.optionalArgs
+          && not (OptionalArgs.isEmpty rTo.optionalArgs)
+        | _ -> false
+      in
+      if DeadOptionalArgs.isAlias posTo || hidesLabels then (
+        (* The interface declares an alias ([let g = f] in the
+           implementation), or names the type with an abbreviation: it has no
+           optional parameters of its own, and calls through it are calls of
+           the implementation. *)
+        DeadOptionalArgs.addAlias ~application:None ~supplied:([], [])
+          ~posFrom ~posTo;
+        match fromDecl with
+        | {declKind = Value r} -> r.optionalArgs <- OptionalArgs.empty ()
+        | _ -> ())
+      else DeadOptionalArgs.addFunctionReference ~locFrom ~locTo
 
 (* Value dependencies are processed once all files have been scanned, so that
    declarations and references from every file are known. *)
@@ -2726,8 +2903,8 @@ let forceDelayedItems () =
         with
         | [] ->
           calls
-          |> List.iter (fun {call; callTo} ->
-                 DeadOptionalArgs.addCallToImplementation
+          |> List.iter (fun {call; callTo; callFrom} ->
+                 DeadOptionalArgs.addCallToImplementation ~locFrom:callFrom
                    ~posTo:callTo.loc_start call)
         | locs ->
           locs
@@ -2744,7 +2921,7 @@ let forceDelayedItems () =
                           locTo;
                         let locTo = Option.value locTo ~default:callTo in
                         DeadOptionalArgs.addCallToImplementation
-                          ~posTo:locTo.loc_start call))
+                          ~locFrom:callFrom ~posTo:locTo.loc_start call))
       else ())
     parameterCalls;
   Hashtbl.reset parameterCalls;

@@ -32,7 +32,28 @@ module TypeDependencies = struct
     if (not ghost1) && (not ghost2) && posTo <> posFrom then
       addTypeReference ~posTo ~posFrom
 
-  let forceDelayedItems () = List.iter processTypeDependency !delayedItems
+  (* Links between a re-export and the type it re-exports. A use counts only
+     from a declaration of the analysis: the original may be outside it (the
+     standard library, an excluded file), where a link would make the
+     re-export look used. *)
+  let manifestItems = ref []
+
+  let addManifest loc1 loc2 = manifestItems := (loc1, loc2) :: !manifestItems
+
+  (* Runs after each file: a link waits until the files of both ends have
+     been scanned. *)
+  let forceDelayedItems () =
+    List.iter processTypeDependency !delayedItems;
+    manifestItems :=
+      !manifestItems
+      |> List.filter (fun ((locTo : Location.t), (locFrom : Location.t)) ->
+             if
+               PosHash.mem decls locTo.loc_start
+               && PosHash.mem decls locFrom.loc_start
+             then (
+               processTypeDependency (locTo, locFrom);
+               false)
+             else true)
 end
 
 let extendTypeDependencies (loc1 : Location.t) (loc2 : Location.t) =
@@ -83,12 +104,48 @@ let addTypeDependenciesInnerModule ~pathToType ~loc ~typeLabelName =
       extendTypeDependencies loc2 loc
   | None -> TypeLabels.add path loc
 
-let addDeclaration ~(typeId : Ident.t)
-    ~(typeKind : ('a, 'b) Compat.type_kind) =
+(* A re-export [type t = M.t = A | B] declares the same constructors and
+   labels as [M.t]: constructing or reading through either name uses both. *)
+let addManifestDependencies ~(typeKind : ('a, 'b) Compat.type_kind)
+    ~(original : Types.type_declaration) =
+  let link pairs originalPairs =
+    pairs
+    |> List.iter (fun (name, loc) ->
+           match List.assoc_opt name originalPairs with
+           | Some originalLoc when loc.Location.loc_start <> originalLoc.Location.loc_start ->
+             TypeDependencies.addManifest loc originalLoc;
+             TypeDependencies.addManifest originalLoc loc
+           | _ -> ())
+  in
+  let labels = function
+    | Types.Type_record (l, _) ->
+      l |> List.map (fun {Types.ld_id; ld_loc} -> (Ident.name ld_id, ld_loc))
+    | _ -> []
+  in
+  let constructors (kind : ('a, 'b) Compat.type_kind) =
+    match kind with
+    | Type_variant _ ->
+      Compat.getTypeVariant kind
+      |> List.map (fun {Types.cd_id; cd_loc} -> (Ident.name cd_id, cd_loc))
+    | _ -> []
+  in
+  link (labels typeKind) (labels original.type_kind);
+  link (constructors typeKind) (constructors original.type_kind)
+
+(* [path] is the path of the enclosing module, when it is not the current
+   one of the traversal: a submodule of a signature. *)
+let addDeclaration ?manifest ?path ~(typeId : Ident.t)
+    ~(typeKind : ('a, 'b) Compat.type_kind) () =
+  (match manifest with
+  | Some original -> addManifestDependencies ~typeKind ~original
+  | None -> ());
   let currentModulePath = ModulePath.getCurrent () in
   let pathToType =
     (typeId |> Ident.name |> Name.create)
-    :: (currentModulePath.path @ [!Common.currentModuleName])
+    ::
+    (match path with
+    | Some path -> path
+    | None -> currentModulePath.path @ [!Common.currentModuleName])
   in
   let processTypeLabel ?(posAdjustment = Nothing) typeLabelName ~declKind
       ~(loc : Location.t) =

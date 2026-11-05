@@ -382,6 +382,26 @@ let cmtFilesByUnit : (string, string list) Hashtbl.t = Hashtbl.create 256
 let compilationContexts : (string, string) Hashtbl.t = Hashtbl.create 256
 let compilationContextsReady = ref false
 
+(* Each .cmt/.cmti is parsed at most once: lookups from many consumers (one
+   cache entry per consumer directory) share the parsed value. *)
+let cmtCache : (string, Cmt_format.cmt_infos option) Hashtbl.t =
+  Hashtbl.create 256
+
+let readCmt path =
+  match Hashtbl.find_opt cmtCache path with
+  | Some infos -> infos
+  | None ->
+    let infos = try Some (Cmt_format.read_cmt path) with _ -> None in
+    Hashtbl.add cmtCache path infos;
+    infos
+
+(* A .cmt that may not be analyzed (e.g. the byte copy of a unit whose
+   native copy is): reuse a parsed value, but do not keep a new one. *)
+let peekCmt path =
+  match Hashtbl.find_opt cmtCache path with
+  | Some infos -> infos
+  | None -> ( try Some (Cmt_format.read_cmt path) with _ -> None)
+
 let unitNameOfCmtFile path =
   path |> Filename.basename |> Filename.remove_extension
   |> String.capitalize_ascii
@@ -417,6 +437,23 @@ let selectUnitFilesByDigest ~interfaceDigest ~allowUnmatched digest files =
     | [] when allowUnmatched -> files
     | _ -> List.filter (fun path -> List.mem (stem path) matchingStems) files
 
+(* On case-insensitive file systems (macOS, Windows) [Sys.file_exists] also
+   accepts a differently capitalized name, which would list one file under two
+   paths and make the unit look ambiguous. Require an exact directory entry. *)
+let directoryEntries : (string, string array) Hashtbl.t = Hashtbl.create 64
+
+let fileExistsExactly path =
+  let dir = Filename.dirname path in
+  let entries =
+    match Hashtbl.find_opt directoryEntries dir with
+    | Some entries -> entries
+    | None ->
+      let entries = try Sys.readdir dir with Sys_error _ -> [||] in
+      Hashtbl.add directoryEntries dir entries;
+      entries
+  in
+  Array.mem (Filename.basename path) entries
+
 let candidateFilesForUnit ~currentCmtFile comp_unit =
   let dir = Filename.dirname currentCmtFile in
   let indexed =
@@ -436,7 +473,9 @@ let candidateFilesForUnit ~currentCmtFile comp_unit =
                     Filename.concat dir (String.uncapitalize_ascii comp_unit ^ ext);
                   ]))
   in
-  (indexed @ siblings) |> List.filter Sys.file_exists |> List.sort_uniq compare
+  (indexed |> List.filter Sys.file_exists)
+  @ (siblings |> List.filter fileExistsExactly)
+  |> List.sort_uniq compare
 
 (* Prefer local candidates within each artifact kind. An interface beside
    the consumer must not hide its implementation in another directory, or
@@ -469,14 +508,12 @@ let compilationContext ~cmtFilePath infos =
       | Some entry -> entry
       | None ->
         let entry =
-          try
-            let info = Cmt_format.read_cmt path in
-            Some
-              ( sourceContext info,
-                info.cmt_modname,
-                info.cmt_imports,
-                interfaceDigest info )
-          with _ -> None
+          peekCmt path
+          |> Option.map (fun (info : Cmt_format.cmt_infos) ->
+                 ( sourceContext info,
+                   info.cmt_modname,
+                   info.cmt_imports,
+                   interfaceDigest info ))
         in
         Hashtbl.add metadata path entry;
         entry
@@ -604,7 +641,7 @@ let selectUnitAnnotations ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
   | Some loaded -> loaded
   | None ->
     let read path =
-      try Some (path, Cmt_format.read_cmt path) with _ -> None
+      Option.map (fun infos -> (path, infos)) (readCmt path)
     in
     let loaded = files |> List.filter_map read in
     let interfaceDigest path =
@@ -650,9 +687,47 @@ let selectUnitAnnotations ~currentCmtFile ~(imports : Misc.crcs) comp_unit =
           (fun (path, _) -> Filename.check_suffix path ".cmt")
           loaded
       in
-      match (implementations, interfaces) with
-      | _ :: _ :: _, _ | _, _ :: _ :: _ -> []
-      | _ -> loaded
+      (* Copies compiled from one source in different dependency contexts
+         (e.g. one library built for two dune profiles) declare everything at
+         the same positions. Use the copy strictly closest to the consumer:
+         the one in its own build tree. Ties and distinct sources stay
+         ambiguous: the consumer's actual dependency is unknown. *)
+      let components path =
+        Filename.dirname path
+        |> String.map (fun c -> if c = '\\' then '/' else c)
+        |> String.split_on_char '/'
+      in
+      let consumer = components currentCmtFile in
+      let commonPrefix path =
+        let rec go n a b =
+          match (a, b) with
+          | x :: a, y :: b when x = y -> go (n + 1) a b
+          | _ -> n
+        in
+        go 0 (components path) consumer
+      in
+      let resolve = function
+        | ([] | [_]) as group -> Some group
+        | ((_, (first : Cmt_format.cmt_infos)) :: _) as group ->
+          let source (infos : Cmt_format.cmt_infos) =
+            (infos.cmt_sourcefile, infos.cmt_source_digest)
+          in
+          if
+            first.cmt_sourcefile <> None
+            && List.for_all (fun (_, infos) -> source infos = source first) group
+          then
+            match
+              group
+              |> List.map (fun ((path, _) as entry) -> (commonPrefix path, entry))
+              |> List.sort (fun (a, _) (b, _) -> compare b a)
+            with
+            | (best, entry) :: (next, _) :: _ when best > next -> Some [entry]
+            | _ -> None
+          else None
+      in
+      match (resolve implementations, resolve interfaces) with
+      | Some implementations, Some interfaces -> implementations @ interfaces
+      | _ -> []
     in
     Hashtbl.replace unitAnnotationsCache cacheKey loaded;
     loaded
@@ -774,7 +849,7 @@ let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
   UidTbl.iter (UidTbl.replace own_uid_to_decl) cmt_infos.cmt_uid_to_decl;
   let read_cmt path =
     if Sys.file_exists path then
-      try Some (Cmt_format.read_cmt path) with _ -> None
+      readCmt path
     else None
   in
   (match read_cmt ((cmtFilePath |> Filename.remove_extension) ^ ".cmti") with
@@ -834,8 +909,9 @@ let extractValueDependencies ~cmtFilePath (cmt_infos : Cmt_format.cmt_infos) =
                       Filename.concat dir (String.uncapitalize_ascii comp_unit ^ ext);
                     ]))
     in
-    indexed @ siblings
-    |> List.filter (fun path -> path <> cmtFilePath && Sys.file_exists path)
+    (indexed |> List.filter Sys.file_exists)
+    @ (siblings |> List.filter fileExistsExactly)
+    |> List.filter (fun path -> path <> cmtFilePath)
     |> List.sort_uniq compare
   in
   let select_by_digest comp_unit files =
@@ -943,6 +1019,9 @@ type identResolutions = {
           [module type X = ...] declaration denotes *)
   moduleTypeOfPath : Path.t -> Types.module_type option;
       (** the module type a path denotes, in this unit's scope *)
+  typeDeclOfPath : Path.t -> Types.type_declaration option;
+      (** the declaration of the type a path denotes, in this unit's scope,
+          e.g. the original of a re-export [type t = M.t = A | B] *)
   shapeValueItems : moduleShape -> (string * Location.t) list;
       (** the values a module shape exports, with their implementations; a
           fallback when the module's signature cannot be expanded *)
@@ -979,6 +1058,7 @@ let emptyIdentResolutions =
     moduleDefKey = (fun _ _ -> None);
     moduleTypeOf = (fun _ _ -> None);
     moduleTypeOfPath = (fun _ -> None);
+    typeDeclOfPath = (fun _ -> None);
     shapeValueItems = (fun _ -> []);
     bindingOfPath = (fun _ -> None);
     headKeyOfPath = (fun _ -> None);
@@ -1178,6 +1258,7 @@ let rec makeResolver ~cmtFilePath ~context
   let selfRef = ref emptyIdentResolutions in
   let headKeyOfPathRef = ref (fun (_ : Path.t) -> (None : (definitionKey * int) option)) in
   let moduleTypeOfPathRef = ref (fun (_ : Path.t) -> (None : Types.module_type option)) in
+  let typeDeclOfPathRef = ref (fun (_ : Path.t) -> (None : Types.type_declaration option)) in
   let bindingOfUid =
     moduleBindingOfUid ~currentCmtFile:cmtFilePath ~imports ~local
   in
@@ -1397,6 +1478,7 @@ let rec makeResolver ~cmtFilePath ~context
           | None -> None)
         | None -> None);
     moduleTypeOfPath = (fun path -> !moduleTypeOfPathRef path);
+    typeDeclOfPath = (fun path -> !typeDeclOfPathRef path);
     shapeValueItems =
       (* Values at any depth of submodules; [visited] guards recursive
          shapes. Functor members have no values to reference. *)
@@ -1518,9 +1600,30 @@ let rec makeResolver ~cmtFilePath ~context
                  Ident.same mbId id
                | _ -> false)
            in
-           match (uid, implShape) with
-           | Some uid, Some impl -> findShapeByUid impl uid
-           | _ -> None)
+           let found =
+             match (uid, implShape) with
+             | Some uid, Some impl -> findShapeByUid impl uid
+             | _ -> None
+           in
+           match (found, uid) with
+           | Some _, _ -> found
+           | None, Some uid -> (
+             (* The shape of a module alias ([module Child = Target]) does
+                not carry the binding's uid: follow the aliased path. *)
+             let rec aliasTarget (expr : Typedtree.module_expr) =
+               match expr.mod_desc with
+               | Tmod_ident (target, _) -> Some target
+               | Tmod_constraint (inner, _, _, _) -> aliasTarget inner
+               | _ -> None
+             in
+             match Shape.Uid.Tbl.find_opt local uid with
+             | Some (Typedtree.Module_binding {mb_expr}) -> (
+               match aliasTarget mb_expr with
+               | Some target when not (Path.same target path) ->
+                 moduleShapeOfPath target
+               | _ -> None)
+             | _ -> None)
+           | None, None -> None)
          | Pdot (p, name) -> (
            match moduleShapeOfPath p with
            | Some shape -> Some (Shape.proj shape (Shape.Item.make name Module))
@@ -1632,6 +1735,33 @@ let rec makeResolver ~cmtFilePath ~context
        (* Aliases are followed until a signature is reached; the visited
           paths break cycles. *)
        moduleTypeOfPathRef := moduleTypeOfPath;
+       (* A type item of a module shape, or a type of the current unit by
+          identifier identity. *)
+       let typeDeclOfUid uid =
+         match declOfUid ~currentCmtFile:cmtFilePath ~imports ~local uid with
+         | Some (Typedtree.Type {typ_type}) -> Some typ_type
+         | _ -> None
+       in
+       (typeDeclOfPathRef :=
+          fun (path : Path.t) ->
+            match path with
+            | Pdot (p, name) -> (
+              match moduleShapeOfPath p with
+              | Some shape -> (
+                let item = Shape.proj shape (Shape.Item.make name Type) in
+                match Reduce.reduce_for_uid Env.empty item |> uidOfResult with
+                | Some uid -> typeDeclOfUid uid
+                | None -> None)
+              | None -> None)
+            | Pident id -> (
+              match
+                localUid (function
+                  | Typedtree.Type {typ_id} -> Ident.same typ_id id
+                  | _ -> false)
+              with
+              | Some uid -> typeDeclOfUid uid
+              | None -> None)
+            | _ -> None);
        let rec expand visited (moduleType : Types.module_type) =
          match moduleType with
          | Mty_ident path when not (List.exists (Path.same path) visited) -> (

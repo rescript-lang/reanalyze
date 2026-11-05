@@ -178,6 +178,147 @@ function runRegressionTests() {
     assertNotIncludes(output, "Live Value +IncludeSigMli.+hash");
   }
 
+  // A type re-export (type t = M.t = A | B) shares its constructors and
+  // labels with the original: constructing or reading through either name
+  // keeps both declarations live, also when M is a local module alias. The
+  // original is found through shapes.
+  if (ocamlVersionAtLeast(5, 3)) {
+    for (const unit of ["Type_reexport", "Type_reexport_orig"]) {
+      for (const name of [
+        "change.Built_through_reexport", "change.Built_directly",
+      ]) {
+        assertIncludes(output, `Live VariantCase +${unit}.${name}:`);
+        assertNotIncludes(output, `Dead VariantCase +${unit}.${name}:`);
+      }
+    }
+    for (const unit of ["Type_reexport", "Type_reexport_orig", "Type_reexport_alias"]) {
+      for (const name of [
+        "job.read_through_original", "job.read_through_reexport",
+        "job.read_through_alias",
+      ]) {
+        assertIncludes(output, `Live RecordLabel +${unit}.${name}:`);
+        assertNotIncludes(output, `Dead RecordLabel +${unit}.${name}:`);
+      }
+      assertIncludes(output, `Dead RecordLabel +${unit}.job.never_read:`);
+    }
+    for (const unit of ["Type_reexport", "Type_reexport_orig"]) {
+      assertIncludes(output, `Dead VariantCase +${unit}.change.Never_built:`);
+    }
+  }
+
+  // Types of a submodule of an interface keep their module path, so they
+  // are matched with their implementation.
+  for (const prefix of ["", "+"]) {
+    for (const name of ["setting.Auto", "setting.Never"]) {
+      assertIncludes(output, `Live VariantCase ${prefix}Nested_sig_type.Color.${name}:`);
+      assertNotIncludes(output, `Dead VariantCase ${prefix}Nested_sig_type.Color.${name}:`);
+    }
+    assertIncludes(output, `Live RecordLabel ${prefix}Nested_sig_type.Color.styles.error:`);
+    assertNotIncludes(output, `Dead RecordLabel ${prefix}Nested_sig_type.Color.styles.error:`);
+    assertIncludes(output,
+      `Dead VariantCase ${prefix}Nested_sig_type.Color.setting.Unused_setting:`);
+    assertIncludes(output,
+      `Dead RecordLabel ${prefix}Nested_sig_type.Color.styles.unused_style:`);
+  }
+
+  // Aliases and partial applications of functions with optional parameters
+  // do not own them; functions defined here still do.
+  assertNotIncludes(output, "optional argument pp_sep of function +print_list");
+  assertNotIncludes(output, "optional argument pp_sep of function +print_ints");
+  assertIncludes(output,
+    "optional argument unused_opt of function +local_function is never used");
+  assertIncludes(output,
+    "optional argument through_alias of function +base is always supplied (1 calls)");
+  assertIncludes(output,
+    "optional argument never_through_alias of function +base_never is never used");
+  // An alias exported through an interface has no optional parameters of its
+  // own; calls through it are calls of the aliased function.
+  assertNotIncludes(output, "of function +iface_alias ");
+  assertNotIncludes(output, "of function +iface_alias_never ");
+  assertIncludes(output,
+    "optional argument x of function +iface_target is always supplied");
+  assertIncludes(output,
+    "optional argument y of function +iface_target_never is never used");
+  // ... also when it aliases a value of a module constrained by a signature.
+  assertNotIncludes(output, "of function +sig_alias ");
+  assertNotIncludes(output, "optional argument x of function M.+sig_f is never used");
+  // A binding whose body is not syntactically a function still owns its
+  // optional parameters.
+  assertIncludes(output, "optional argument x of function +let_in_fun is never used");
+  assertIncludes(output, "optional argument x of function +if_fun is never used");
+  // A binding is an alias only for the optional parameters the applied
+  // function leaves (including those a partial application skips), not for
+  // ones that merely share a name.
+  assertIncludes(output, "optional argument x of function +wrap is never used");
+  assertIncludes(output,
+    "optional argument x of function +skipped is always supplied (1 calls)");
+  // A binding that is not an alias owns no optional parameters, so calls
+  // through it never make one "always supplied"; the function among its
+  // arguments may receive them.
+  assertNotIncludes(output, "of function +wrapped_g ");
+  assertNotIncludes(output, "of function +wrapped ");
+  assertNotIncludes(output, "of function +via_lambda ");
+  assertNotIncludes(output, "of function +lambda_applied ");
+  assertIncludes(output, "optional argument z of function +unrelated is never used");
+  assertNotIncludes(output, "of function +picked_from ");
+  // Calls through a partial application pass what it applies; the
+  // application itself is a call only when nobody calls through it.
+  assertIncludes(output,
+    "optional argument x of function +partial_x is always supplied (2 calls)");
+  assertNotIncludes(output, "optional argument y of function +partial_x ");
+  assertNotIncludes(output, "of function +partial_xp ");
+  assertIncludes(output,
+    "optional argument x of function +uncalled is always supplied (1 calls)");
+  assertIncludes(output,
+    "optional argument x of function Sig_partial_m.+sf is always supplied (1 calls)");
+  assertNotIncludes(output, "optional argument x of function Sig_partial_m.+sf is never used");
+  assertIncludes(output,
+    "optional argument x of function +chain is always supplied (1 calls)");
+  assertIncludes(output,
+    "optional argument y of function +chain is always supplied (1 calls)");
+  assertIncludes(output, "optional argument z of function +chain is never used");
+  assertIncludes(output,
+    "optional argument y of function +piped_h is always supplied (1 calls)");
+  assertNotIncludes(output, "optional argument y of function +piped_h is never used");
+  assertIncludes(output,
+    "optional argument y of function +pipe_f is always supplied (1 calls)");
+  assertIncludes(output,
+    "optional argument x of function +pipe_f is always supplied (1 calls)");
+  assertNotIncludes(output, "of function +pipe_p ");
+  // Labels hidden by an abbreviation: a constrained alias, and an interface
+  // naming the type of a function with optional parameters.
+  assertNotIncludes(output, "optional argument x of function +plain ");
+  assertNotIncludes(output, "of function +plain_g ");
+  assertNotIncludes(output, "optional argument x of function +abbrev is never used");
+  assertIncludes(output,
+    "optional argument x of function +abbrev is always supplied (1 calls)");
+  assertIncludes(output,
+    "optional argument x of function +abbrev_never is never used");
+  // ... also through a further alias, whose type shows no labels either.
+  assertIncludes(output,
+    "optional argument x of function +doubly is always supplied (1 calls)");
+  assertNotIncludes(output, "optional argument x of function +doubly is never used");
+  assertIncludes(output,
+    "optional argument x of function +abbrev_aliased is always supplied (1 calls)");
+  assertNotIncludes(output, "optional argument x of function +abbrev_aliased is never used");
+  // A function passed to a parameter of a named function type keeps its
+  // optional parameters.
+  assertNotIncludes(output, "optional argument loc of function +named_lookup");
+  // Passing a function to a parameter of type 'a (ignore, ref) supplies
+  // nothing.
+  assertIncludes(output, "optional argument x of function +ignored is never used");
+  assertIncludes(output, "optional argument y of function +in_ref is never used");
+  // A re-export of a type outside the analysis does not make its
+  // constructors live.
+  assertIncludes(output, "Dead VariantCase +Type_reexport_stdlib.node.Cons:");
+
+  // A function passed as an argument keeps its optional parameters for the
+  // callee to supply; one only called without them is still reported.
+  assertNotIncludes(output, "optional argument loc of function +local_lookup");
+  assertNotIncludes(output, "optional argument loc of function +lookup ");
+  assertIncludes(output,
+    "optional argument loc of function +never_passed is never used");
+
   // A call through one functor instance must never mark the used
   // implementation dead.
   assertIncludes(output, "Live Value +Shared_signature_used.Make.+f");
@@ -1275,6 +1416,7 @@ function main() {
     runRegressionTests();
     runExceptionAliasMissingProviderTest();
     require("./test_exception_identity")(reanalyzeFile);
+    require("./test_build_trees")(reanalyzeFile);
     runDuplicateLayoutTest();
     runByteNativeDuplicateTest();
     runDuplicateContextTest();
